@@ -1,0 +1,998 @@
+<!DOCTYPE html>
+<html lang="pt-BR" class="dark">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>CloudWatch Mobile - Multi-Cloud Monitor</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        obsidian: '#050811',
+                        surface: {
+                            base: '#0A0F1D',
+                            card: '#0F172A',
+                            border: '#1E293B',
+                            hover: '#172554'
+                        },
+                        neon: {
+                            blue: '#0066FF',
+                            cyan: '#00F2FE',
+                            electric: '#38BDF8',
+                            glow: 'rgba(0, 102, 255, 0.35)'
+                        },
+                        status: {
+                            healthy: '#10B981',
+                            warning: '#F59E0B',
+                            danger: '#EF4444'
+                        },
+                        provider: {
+                            oci: '#C74634',
+                            aws: '#FF9900',
+                            gcp: '#4285F4'
+                        }
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace']
+                    }
+                }
+            }
+        }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+        rel="stylesheet">
+    <style>
+        * {
+            -webkit-tap-highlight-color: transparent;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #030508;
+            color: #E2E8F0;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        /* App Container: Em celulares ocupa 100% da tela. No desktop, centraliza como app mobile */
+        .mobile-viewport {
+            width: 100%;
+            max-width: 420px;
+            height: 100vh;
+            max-height: 890px;
+            background: #070B14;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            overflow: hidden;
+            border-radius: 0px;
+            box-shadow: 0 25px 60px -15px rgba(0, 102, 255, 0.25), 0 0 0 1px rgba(56, 189, 248, 0.15);
+        }
+
+        @media (min-width: 640px) {
+            .mobile-viewport {
+                border-radius: 40px;
+                height: 860px;
+                margin: 20px 0;
+            }
+        }
+
+        /* Custom scrollbars */
+        ::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #0A0F1D;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #1E293B;
+            border-radius: 2px;
+        }
+
+        /* Laser scanner animation */
+        @keyframes scanLaser {
+            0% {
+                top: 10%;
+                opacity: 0.8;
+            }
+
+            50% {
+                top: 85%;
+                opacity: 1;
+            }
+
+            100% {
+                top: 10%;
+                opacity: 0.8;
+            }
+        }
+
+        .laser-line {
+            animation: scanLaser 2.2s infinite ease-in-out;
+        }
+
+        /* Glow effects */
+        .neon-border-glow {
+            box-shadow: 0 0 18px rgba(0, 102, 255, 0.35);
+        }
+
+        .cyan-glow {
+            box-shadow: 0 0 20px rgba(0, 242, 254, 0.4);
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="mobile-viewport select-none">
+
+        <!-- STATUS BAR NATIVO DO CELULAR -->
+        <div
+            class="h-11 pt-2.5 px-6 flex items-center justify-between text-xs font-semibold text-slate-400 z-50 bg-[#070B14]/90 backdrop-blur shrink-0">
+            <span id="phone-clock" class="font-mono text-slate-300 text-[11px] font-bold">19:35</span>
+            <div class="flex items-center gap-2">
+                <span class="text-[10px] text-cyan-400 font-mono font-bold tracking-wider">5G</span>
+                <svg class="w-3.5 h-3.5 text-cyan-400 inline" fill="currentColor" viewBox="0 0 24 24">
+                    <path
+                        d="M12 3c-4.97 0-9 4.03-9 9 0 2.12.74 4.07 1.97 5.61L4.35 19.4c-.39.39-.39 1.02 0 1.41.39.39 1.02.39 1.41 0l1.9-1.9C9.22 19.57 10.57 20 12 20c4.97 0 9-4.03 9-9s-4.03-9-9-9z" />
+                </svg>
+                <div class="w-5 h-2.5 border border-slate-400 rounded-sm p-0.5 flex items-center">
+                    <div class="h-full bg-cyan-400 rounded-2xs w-[85%]"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ÁREA PRINCIPAL ROLÁVEL -->
+        <div class="flex-1 overflow-y-auto relative pb-20" id="screens-container">
+
+            <!-- ============================================== -->
+            <!-- TELA 1: LOGIN COM IDENTIDADE AZUL & PRETA     -->
+            <!-- ============================================== -->
+            <section id="screen-login" class="min-h-full flex flex-col justify-between p-6 text-white">
+                <div class="pt-6 flex flex-col items-center text-center">
+
+                    <!-- LOGO ÚNICA: HEXÁGONO TELEMETRIA CYBERPULSE AZUL & CIANO -->
+                    <div class="relative w-24 h-24 mb-4 flex items-center justify-center">
+                        <div
+                            class="absolute inset-0 bg-gradient-to-tr from-blue-600 via-cyan-400 to-blue-500 rounded-3xl blur-md opacity-40 animate-pulse">
+                        </div>
+                        <div
+                            class="relative w-20 h-20 rounded-2xl bg-gradient-to-b from-[#0F1E36] to-[#070D1A] border-2 border-cyan-400/40 p-1 flex items-center justify-center neon-border-glow">
+                            <svg class="w-12 h-12" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <!-- Hexágono externo de monitoramento -->
+                                <polygon points="24,4 42,14 42,34 24,44 6,34 6,14" stroke="#38BDF8" stroke-width="2.2"
+                                    stroke-linecap="round" stroke-linejoin="round" fill="rgba(0, 102, 255, 0.15)" />
+                                <!-- Anel de pulso interno -->
+                                <circle cx="24" cy="24" r="10" stroke="#00F2FE" stroke-width="1.8"
+                                    stroke-dasharray="3 3" />
+                                <!-- Linha de telemetria / onda de saúde -->
+                                <path d="M12 24H18L21 16L27 32L30 24H36" stroke="#FFFFFF" stroke-width="2.4"
+                                    stroke-linecap="round" stroke-linejoin="round" />
+                                <!-- Ponto de status central -->
+                                <circle cx="24" cy="24" r="2.5" fill="#00F2FE" />
+                            </svg>
+                        </div>
+                    </div>
+
+                    <h1 class="text-2xl font-black tracking-tight text-white flex items-center gap-1.5">
+                        Cloud<span
+                            class="text-transparent bg-clip-text bg-gradient-to-r from-blue-400 via-cyan-300 to-sky-400">Watch</span>
+                        <span
+                            class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 border border-blue-500/30">MOBILE</span>
+                    </h1>
+                    <p class="text-xs text-slate-400 mt-1 font-medium">Painel Multi-Cloud: OCI • AWS • GCP</p>
+
+                    <!-- Seleção Rápida de Provedor -->
+                    <div
+                        class="flex items-center gap-1.5 mt-5 bg-[#0B1220] p-1 rounded-xl border border-slate-800/80 w-full justify-center">
+                        <button onclick="selectProviderTab('oci')" id="btn-prov-oci"
+                            class="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold text-white bg-gradient-to-r from-red-600/80 to-amber-600/80 shadow border border-red-500/40 flex items-center justify-center gap-1">
+                            <span class="w-1.5 h-1.5 rounded-full bg-red-400"></span> Oracle OCI
+                        </button>
+                        <button onclick="selectProviderTab('aws')" id="btn-prov-aws"
+                            class="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold text-slate-400 hover:text-white flex items-center justify-center gap-1">
+                            <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span> AWS
+                        </button>
+                        <button onclick="selectProviderTab('gcp')" id="btn-prov-gcp"
+                            class="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold text-slate-400 hover:text-white flex items-center justify-center gap-1">
+                            <span class="w-1.5 h-1.5 rounded-full bg-blue-400"></span> GCP
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Formulário de Login -->
+                <div class="space-y-3.5 my-5">
+                    <div>
+                        <label
+                            class="text-[11px] text-slate-400 block mb-1 font-mono flex items-center justify-between">
+                            <span>OCID / ACCESS KEY ID</span>
+                            <span class="text-[10px] text-cyan-400">seguro</span>
+                        </label>
+                        <div class="relative">
+                            <input type="text" id="input-key" value="ocid1.user.oc1..aaaaaaaax74n9b"
+                                class="w-full bg-[#0B1325] border border-slate-700/80 focus:border-cyan-400 text-xs px-3.5 py-2.5 rounded-xl text-white outline-none font-mono transition">
+                            <span class="absolute right-3 top-2.5 text-xs text-slate-500">🔑</span>
+                        </div>
+                    </div>
+
+                    <div>
+                        <label
+                            class="text-[11px] text-slate-400 block mb-1 font-mono flex items-center justify-between">
+                            <span>PRIVATE KEY / SECRET TOKEN</span>
+                            <span class="text-[10px] text-slate-500">AES-256</span>
+                        </label>
+                        <div class="relative">
+                            <input type="password" value="••••••••••••••••••••"
+                                class="w-full bg-[#0B1325] border border-slate-700/80 focus:border-cyan-400 text-xs px-3.5 py-2.5 rounded-xl text-white outline-none font-mono transition">
+                            <span class="absolute right-3 top-2.5 text-xs text-slate-500">🔒</span>
+                        </div>
+                    </div>
+
+                    <!-- Modo Simulação Faker (Ativado por padrão para o professor testar) -->
+                    <div
+                        class="flex items-center justify-between p-3 rounded-xl bg-blue-950/30 border border-blue-500/30">
+                        <div class="flex items-center gap-2">
+                            <span class="w-2 h-2 rounded-full bg-cyan-400 animate-ping"></span>
+                            <div>
+                                <span class="text-xs font-bold text-white block">Modo Simulação (Faker)</span>
+                                <span class="text-[10px] text-slate-400">Gera métricas sem custos de nuvem</span>
+                            </div>
+                        </div>
+                        <label class="relative inline-flex items-center cursor-pointer">
+                            <input type="checkbox" checked id="toggle-sim-login" class="sr-only peer">
+                            <div
+                                class="w-9 h-5 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-600">
+                            </div>
+                        </label>
+                    </div>
+
+                    <!-- Botão Principal de Login -->
+                    <button onclick="loginApp()"
+                        class="w-full mt-2 bg-gradient-to-r from-blue-600 via-blue-500 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white font-bold text-sm py-3 rounded-xl shadow-lg shadow-blue-600/30 transition flex items-center justify-center gap-2 active:scale-[0.98]">
+                        <span>Conectar ao Dashboard</span>
+                        <svg class="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5"
+                                d="M14 5l7 7m0 0l-7 7m7-7H3" />
+                        </svg>
+                    </button>
+
+                    <!-- Divisor -->
+                    <div class="flex items-center gap-2 my-2">
+                        <div class="h-px bg-slate-800 flex-1"></div>
+                        <span class="text-[10px] text-slate-500 font-mono uppercase">Sensores de Hardware</span>
+                        <div class="h-px bg-slate-800 flex-1"></div>
+                    </div>
+
+                    <!-- Botões de Hardware: Câmera QR Code e Biometria -->
+                    <div class="grid grid-cols-2 gap-2.5">
+                        <button onclick="openQrScannerModal()"
+                            class="p-2.5 bg-[#0B1325] hover:bg-slate-800 border border-slate-700/70 hover:border-cyan-400/60 rounded-xl flex items-center justify-center gap-2 text-xs text-slate-200 transition active:scale-95">
+                            <svg class="w-4 h-4 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
+                            </svg>
+                            <span>Escanear QR</span>
+                        </button>
+
+                        <button onclick="triggerBiometrics()"
+                            class="p-2.5 bg-[#0B1325] hover:bg-slate-800 border border-slate-700/70 hover:border-blue-400/60 rounded-xl flex items-center justify-center gap-2 text-xs text-slate-200 transition active:scale-95">
+                            <svg class="w-4 h-4 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M12 11c0 3.517-1.009 6.799-2.753 9.571m-3.44-2.04l.054-.09A13.916 13.916 0 008 11a4 4 0 118 0c0 1.017-.07 2.019-.203 3m-2.118 6.844A21.88 21.88 0 0015.171 17m3.839 1.132c.645-2.266.99-4.659.99-7.132A8 8 0 004.07 7.07" />
+                            </svg>
+                            <span>Biometria</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Rodapé com identificação acadêmica -->
+                <div class="text-center pb-2 pt-2 border-t border-slate-900">
+                    <p class="text-[10px] text-slate-400">João Gabriel • 4DSM • FATEC-SJC</p>
+                </div>
+            </section>
+
+            <!-- ============================================== -->
+            <!-- TELA 2: DASHBOARD PRINCIPAL (SEMÁFORO DE SAÚDE)-->
+            <!-- ============================================== -->
+            <section id="screen-dashboard" class="hidden min-h-full text-slate-100">
+
+                <!-- Topo Curvo Tecnológico em Deep Obsidian & Blue Glow -->
+                <div
+                    class="bg-gradient-to-b from-[#091122] via-[#080E1B] to-[#070B14] border-b border-blue-950 px-5 pt-3 pb-5 rounded-b-[32px] shadow-lg relative">
+                    <div class="flex items-center justify-between text-xs mb-2.5">
+                        <span
+                            class="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-blue-950/80 border border-cyan-500/30 text-[10px] text-cyan-300 font-mono">
+                            <span class="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping"></span>
+                            sa-saopaulo-1 (OCI / AWS)
+                        </span>
+                        <button onclick="setScreen('login')"
+                            class="text-slate-400 hover:text-white text-xs flex items-center gap-1">
+                            <span>Sair</span>
+                            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                            </svg>
+                        </button>
+                    </div>
+
+                    <div class="flex items-center justify-between mt-2">
+                        <div>
+                            <span class="text-[10px] text-slate-400 uppercase tracking-wider font-semibold block">SLA
+                                Médio de Uptime</span>
+                            <h2 class="text-3xl font-black text-white tracking-tight flex items-baseline gap-1">
+                                99.94%
+                                <span class="text-xs font-semibold text-emerald-400 font-mono">▲ +0.02%</span>
+                            </h2>
+                            <p class="text-[10px] text-slate-400 mt-0.5">Semáforo de Saúde Global Ativo</p>
+                        </div>
+
+                        <!-- Botão de Atualizar / Randomizar Faker -->
+                        <button onclick="randomizeData()"
+                            class="p-3 rounded-2xl bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/40 text-cyan-300 flex flex-col items-center justify-center transition active:scale-90">
+                            <svg class="w-5 h-5 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                            </svg>
+                            <span class="text-[8px] font-bold mt-0.5">FAKER</span>
+                        </button>
+                    </div>
+
+                    <!-- Seletor de Período Temporal -->
+                    <div
+                        class="flex justify-between items-center bg-[#0C152B]/80 rounded-xl p-1 mt-4 border border-slate-800">
+                        <button onclick="selectTimeRange(this)"
+                            class="flex-1 py-1 rounded-lg text-[10px] font-bold text-slate-400 hover:text-white">1h</button>
+                        <button onclick="selectTimeRange(this)"
+                            class="flex-1 py-1 rounded-lg text-[10px] font-bold text-slate-400 hover:text-white">6h</button>
+                        <button onclick="selectTimeRange(this)"
+                            class="flex-1 py-1 rounded-lg text-[10px] font-bold text-white bg-blue-600 shadow">24h</button>
+                        <button onclick="selectTimeRange(this)"
+                            class="flex-1 py-1 rounded-lg text-[10px] font-bold text-slate-400 hover:text-white">7d</button>
+                        <button onclick="selectTimeRange(this)"
+                            class="flex-1 py-1 rounded-lg text-[10px] font-bold text-slate-400 hover:text-white">30d</button>
+                    </div>
+                </div>
+
+                <!-- Filtro por Provedor (Oracle OCI, AWS, GCP) -->
+                <div class="px-4 mt-3 flex items-center gap-1.5 overflow-x-auto pb-1">
+                    <button onclick="filterResources('ALL', this)"
+                        class="px-3 py-1 rounded-full text-[10px] font-bold bg-cyan-500 text-black shadow-sm shrink-0">
+                        Todos (6)
+                    </button>
+                    <button onclick="filterResources('OCI', this)"
+                        class="px-3 py-1 rounded-full text-[10px] font-bold bg-[#0D1527] text-slate-300 hover:text-white border border-slate-800 shrink-0 flex items-center gap-1">
+                        <span class="w-1.5 h-1.5 rounded-full bg-red-500"></span> Oracle OCI (2)
+                    </button>
+                    <button onclick="filterResources('AWS', this)"
+                        class="px-3 py-1 rounded-full text-[10px] font-bold bg-[#0D1527] text-slate-300 hover:text-white border border-slate-800 shrink-0 flex items-center gap-1">
+                        <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span> AWS (3)
+                    </button>
+                    <button onclick="filterResources('GCP', this)"
+                        class="px-3 py-1 rounded-full text-[10px] font-bold bg-[#0D1527] text-slate-300 hover:text-white border border-slate-800 shrink-0 flex items-center gap-1">
+                        <span class="w-1.5 h-1.5 rounded-full bg-blue-400"></span> GCP (1)
+                    </button>
+                </div>
+
+                <!-- KPIs de Topo -->
+                <div class="grid grid-cols-3 gap-2 px-4 mt-3">
+                    <div class="bg-[#0B1325] p-2.5 rounded-2xl border border-slate-800/80 text-center">
+                        <span class="text-[9px] font-semibold text-slate-400 block uppercase font-mono">Total</span>
+                        <span id="kpi-total" class="text-xl font-black text-white">24</span>
+                        <span class="text-[8px] text-cyan-400 block mt-0.5">Recursos</span>
+                    </div>
+                    <div class="bg-[#0B1325] p-2.5 rounded-2xl border border-emerald-950/60 text-center">
+                        <span class="text-[9px] font-semibold text-emerald-400 block uppercase font-mono">Normal</span>
+                        <span id="kpi-healthy" class="text-xl font-black text-emerald-400">21</span>
+                        <span class="text-[8px] text-emerald-500 block mt-0.5">87.5%</span>
+                    </div>
+                    <div class="bg-[#0B1325] p-2.5 rounded-2xl border border-rose-950/60 text-center">
+                        <span class="text-[9px] font-semibold text-rose-400 block uppercase font-mono">Crítico</span>
+                        <span id="kpi-alerts" class="text-xl font-black text-rose-500">3</span>
+                        <span class="text-[8px] text-rose-400 block mt-0.5">Atenção</span>
+                    </div>
+                </div>
+
+                <!-- LISTA DE RECURSOS MONITORADOS (COM OCI, AWS, GCP E SEMÁFORO) -->
+                <div class="px-4 mt-4">
+                    <div class="flex items-center justify-between mb-2">
+                        <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider font-mono">Infraestrutura
+                            em Nuvem</h3>
+                        <span class="text-[10px] text-cyan-400 font-semibold cursor-pointer"
+                            onclick="randomizeData()">Atualizado agora</span>
+                    </div>
+
+                    <div class="space-y-2.5" id="resource-cards-list">
+
+                        <!-- Recurso 1: Oracle OCI Compute (Crítico / Vermelho) -->
+                        <div data-provider="OCI"
+                            onclick="openDetail('OCI - VM.Standard.A1.Flex', 'ocid1.instance.oc1.sa-saopaulo-1.ab2x', 'OCI Compute', '96.4%', 'CRITICAL', 'Oracle Cloud • sa-saopaulo-1')"
+                            class="bg-[#0C1427] hover:bg-[#101A33] rounded-2xl p-3.5 border border-slate-800/90 relative overflow-hidden flex flex-col gap-2 cursor-pointer transition active:scale-[0.99]">
+                            <div class="absolute left-0 top-0 bottom-0 w-1.5 bg-rose-500"></div>
+                            <div class="flex items-start justify-between pl-2">
+                                <div>
+                                    <div class="flex items-center gap-1.5">
+                                        <span
+                                            class="text-[8px] font-bold px-1.5 py-0.2 rounded bg-red-950/80 text-red-400 border border-red-800/40">ORACLE
+                                            OCI</span>
+                                        <h4 class="text-xs font-bold text-white">OCI - VM.Standard.A1.Flex</h4>
+                                    </div>
+                                    <p class="text-[10px] text-slate-400 mt-0.5 font-mono">
+                                        ocid1.instance.oc1.sa-saopaulo-1 • 4 OCPU / 24GB</p>
+                                </div>
+                                <span class="w-3 h-3 rounded-full bg-rose-500 animate-ping"></span>
+                            </div>
+                            <div class="flex items-center gap-1.5 pl-2 flex-wrap text-[9px]">
+                                <span
+                                    class="bg-rose-950/80 text-rose-300 font-bold px-2 py-0.5 rounded-md border border-rose-800/40">CPU:
+                                    96.4%</span>
+                                <span class="bg-slate-800 text-slate-300 px-2 py-0.5 rounded-md">Mem: 88%</span>
+                                <span class="bg-slate-800 text-slate-300 px-2 py-0.5 rounded-md">sa-saopaulo-1</span>
+                            </div>
+                        </div>
+
+                        <!-- Recurso 2: AWS EC2 (Operacional / Verde) -->
+                        <div data-provider="AWS"
+                            onclick="openDetail('AWS - EC2 Web Cluster', 'i-09f83a2bc71', 'EC2 Instance', '32.1%', 'HEALTHY', 'AWS • us-east-1a')"
+                            class="bg-[#0C1427] hover:bg-[#101A33] rounded-2xl p-3.5 border border-slate-800/90 relative overflow-hidden flex flex-col gap-2 cursor-pointer transition active:scale-[0.99]">
+                            <div class="absolute left-0 top-0 bottom-0 w-1.5 bg-emerald-500"></div>
+                            <div class="flex items-start justify-between pl-2">
+                                <div>
+                                    <div class="flex items-center gap-1.5">
+                                        <span
+                                            class="text-[8px] font-bold px-1.5 py-0.2 rounded bg-amber-950/80 text-amber-400 border border-amber-800/40">AWS</span>
+                                        <h4 class="text-xs font-bold text-white">EC2 - Prod Web Cluster</h4>
+                                    </div>
+                                    <p class="text-[10px] text-slate-400 mt-0.5 font-mono">i-09f83a2bc71 • t3.xlarge</p>
+                                </div>
+                                <span class="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
+                            </div>
+                            <div class="flex items-center gap-1.5 pl-2 flex-wrap text-[9px]">
+                                <span
+                                    class="bg-emerald-950/80 text-emerald-300 font-bold px-2 py-0.5 rounded-md border border-emerald-800/40">CPU:
+                                    32.1%</span>
+                                <span class="bg-slate-800 text-slate-300 px-2 py-0.5 rounded-md">Latência: 14ms</span>
+                                <span class="bg-slate-800 text-slate-300 px-2 py-0.5 rounded-md">us-east-1</span>
+                            </div>
+                        </div>
+
+                        <!-- Recurso 3: Oracle Autonomous Database (Operacional / Verde) -->
+                        <div data-provider="OCI"
+                            onclick="openDetail('OCI - Autonomous DB (ATP)', 'ocid1.autonomousdatabase.oc1.sa-saopaulo-1', 'OCI ATP Database', '18.5%', 'HEALTHY', 'Oracle Cloud • sa-saopaulo-1')"
+                            class="bg-[#0C1427] hover:bg-[#101A33] rounded-2xl p-3.5 border border-slate-800/90 relative overflow-hidden flex flex-col gap-2 cursor-pointer transition active:scale-[0.99]">
+                            <div class="absolute left-0 top-0 bottom-0 w-1.5 bg-emerald-500"></div>
+                            <div class="flex items-start justify-between pl-2">
+                                <div>
+                                    <div class="flex items-center gap-1.5">
+                                        <span
+                                            class="text-[8px] font-bold px-1.5 py-0.2 rounded bg-red-950/80 text-red-400 border border-red-800/40">ORACLE
+                                            OCI</span>
+                                        <h4 class="text-xs font-bold text-white">OCI - Autonomous DB (ATP)</h4>
+                                    </div>
+                                    <p class="text-[10px] text-slate-400 mt-0.5 font-mono">atp-analytics-prod • OCI
+                                        Serverless</p>
+                                </div>
+                                <span class="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
+                            </div>
+                            <div class="flex items-center gap-1.5 pl-2 flex-wrap text-[9px]">
+                                <span
+                                    class="bg-emerald-950/80 text-emerald-300 font-bold px-2 py-0.5 rounded-md border border-emerald-800/40">Storage:
+                                    41%</span>
+                                <span class="bg-slate-800 text-slate-300 px-2 py-0.5 rounded-md">Sessões: 64</span>
+                                <span class="bg-slate-800 text-slate-300 px-2 py-0.5 rounded-md">AutoScaling: ON</span>
+                            </div>
+                        </div>
+
+                        <!-- Recurso 4: Google Cloud Run (Atenção / Amarelo) -->
+                        <div data-provider="GCP"
+                            onclick="openDetail('GCP - Cloud Run API Gateway', 'projects/cloud-app/locations/southamerica-east1/services/api', 'Cloud Run', '74.2%', 'WARNING', 'Google Cloud • southamerica-east1')"
+                            class="bg-[#0C1427] hover:bg-[#101A33] rounded-2xl p-3.5 border border-slate-800/90 relative overflow-hidden flex flex-col gap-2 cursor-pointer transition active:scale-[0.99]">
+                            <div class="absolute left-0 top-0 bottom-0 w-1.5 bg-amber-500"></div>
+                            <div class="flex items-start justify-between pl-2">
+                                <div>
+                                    <div class="flex items-center gap-1.5">
+                                        <span
+                                            class="text-[8px] font-bold px-1.5 py-0.2 rounded bg-blue-950/80 text-blue-400 border border-blue-800/40">GCP</span>
+                                        <h4 class="text-xs font-bold text-white">GCP - Cloud Run Gateway</h4>
+                                    </div>
+                                    <p class="text-[10px] text-slate-400 mt-0.5 font-mono">api-gateway-v2 •
+                                        southamerica-east1</p>
+                                </div>
+                                <span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
+                            </div>
+                            <div class="flex items-center gap-1.5 pl-2 flex-wrap text-[9px]">
+                                <span
+                                    class="bg-amber-950/80 text-amber-300 font-bold px-2 py-0.5 rounded-md border border-amber-800/40">Erros
+                                    5XX: 2.8%</span>
+                                <span class="bg-slate-800 text-slate-300 px-2 py-0.5 rounded-md">Instâncias: 12</span>
+                            </div>
+                        </div>
+
+                        <!-- Recurso 5: AWS Lambda (Operacional / Verde) -->
+                        <div data-provider="AWS"
+                            onclick="openDetail('AWS - Lambda Payment Handler', 'arn:aws:lambda:us-east-1:fn-payment', 'Lambda Function', '12.0%', 'HEALTHY', 'AWS • us-east-1')"
+                            class="bg-[#0C1427] hover:bg-[#101A33] rounded-2xl p-3.5 border border-slate-800/90 relative overflow-hidden flex flex-col gap-2 cursor-pointer transition active:scale-[0.99]">
+                            <div class="absolute left-0 top-0 bottom-0 w-1.5 bg-emerald-500"></div>
+                            <div class="flex items-start justify-between pl-2">
+                                <div>
+                                    <div class="flex items-center gap-1.5">
+                                        <span
+                                            class="text-[8px] font-bold px-1.5 py-0.2 rounded bg-amber-950/80 text-amber-400 border border-amber-800/40">AWS</span>
+                                        <h4 class="text-xs font-bold text-white">AWS - Lambda Payment Handler</h4>
+                                    </div>
+                                    <p class="text-[10px] text-slate-400 mt-0.5 font-mono">fn-payment-processor •
+                                        Serverless</p>
+                                </div>
+                                <span class="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
+                            </div>
+                            <div class="flex items-center gap-1.5 pl-2 flex-wrap text-[9px]">
+                                <span
+                                    class="bg-emerald-950/80 text-emerald-300 font-bold px-2 py-0.5 rounded-md border border-emerald-800/40">Duração:
+                                    85ms</span>
+                                <span class="bg-slate-800 text-slate-300 px-2 py-0.5 rounded-md">Invocations:
+                                    1.4k/min</span>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============================================== -->
+            <!-- TELA 3: DETALHES DE MÉTRICAS & LOGS INSIGHTS   -->
+            <!-- ============================================== -->
+            <section id="screen-detail" class="hidden min-h-full p-4 text-white">
+                <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+                    <button onclick="setScreen('dashboard')"
+                        class="text-slate-400 hover:text-cyan-300 flex items-center gap-1.5 text-xs font-semibold py-1">
+                        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+                        </svg>
+                        <span>Voltar</span>
+                    </button>
+                    <span id="detail-badge-status"
+                        class="text-[9px] bg-rose-500/20 text-rose-400 px-2.5 py-0.5 rounded-full border border-rose-500/40 font-mono font-bold">
+                        ALERTA ATIVO
+                    </span>
+                </div>
+
+                <div class="mt-3">
+                    <span id="detail-provider-badge"
+                        class="text-[9px] font-bold px-2 py-0.5 rounded bg-red-950/80 text-red-400 border border-red-800/40 font-mono">ORACLE
+                        OCI</span>
+                    <h2 id="detail-title" class="text-base font-black text-white mt-1">OCI - VM.Standard.A1.Flex</h2>
+                    <p id="detail-arn" class="text-[10px] text-slate-400 font-mono">
+                        ocid1.instance.oc1.sa-saopaulo-1.ab2x</p>
+                </div>
+
+                <!-- Gráfico Vetorial em Azul Elétrico Neon & Ciano -->
+                <div class="mt-4 bg-[#0B1325] border border-blue-900/50 rounded-2xl p-4 shadow-xl">
+                    <div class="flex justify-between items-center text-xs mb-1.5">
+                        <span class="text-slate-300 text-[11px] font-semibold flex items-center gap-1.5">
+                            <span class="w-2 h-2 rounded-full bg-cyan-400"></span>
+                            Uso de CPU em Tempo Real
+                        </span>
+                        <span class="text-rose-400 font-mono font-bold text-xs">Pico: 98.2%</span>
+                    </div>
+
+                    <svg class="w-full h-36" viewBox="0 0 320 130">
+                        <defs>
+                            <linearGradient id="neonBlueGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+                                <stop offset="0%" stop-color="#00F2FE" stop-opacity="0.45" />
+                                <stop offset="60%" stop-color="#0066FF" stop-opacity="0.15" />
+                                <stop offset="100%" stop-color="#0066FF" stop-opacity="0.0" />
+                            </linearGradient>
+                            <filter id="neonGlow" x="-20%" y="-20%" width="140%" height="140%">
+                                <feGaussianBlur stdDeviation="3" result="blur" />
+                                <feComposite in="SourceGraphic" in2="blur" operator="over" />
+                            </filter>
+                        </defs>
+                        <!-- Grid lines -->
+                        <line x1="0" y1="25" x2="320" y2="25" stroke="#1E293B" stroke-dasharray="3 3" />
+                        <line x1="0" y1="65" x2="320" y2="65" stroke="#1E293B" stroke-dasharray="3 3" />
+                        <line x1="0" y1="105" x2="320" y2="105" stroke="#1E293B" />
+
+                        <!-- Área com gradiente ciano e azul -->
+                        <polygon
+                            points="0,105 0,70 35,62 70,78 105,48 140,55 175,30 210,18 245,40 280,12 320,10 320,105"
+                            fill="url(#neonBlueGrad)" />
+
+                        <!-- Linha de Limite de Alerta (80%) -->
+                        <line x1="0" y1="35" x2="320" y2="35" stroke="#EF4444" stroke-dasharray="4 4"
+                            stroke-width="1.5" />
+                        <text x="250" y="31" fill="#EF4444" font-size="8" font-family="monospace">Limite 80%</text>
+
+                        <!-- Linha Neon Principal -->
+                        <polyline points="0,70 35,62 70,78 105,48 140,55 175,30 210,18 245,40 280,12 320,10" fill="none"
+                            stroke="#00F2FE" stroke-width="2.6" filter="url(#neonGlow)" />
+
+                        <!-- Ponto pulsante no final -->
+                        <circle cx="320" cy="10" r="4" fill="#00F2FE" />
+                    </svg>
+
+                    <div class="flex justify-between text-[9px] text-slate-500 font-mono mt-1 px-1">
+                        <span>18:00</span>
+                        <span>18:30</span>
+                        <span>19:00</span>
+                        <span>Agora</span>
+                    </div>
+                </div>
+
+                <!-- 4 Métricas Chave -->
+                <div class="grid grid-cols-2 gap-2 mt-3">
+                    <div class="bg-[#0B1325] p-2.5 rounded-xl border border-slate-800">
+                        <span class="text-[9px] text-slate-400 font-mono uppercase block">Consumo Atual</span>
+                        <span class="text-sm font-bold text-cyan-300 font-mono">96.4% CPU</span>
+                    </div>
+                    <div class="bg-[#0B1325] p-2.5 rounded-xl border border-slate-800">
+                        <span class="text-[9px] text-slate-400 font-mono uppercase block">Latência de I/O</span>
+                        <span class="text-sm font-bold text-white font-mono">4.2 ms</span>
+                    </div>
+                </div>
+
+                <!-- Console de Logs Centralizado -->
+                <div class="mt-4">
+                    <div class="flex items-center justify-between mb-1.5">
+                        <span class="text-[11px] font-bold text-slate-300 font-mono">Cloud Logs Insights</span>
+                        <span class="text-[9px] text-cyan-400 font-mono">Filtro: ERROR / WARN</span>
+                    </div>
+                    <div
+                        class="bg-[#050811] rounded-xl p-3 font-mono text-[9px] text-slate-300 border border-slate-800/80 space-y-1.5 max-h-32 overflow-y-auto">
+                        <p class="text-rose-400">[ERROR] 19:32:04 - OCI Compute kernel: high CPU spike on worker-thread
+                            #04.</p>
+                        <p class="text-amber-400">[WARN] 19:30:12 - OCI VNIC network throughput throttling triggered.
+                        </p>
+                        <p class="text-slate-400">[INFO] 19:28:00 - Healthcheck probe /status returned 200 OK.</p>
+                    </div>
+                </div>
+
+                <!-- Ações do Recurso -->
+                <div class="grid grid-cols-2 gap-2 mt-4">
+                    <button onclick="exportPdfReport()"
+                        class="py-2.5 px-3 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/40 text-cyan-300 text-xs font-bold transition flex items-center justify-center gap-1.5">
+                        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                        Exportar PDF
+                    </button>
+                    <button onclick="pinToDashboard()"
+                        class="py-2.5 px-3 rounded-xl bg-[#0B1325] hover:bg-slate-800 border border-slate-700 text-slate-200 text-xs font-bold transition flex items-center justify-center gap-1.5">
+                        <svg class="w-4 h-4 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
+                        </svg>
+                        Fixar no Início
+                    </button>
+                </div>
+            </section>
+
+        </div>
+
+        <!-- ============================================== -->
+        <!-- BOTTOM NAVIGATION BAR FIXA                     -->
+        <!-- ============================================== -->
+        <nav
+            class="absolute bottom-0 left-0 right-0 h-16 bg-[#070C18]/95 backdrop-blur border-t border-blue-950/70 px-4 flex items-center justify-between z-40">
+            <!-- Aba 1: Geral / Dashboard -->
+            <button onclick="setScreen('dashboard')" id="nav-btn-dash"
+                class="flex flex-col items-center gap-0.5 text-cyan-400 transition">
+                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+                </svg>
+                <span class="text-[9px] font-semibold">Geral</span>
+            </button>
+
+            <!-- Aba 2: Métricas -->
+            <button onclick="setScreen('detail')" id="nav-btn-metrics"
+                class="flex flex-col items-center gap-0.5 text-slate-400 hover:text-white transition">
+                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                </svg>
+                <span class="text-[9px] font-semibold">Métricas</span>
+            </button>
+
+            <!-- Botão Central Flutuante: Scanner de Câmera (QR Code) -->
+            <button onclick="openQrScannerModal()"
+                class="w-12 h-12 -mt-6 rounded-2xl bg-gradient-to-tr from-blue-600 to-cyan-400 text-white flex items-center justify-center shadow-lg shadow-blue-500/40 hover:scale-105 active:scale-95 transition border border-cyan-300/40">
+                <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2"
+                        d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
+                </svg>
+            </button>
+
+            <!-- Aba 4: Alertas -->
+            <button onclick="triggerAlertIncident()"
+                class="flex flex-col items-center gap-0.5 text-slate-400 hover:text-white transition relative">
+                <span class="absolute -top-1 right-2 w-2 h-2 rounded-full bg-rose-500"></span>
+                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+                </svg>
+                <span class="text-[9px] font-semibold">Alertas</span>
+            </button>
+
+            <!-- Aba 5: Conta / Login -->
+            <button onclick="setScreen('login')"
+                class="flex flex-col items-center gap-0.5 text-slate-400 hover:text-white transition">
+                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                </svg>
+                <span class="text-[9px] font-semibold">Conta</span>
+            </button>
+        </nav>
+
+        <!-- ============================================== -->
+        <!-- MODAL 1: SCANNER DE QR CODE (CÂMERA DO CELULAR)-->
+        <!-- ============================================== -->
+        <div id="modal-scanner" class="hidden absolute inset-0 bg-black/95 z-50 flex flex-col justify-between p-6">
+            <div class="flex items-center justify-between text-white">
+                <div class="flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-cyan-400 animate-ping"></span>
+                    <span class="text-xs font-mono text-cyan-300 uppercase">Câmera Ativa</span>
+                </div>
+                <button onclick="closeQrScannerModal()"
+                    class="w-8 h-8 rounded-full bg-slate-800 text-slate-300 flex items-center justify-center hover:text-white">
+                    ✕
+                </button>
+            </div>
+
+            <!-- Viewfinder com Laser Scanner -->
+            <div class="flex flex-col items-center">
+                <div
+                    class="relative w-64 h-64 border-2 border-cyan-400/80 rounded-3xl overflow-hidden bg-blue-950/20 cyan-glow flex items-center justify-center">
+                    <!-- Cantoneiras estilizadas -->
+                    <div class="absolute top-2 left-2 w-6 h-6 border-t-2 border-l-2 border-cyan-400"></div>
+                    <div class="absolute top-2 right-2 w-6 h-6 border-t-2 border-r-2 border-cyan-400"></div>
+                    <div class="absolute bottom-2 left-2 w-6 h-6 border-b-2 border-l-2 border-cyan-400"></div>
+                    <div class="absolute bottom-2 right-2 w-6 h-6 border-b-2 border-r-2 border-cyan-400"></div>
+
+                    <!-- Linha Laser que varre a tela -->
+                    <div
+                        class="laser-line absolute left-4 right-4 h-0.5 bg-gradient-to-r from-transparent via-cyan-400 to-transparent shadow-[0_0_12px_#00F2FE]">
+                    </div>
+
+                    <!-- Código QR Simulado -->
+                    <div class="opacity-40 p-4">
+                        <svg class="w-36 h-36 text-cyan-200" fill="currentColor" viewBox="0 0 24 24">
+                            <path
+                                d="M3 3h8v8H3V3zm2 2v4h4V5H5zm8-2h8v8h-8V3zm2 2v4h4V5h-4zM3 13h8v8H3v-8zm2 2v4h4v-4H5zm13-2h3v2h-3v-2zm-5 5h2v3h-2v-3zm2-2h3v2h-3v-2zm3 3h3v2h-3v-2zm-3-5h2v2h-2v-2z" />
+                        </svg>
+                    </div>
+                </div>
+                <p class="text-xs text-cyan-200/80 mt-4 text-center">Aponte para o QR Code da conta OCI, AWS ou GCP</p>
+            </div>
+
+            <button onclick="simulateQrDetected()"
+                class="w-full py-3 bg-gradient-to-r from-blue-600 to-cyan-500 rounded-xl font-bold text-xs text-white shadow-lg shadow-blue-500/30">
+                Simular Leitura com Sucesso
+            </button>
+        </div>
+
+        <!-- ============================================== -->
+        <!-- TOAST FLUTUANTE DE NOTIFICAÇÃO                 -->
+        <!-- ============================================== -->
+        <div id="toast"
+            class="fixed bottom-20 left-4 right-4 max-w-[390px] mx-auto bg-[#0F172A] border border-cyan-500/40 text-white px-4 py-3 rounded-2xl shadow-2xl shadow-blue-500/20 transition-all duration-300 transform translate-y-24 opacity-0 z-50 flex items-center gap-3">
+            <span id="toast-icon" class="text-xl">ℹ️</span>
+            <div class="flex-1">
+                <h5 id="toast-title" class="text-xs font-bold text-cyan-300">Mensagem</h5>
+                <p id="toast-body" class="text-[11px] text-slate-300 leading-tight">Corpo do aviso.</p>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- SCRIPT DE LÓGICA E INTERATIVIDADE -->
+    <script>
+        // Navegação entre telas
+        function setScreen(screenId) {
+            const screens = ['login', 'dashboard', 'detail'];
+            screens.forEach(s => {
+                const el = document.getElementById('screen-' + s);
+                if (s === screenId) {
+                    el.classList.remove('hidden');
+                } else {
+                    el.classList.add('hidden');
+                }
+            });
+
+            // Atualiza botões da barra inferior
+            const dashBtn = document.getElementById('nav-btn-dash');
+            const metricsBtn = document.getElementById('nav-btn-metrics');
+            if (screenId === 'dashboard') {
+                dashBtn.classList.add('text-cyan-400');
+                dashBtn.classList.remove('text-slate-400');
+                metricsBtn.classList.remove('text-cyan-400');
+                metricsBtn.classList.add('text-slate-400');
+            } else if (screenId === 'detail') {
+                metricsBtn.classList.add('text-cyan-400');
+                metricsBtn.classList.remove('text-slate-400');
+                dashBtn.classList.remove('text-cyan-400');
+                dashBtn.classList.add('text-slate-400');
+            }
+        }
+
+        // Seleção de aba de provedor no Login
+        function selectProviderTab(provider) {
+            const btnOci = document.getElementById('btn-prov-oci');
+            const btnAws = document.getElementById('btn-prov-aws');
+            const btnGcp = document.getElementById('btn-prov-gcp');
+            const inputKey = document.getElementById('input-key');
+
+            [btnOci, btnAws, btnGcp].forEach(b => {
+                b.className = "flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold text-slate-400 hover:text-white flex items-center justify-center gap-1";
+            });
+
+            if (provider === 'oci') {
+                btnOci.className = "flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold text-white bg-gradient-to-r from-red-600/90 to-amber-600/90 shadow border border-red-500/40 flex items-center justify-center gap-1";
+                inputKey.value = "ocid1.user.oc1..aaaaaaaax74n9b";
+                showToast("Oracle Cloud (OCI) Selecionado", "Região sa-saopaulo-1 configurada para conexão.", "☁️");
+            } else if (provider === 'aws') {
+                btnAws.className = "flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold text-white bg-gradient-to-r from-amber-600/90 to-orange-600/90 shadow border border-amber-500/40 flex items-center justify-center gap-1";
+                inputKey.value = "AKIAIOSFODNN7EXAMPLE";
+                showToast("AWS CloudWatch Selecionado", "Região us-east-1 configurada para conexão.", "🟠");
+            } else if (provider === 'gcp') {
+                btnGcp.className = "flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold text-white bg-gradient-to-r from-blue-600/90 to-cyan-600/90 shadow border border-blue-500/40 flex items-center justify-center gap-1";
+                inputKey.value = "gcp-service-account@iam.gserviceaccount.com";
+                showToast("Google Cloud Platform", "Região southamerica-east1 configurada.", "🔵");
+            }
+        }
+
+        // Login
+        function loginApp() {
+            setScreen('dashboard');
+            showToast('Conectado com Sucesso', 'Sessão iniciada e chaves protegidas no Android KeyStore.', '🔐');
+        }
+
+        // Biometria
+        function triggerBiometrics() {
+            showToast('Biometria Validada', 'Sensor de impressão digital reconhecido via Keystore.', '👆');
+            setTimeout(() => {
+                loginApp();
+            }, 600);
+        }
+
+        // Scanner QR Code Modal
+        function openQrScannerModal() {
+            document.getElementById('modal-scanner').classList.remove('hidden');
+        }
+        function closeQrScannerModal() {
+            document.getElementById('modal-scanner').classList.add('hidden');
+        }
+        function simulateQrDetected() {
+            closeQrScannerModal();
+            showToast('Credenciais Importadas', 'Configuração de conta Oracle OCI carregada via câmera.', '📷');
+            setTimeout(() => {
+                loginApp();
+            }, 700);
+        }
+
+        // Abrir detalhes de um recurso
+        function openDetail(title, arn, service, cpu, status, region) {
+            document.getElementById('detail-title').innerText = title;
+            document.getElementById('detail-arn').innerText = arn;
+            const badgeStatus = document.getElementById('detail-badge-status');
+            const badgeProvider = document.getElementById('detail-provider-badge');
+
+            if (title.includes('OCI')) {
+                badgeProvider.innerText = 'ORACLE OCI';
+                badgeProvider.className = 'text-[9px] font-bold px-2 py-0.5 rounded bg-red-950/80 text-red-400 border border-red-800/40 font-mono';
+            } else if (title.includes('AWS')) {
+                badgeProvider.innerText = 'AWS CLOUDWATCH';
+                badgeProvider.className = 'text-[9px] font-bold px-2 py-0.5 rounded bg-amber-950/80 text-amber-400 border border-amber-800/40 font-mono';
+            } else {
+                badgeProvider.innerText = 'GOOGLE CLOUD';
+                badgeProvider.className = 'text-[9px] font-bold px-2 py-0.5 rounded bg-blue-950/80 text-blue-400 border border-blue-800/40 font-mono';
+            }
+
+            if (status === 'CRITICAL') {
+                badgeStatus.innerText = 'INCIDENTE CRÍTICO';
+                badgeStatus.className = 'text-[9px] bg-rose-500/20 text-rose-400 px-2.5 py-0.5 rounded-full border border-rose-500/40 font-mono font-bold';
+            } else if (status === 'WARNING') {
+                badgeStatus.innerText = 'ATENÇÃO';
+                badgeStatus.className = 'text-[9px] bg-amber-500/20 text-amber-400 px-2.5 py-0.5 rounded-full border border-amber-500/40 font-mono font-bold';
+            } else {
+                badgeStatus.innerText = 'OPERACIONAL';
+                badgeStatus.className = 'text-[9px] bg-emerald-500/20 text-emerald-400 px-2.5 py-0.5 rounded-full border border-emerald-500/40 font-mono font-bold';
+            }
+
+            setScreen('detail');
+        }
+
+        // Filtro de recursos por nuvem
+        function filterResources(provider, btn) {
+            const buttons = btn.parentElement.querySelectorAll('button');
+            buttons.forEach(b => {
+                b.className = "px-3 py-1 rounded-full text-[10px] font-bold bg-[#0D1527] text-slate-300 hover:text-white border border-slate-800 shrink-0 flex items-center gap-1";
+            });
+            btn.className = "px-3 py-1 rounded-full text-[10px] font-bold bg-cyan-500 text-black shadow-sm shrink-0 flex items-center gap-1";
+
+            const cards = document.querySelectorAll('#resource-cards-list > div');
+            cards.forEach(card => {
+                if (provider === 'ALL' || card.getAttribute('data-provider') === provider) {
+                    card.style.display = 'flex';
+                } else {
+                    card.style.display = 'none';
+                }
+            });
+        }
+
+        // Seletor de período
+        function selectTimeRange(btn) {
+            const buttons = btn.parentElement.querySelectorAll('button');
+            buttons.forEach(b => {
+                b.className = "flex-1 py-1 rounded-lg text-[10px] font-bold text-slate-400 hover:text-white";
+            });
+            btn.className = "flex-1 py-1 rounded-lg text-[10px] font-bold text-white bg-blue-600 shadow";
+            showToast('Intervalo Atualizado', `Consultando métricas no período de ${btn.innerText}.`, '⏱️');
+        }
+
+        // Randomizar dados com Faker
+        function randomizeData() {
+            const total = 24;
+            const critical = Math.floor(Math.random() * 3) + 1;
+            const healthy = total - critical;
+            document.getElementById('kpi-total').innerText = total;
+            document.getElementById('kpi-healthy').innerText = healthy;
+            document.getElementById('kpi-alerts').innerText = critical;
+            showToast('Dados Simulados (Faker)', 'Métricas de CPU e status atualizados em tempo real.', '🔄');
+        }
+
+        // Alerta de incidente simulado
+        function triggerAlertIncident() {
+            showToast('🚨 Alerta OCI Compute', 'Pico de CPU > 95% na instância sa-saopaulo-1 (VM.Standard.A1).', '⚠️');
+        }
+
+        function exportPdfReport() {
+            showToast('Relatório PDF Gerado', 'Arquivo de auditoria gerado via react-native-pdf-lib.', '📄');
+        }
+
+        function pinToDashboard() {
+            showToast('Widget Fixado', 'Métrica adicionada ao painel inicial com sucesso.', '📌');
+        }
+
+        // Toast de feedback
+        function showToast(title, body, icon = 'ℹ️') {
+            const toast = document.getElementById('toast');
+            document.getElementById('toast-title').innerText = title;
+            document.getElementById('toast-body').innerText = body;
+            document.getElementById('toast-icon').innerText = icon;
+
+            toast.classList.remove('translate-y-24', 'opacity-0');
+            clearTimeout(window.toastTimer);
+            window.toastTimer = setTimeout(() => {
+                toast.classList.add('translate-y-24', 'opacity-0');
+            }, 3000);
+        }
+
+        // Relógio nativo
+        setInterval(() => {
+            const now = new Date();
+            const h = String(now.getHours()).padStart(2, '0');
+            const m = String(now.getMinutes()).padStart(2, '0');
+            const clock = document.getElementById('phone-clock');
+            if (clock) clock.innerText = `${h}:${m}`;
+        }, 1000);
+    </script>
+</body>
+
+</html>
