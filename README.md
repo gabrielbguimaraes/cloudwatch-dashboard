@@ -99,9 +99,9 @@ O backlog unificado agrupa as necessidades corporativas de monitoramento móvel 
 > **🏆 MVP da Sprint 1:**  
 > Aplicativo funcional instalado no smartphone Android (`.apk`), capaz de autenticar o usuário através de biometria nativa, importar credenciais reais da OCI via câmera por QR Code, sugerir o datacenter local mais próximo por satélite (GPS) e exibir um painel dinâmico com semáforo de saúde e provisionamento de instâncias sem dependência de saldo em nuvem.
 
-* **Período:** 20 de Setembro a 28 de Setembro
+
 * **Esforço:** 44 Story Points
-* **Status da Sprint:** Concluída
+
 
 #### Sprint Backlog 1
 | ID | User Story | Componente / Hardware | Complexidade | Status |
@@ -121,9 +121,7 @@ O backlog unificado agrupa as necessidades corporativas de monitoramento móvel 
 > **🏆 MVP da Sprint 2:**  
 > Painel conectado diretamente aos endpoints REST de telemetria da Oracle Cloud Infrastructure em produção, autenticando chamadas via assinaturas digitais RSA-SHA256, substituindo a simulação pela coleta de CPU e memória reais de instâncias de Compute e renderizando curvas de tendências em gráficos vetoriais com intervalos selecionáveis.
 
-* **Período:** 29 de Setembro a 12 de Outubro
 * **Esforço:** 42 Story Points
-* **Status da Sprint:** Planejada
 
 #### Sprint Backlog 2
 | ID | User Story | Componente / Tecnologia | Complexidade | Status |
@@ -140,9 +138,7 @@ O backlog unificado agrupa as necessidades corporativas de monitoramento móvel 
 > **🏆 MVP da Sprint 3:**  
 > Solução corporativa multi-cloud completa, permitindo parear simultaneamente contas da AWS e Google Cloud além da OCI, emitir comandos de ciclo de vida (Start, Stop, Reboot) diretamente pelo celular, receber alertas push em segundo plano sobre saturação de recursos e exportar relatórios consolidados de disponibilidade para auditoria.
 
-* **Período:** 13 de Outubro a 26 de Outubro
 * **Esforço:** 32 Story Points
-* **Status da Sprint:** Planejada
 
 #### Sprint Backlog 3
 | ID | User Story | Componente / Tecnologia | Complexidade | Status |
