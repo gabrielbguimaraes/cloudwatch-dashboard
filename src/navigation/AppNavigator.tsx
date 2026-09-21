@@ -1,7 +1,3 @@
-/**
- * CloudWatch Dashboard - Navegador Principal (React Navigation)
- * Aluno: João Gabriel Barros Guimarães - FATEC 4DSM
- */
 
 import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';

@@ -1,9 +1,4 @@
-/**
- * CloudWatch Dashboard - Modelos de Dados e Tipagens TypeScript
- * Foco Primário: Oracle Cloud Infrastructure (OCI) + AWS & GCP
- * Aluno: João Gabriel Barros Guimarães (RA: 1461392411007)
- * FATEC Prof. Dr. Eng. Gerson Penha - 4DSM
- */
+
 
 /** Provedores de Nuvem Suportados (OCI Primário) */
 export type CloudProvider = 'OCI' | 'AWS' | 'GCP';

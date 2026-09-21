@@ -1,7 +1,3 @@
-/**
- * CloudWatch Dashboard - Design System & Tema
- * Identidade: Deep Obsidian Black & Electric Blue Neon
- */
 
 export const colors = {
   // Fundos Primários

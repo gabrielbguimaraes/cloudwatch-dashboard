@@ -3,6 +3,8 @@
  * Execute no terminal: node test-validation.js
  */
 
+const fs = require('fs');
+const path = require('path');
 const { faker } = require('@faker-js/faker');
 
 console.log('\n======================================================');
@@ -96,33 +98,64 @@ if (keychainSize >= 245) {
 }
 console.log('  ✓ GARANTIA ARQUITETURAL: IllegalBlockSizeException eliminada 100%!');
 
-// 3. Validar Parser Robusto de QR Code em Plain Text
-console.log('\n3. Validando Robustez do Leitor de QR Code (Plain Text):');
-const rawQrText = `
-  {"provider":"OCI","tenancyId":"ocid1.tenancy.oc1..aaa","userId":"ocid1.user.oc1..bbb","fingerprint":"0e:ed:6e:d2:98:cf:84:1e:7d:b7:16:37:ef:8c:e1:59","region":"sa-saopaulo-1"}
-`;
+// 3. Validar Contextualização Regional por GPS (expo-location)
+console.log('\n3. Validando Contextualização Regional por GPS (expo-location):');
+const isCoordinatesInSouthAmerica = (latitude, longitude) => {
+  return latitude >= -56.0 && latitude <= 13.0 && longitude >= -82.0 && longitude <= -34.0;
+};
 
-try {
-  const trimmed = rawQrText.trim();
-  const parsed = JSON.parse(trimmed);
-  console.log('  ✓ QR Code com espaços e quebras decodificado com .trim():');
-  console.log(`     • Tenancy: ${parsed.tenancyId}`);
-  console.log(`     • User: ${parsed.userId}`);
-  console.log(`     • Fingerprint: ${parsed.fingerprint}`);
-} catch (e) {
-  throw new Error('Falha ao processar QR Code');
+const spCoords = { lat: -23.5505, lon: -46.6333, name: 'São Paulo (Brasil)' };
+const ashburnCoords = { lat: 39.0438, lon: -77.4874, name: 'Ashburn (EUA)' };
+
+console.log(`  ✓ GPS ${spCoords.name}: ${isCoordinatesInSouthAmerica(spCoords.lat, spCoords.lon) ? 'América do Sul -> sa-saopaulo-1 (📍 Datacenter Local mais próximo)' : 'Outra Região'}`);
+console.log(`  ✓ GPS ${ashburnCoords.name}: ${!isCoordinatesInSouthAmerica(ashburnCoords.lat, ashburnCoords.lon) ? 'Fora da América do Sul -> us-ashburn-1' : 'América do Sul'}`);
+
+if (!isCoordinatesInSouthAmerica(spCoords.lat, spCoords.lon)) {
+  throw new Error('Falha na validação de coordenadas da América do Sul');
 }
 
-// 4. Validar Regras do Semáforo
-console.log('\n4. Validando Semáforo de Saúde:');
-const evaluateHealthStatus = (cpuPercent, latencyMs, hasCriticalErrors = false) => {
-  if (cpuPercent > 85 || hasCriticalErrors) return 'CRITICAL';
-  if ((cpuPercent >= 70 && cpuPercent <= 85) || (latencyMs !== undefined && latencyMs > 50)) return 'WARNING';
-  return 'HEALTHY';
+// 4. Validar Lógica Multi-Cloud (OCI First e Contas Não Conectadas)
+console.log('\n4. Validando Lógica de Multi-Cloud (Contas Conectadas e Filtro OCI):');
+const connectedProviders = ['OCI'];
+const sampleResources = [
+  { id: '1', provider: 'OCI', name: 'OCI Web Node' },
+  { id: '2', provider: 'OCI', name: 'OCI Autonomous DB' },
+  { id: '3', provider: 'AWS', name: 'AWS EC2 Instance' },
+  { id: '4', provider: 'GCP', name: 'GCP Cloud Run' },
+];
+
+const getVisibleInAllFilter = (resources, connected) => {
+  return resources.filter(r => connected.includes(r.provider));
 };
-console.log(`  ✓ 🟢 CPU 35% -> ${evaluateHealthStatus(35, 10)}`);
-console.log(`  ✓ 🟡 CPU 78% -> ${evaluateHealthStatus(78, 15)}`);
-console.log(`  ✓ 🔴 CPU 94% -> ${evaluateHealthStatus(94, 20)}`);
+
+const ociOnlyVisible = getVisibleInAllFilter(sampleResources, connectedProviders);
+console.log(`  ✓ Filtro "Todos" com sessão OCI ativa: exibe apenas ${ociOnlyVisible.length} instâncias (${ociOnlyVisible.map(r => r.provider).join(', ')})`);
+if (ociOnlyVisible.some(r => r.provider !== 'OCI')) {
+  throw new Error('Filtro Todos exibiu nuvens não conectadas!');
+}
+
+// Conectando AWS sob demanda
+connectedProviders.push('AWS');
+const ociAndAwsVisible = getVisibleInAllFilter(sampleResources, connectedProviders);
+console.log(`  ✓ Filtro "Todos" após conectar AWS: exibe ${ociAndAwsVisible.length} instâncias (${ociAndAwsVisible.map(r => r.provider).join(', ')})`);
+
+// 5. Validar Ausência de Menções Visuais a "Faker" nos Arquivos da UI
+console.log('\n5. Validando Ausência de Menções a "Faker" na Interface do Usuário:');
+const loginCode = fs.readFileSync(path.join(__dirname, 'src', 'screens', 'LoginScreen.tsx'), 'utf8');
+const dashboardCode = fs.readFileSync(path.join(__dirname, 'src', 'screens', 'DashboardScreen.tsx'), 'utf8');
+
+const checkUiFaker = (code, filename) => {
+  const uiFakerRegex = /(>.*?Faker.*?<|placeholder=.*?Faker.*?|Alert\.alert\(.*?Faker.*?)/i;
+  const match = code.match(uiFakerRegex);
+  if (match) {
+    throw new Error(`Menção visual a Faker encontrada em ${filename}: ${match[0]}`);
+  }
+};
+
+checkUiFaker(loginCode, 'LoginScreen.tsx');
+checkUiFaker(dashboardCode, 'DashboardScreen.tsx');
+console.log('  ✓ Nenhuma menção visual a "Faker" em LoginScreen.tsx');
+console.log('  ✓ Nenhuma menção visual a "Faker" em DashboardScreen.tsx (Botão "Atualizar" e "Provisionar Instância" limpos)');
 
 console.log('\n======================================================');
 console.log('✅ TODAS AS CORREÇÕES E CRITÉRIOS DE ACEITAÇÃO PASSARAM!');

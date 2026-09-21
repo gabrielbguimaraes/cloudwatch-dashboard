@@ -26,6 +26,7 @@ interface CloudContextData {
   pinnedResources: CloudResource[];
   pinnedResourceIds: string[];
   selectedProvider: CloudProvider | 'ALL';
+  connectedProviders: CloudProvider[];
   activeAccount: CloudAccount;
   isSimulationMode: boolean;
   timeRange: '1h' | '6h' | '24h' | '7d' | '30d';
@@ -41,6 +42,8 @@ interface CloudContextData {
   isLoading: boolean;
   lastUpdated: string;
   setProviderFilter: (provider: CloudProvider | 'ALL') => void;
+  addConnectedProvider: (provider: CloudProvider) => void;
+  isProviderConnected: (provider: CloudProvider) => boolean;
   setTimeRange: (range: '1h' | '6h' | '24h' | '7d' | '30d') => void;
   setSimulationMode: (enabled: boolean) => void;
   setSelectedResource: (resource: CloudResource | null) => void;
@@ -72,7 +75,8 @@ const CloudContext = createContext<CloudContextData>({} as CloudContextData);
 export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [resources, setResources] = useState<CloudResource[]>([]);
   const [pinnedResourceIds, setPinnedResourceIds] = useState<string[]>([]);
-  const [selectedProvider, setSelectedProvider] = useState<CloudProvider | 'ALL'>('ALL');
+  const [selectedProvider, setSelectedProvider] = useState<CloudProvider | 'ALL'>('OCI');
+  const [connectedProviders, setConnectedProviders] = useState<CloudProvider[]>(['OCI']);
   const [activeAccount, setActiveAccount] = useState<CloudAccount>(defaultAccount);
   const [isSimulationMode, setSimulationMode] = useState<boolean>(true);
   const [timeRange, setTimeRange] = useState<'1h' | '6h' | '24h' | '7d' | '30d'>('24h');
@@ -145,25 +149,41 @@ export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ chil
     setIsLoading(false);
   };
 
-  // Recursos filtrados pelo provedor ativo (ou Todos)
+  const addConnectedProvider = (provider: CloudProvider) => {
+    setConnectedProviders((prev) => (prev.includes(provider) ? prev : [...prev, provider]));
+    setSelectedProvider(provider);
+  };
+
+  const isProviderConnected = (provider: CloudProvider): boolean => {
+    return connectedProviders.includes(provider);
+  };
+
+  // Recursos filtrados pelo provedor ativo (ou Todos apenas das nuvens conectadas)
   const filteredResources = useMemo(() => {
-    if (selectedProvider === 'ALL') return resources;
+    if (selectedProvider === 'ALL') {
+      return resources.filter((res) => connectedProviders.includes(res.provider));
+    }
     return resources.filter((res) => res.provider === selectedProvider);
-  }, [resources, selectedProvider]);
+  }, [resources, selectedProvider, connectedProviders]);
 
   // Lista de recursos fixados pelo usuário para exibição no topo
   const pinnedResources = useMemo(() => {
     return resources.filter((res) => pinnedResourceIds.includes(res.id));
   }, [resources, pinnedResourceIds]);
 
-  // Cálculo reativo e dinâmico de KPIs de topo
+  // Cálculo reativo e dinâmico de KPIs de topo com base nos recursos das contas conectadas
   const kpis = useMemo(() => {
-    const total = resources.length;
+    const relevant =
+      selectedProvider === 'ALL'
+        ? resources.filter((res) => connectedProviders.includes(res.provider))
+        : resources.filter((res) => res.provider === selectedProvider);
+
+    const total = relevant.length;
     let healthy = 0;
     let warning = 0;
     let critical = 0;
 
-    resources.forEach((r) => {
+    relevant.forEach((r) => {
       if (r.status === 'HEALTHY') healthy++;
       else if (r.status === 'WARNING') warning++;
       else if (r.status === 'CRITICAL') critical++;
@@ -176,7 +196,7 @@ export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ chil
       critical,
       uptimeSla: 99.94,
     };
-  }, [resources]);
+  }, [resources, selectedProvider, connectedProviders]);
 
   return (
     <CloudContext.Provider
@@ -186,6 +206,7 @@ export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ chil
         pinnedResources,
         pinnedResourceIds,
         selectedProvider,
+        connectedProviders,
         activeAccount,
         isSimulationMode,
         timeRange,
@@ -195,6 +216,8 @@ export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ chil
         isLoading,
         lastUpdated,
         setProviderFilter: setSelectedProvider,
+        addConnectedProvider,
+        isProviderConnected,
         setTimeRange,
         setSimulationMode,
         setSelectedResource,

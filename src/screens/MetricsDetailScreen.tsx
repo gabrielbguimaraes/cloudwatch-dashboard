@@ -1,8 +1,4 @@
-/**
- * CloudWatch Dashboard - Tela de Detalhes de Métricas & Logs (MetricsDetailScreen)
- * Gráficos em Tempo Real, Métricas de Desempenho e Cloud Logs Insights
- * Aluno: João Gabriel Barros Guimarães - FATEC 4DSM
- */
+
 
 import React, { useState, useMemo } from 'react';
 import {
@@ -117,8 +113,8 @@ export const MetricsDetailScreen: React.FC<{ navigation: any }> = ({ navigation 
               {selectedResource.status === 'CRITICAL'
                 ? 'ALERTA ATIVO'
                 : selectedResource.status === 'WARNING'
-                ? 'ATENÇÃO'
-                : 'OPERACIONAL'}
+                  ? 'ATENÇÃO'
+                  : 'OPERACIONAL'}
             </Text>
           </View>
         </View>

@@ -1,8 +1,4 @@
-/**
- * CloudWatch Dashboard - Serviço de Simulação com Dual-Engine (Faker / OCI)
- * Gera métricas realistas, recursos e logs com foco prioritário na Oracle Cloud (OCI).
- * Aluno: João Gabriel Barros Guimarães - FATEC 4DSM
- */
+
 
 import type {
   CloudResource,
@@ -403,8 +399,8 @@ export const provisionNewInstance = (targetProvider?: CloudProvider): CloudResou
     const ociService: CloudServiceType = shape.includes('Autonomous')
       ? 'OCI_DATABASE'
       : shape.includes('Storage')
-      ? 'OCI_STORAGE'
-      : 'OCI_COMPUTE';
+        ? 'OCI_STORAGE'
+        : 'OCI_COMPUTE';
 
     return {
       id: `res-oci-${uid}`,
@@ -420,7 +416,7 @@ export const provisionNewInstance = (targetProvider?: CloudProvider): CloudResou
       tags: {
         Environment: 'Production',
         Workload: faker.hacker.noun(),
-        ManagedBy: 'Faker-Simulation',
+        ManagedBy: 'CloudWatch-Simulation',
       },
       metricsSummary: {
         cpuPercent,
@@ -452,8 +448,8 @@ export const provisionNewInstance = (targetProvider?: CloudProvider): CloudResou
     const awsService: CloudServiceType = awsName.includes('RDS')
       ? 'RDS'
       : awsName.includes('Lambda')
-      ? 'LAMBDA'
-      : 'EC2';
+        ? 'LAMBDA'
+        : 'EC2';
 
     return {
       id: `res-aws-${uid}`,

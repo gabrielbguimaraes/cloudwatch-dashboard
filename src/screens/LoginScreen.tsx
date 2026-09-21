@@ -21,6 +21,7 @@ import {
   Modal,
   PermissionsAndroid,
   Platform,
+  Image,
 } from 'react-native';
 import { Camera } from 'react-native-camera-kit';
 import { colors } from '../theme';
@@ -280,21 +281,13 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-        {/* Nova Logo Minimalista Sóbria (Sem Neons Agressivos) */}
+        {/* Logo Personalizada via Imagem */}
         <View style={styles.logoSection}>
-          <View style={styles.logoOuter}>
-            <View style={styles.logoInner}>
-              {/* Linha vetorial nativa de telemetria / pulso cardíaco de infraestrutura */}
-              <View style={styles.telemetryBox}>
-                <View style={styles.telemetryLineFlat} />
-                <View style={styles.telemetryPulseUp} />
-                <View style={styles.telemetryPulseDown} />
-                <View style={styles.telemetryDot} />
-                <View style={styles.telemetryPulseRecovery} />
-                <View style={styles.telemetryLineFlat} />
-              </View>
-            </View>
-          </View>
+          <Image
+            source={require('../assets/logo.png')}
+            style={styles.logoImage}
+            resizeMode="contain"
+          />
 
           <Text style={styles.appTitle}>
             Cloud<Text style={styles.appTitleHighlight}>Watch</Text>
@@ -528,7 +521,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
           <View style={styles.simCard}>
             <View>
               <Text style={styles.simTitle}>Modo Simulação</Text>
-              <Text style={styles.simDesc}>Testar telemetria com instâncias Faker</Text>
+              <Text style={styles.simDesc}>Testar com telemetria simulada em tempo real</Text>
             </View>
             <Switch
               value={isSimulationMode}
@@ -634,65 +627,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: 6,
   },
-  logoOuter: {
-    width: 68,
-    height: 68,
-    borderRadius: 20,
-    backgroundColor: '#0F172A',
-    borderWidth: 1.5,
-    borderColor: '#1E293B',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  logoInner: {
-    width: 50,
-    height: 50,
-    borderRadius: 14,
-    backgroundColor: '#070D1A',
-    borderWidth: 1,
-    borderColor: '#1E293B',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  telemetryBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: 38,
-    height: 24,
-    position: 'relative',
-  },
-  telemetryLineFlat: {
-    width: 6,
-    height: 2,
-    backgroundColor: '#38BDF8',
-  },
-  telemetryPulseUp: {
-    width: 8,
-    height: 2,
-    backgroundColor: '#38BDF8',
-    transform: [{ rotate: '-50deg' }, { translateY: -3 }],
-  },
-  telemetryPulseDown: {
-    width: 12,
-    height: 2,
-    backgroundColor: '#38BDF8',
-    transform: [{ rotate: '55deg' }, { translateY: 2 }],
-  },
-  telemetryDot: {
-    width: 4,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: '#38BDF8',
-    position: 'absolute',
-    top: 9,
-    left: 17,
-  },
-  telemetryPulseRecovery: {
-    width: 8,
-    height: 2,
-    backgroundColor: '#38BDF8',
-    transform: [{ rotate: '-45deg' }, { translateY: -2 }],
+  logoImage: {
+    width: 72,
+    height: 72,
+    borderRadius: 16,
   },
   appTitle: {
     fontSize: 26,

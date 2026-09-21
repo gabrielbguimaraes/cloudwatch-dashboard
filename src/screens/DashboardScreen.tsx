@@ -1,12 +1,6 @@
-/**
- * CloudWatch Dashboard - Tela Principal (DashboardScreen)
- * Foco Primário: Oracle Cloud Infrastructure (OCI) + AWS & GCP
- * Semáforo de Saúde: Verde (Operacional), Amarelo (Atenção), Vermelho (Crítico)
- * Governança: Seção de Recursos Fixados e Provisionamento Dinâmico com @faker-js/faker.
- * Aluno: João Gabriel Barros Guimarães - FATEC 4DSM
- */
 
-import React from 'react';
+
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -16,18 +10,26 @@ import {
   SafeAreaView,
   RefreshControl,
   Alert,
+  Modal,
+  Platform,
+  PermissionsAndroid,
 } from 'react-native';
+import { Camera } from 'react-native-camera-kit';
 import { colors } from '../theme';
 import { useCloud } from '../context/CloudContext';
 import { useAuth } from '../context/AuthContext';
 import type { CloudResource, CloudProvider } from '../types';
+import { detectNearestDatacenter } from '../services/locationService';
 
 export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   const {
     filteredResources,
     pinnedResources,
     selectedProvider,
+    connectedProviders,
     setProviderFilter,
+    addConnectedProvider,
+    isProviderConnected,
     kpis,
     timeRange,
     setTimeRange,
@@ -40,7 +42,30 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
     lastUpdated,
   } = useCloud();
 
-  const { logout } = useAuth();
+  const { logout, loginWithQrCodePayload } = useAuth();
+
+  // Estados de Hardware: Localização GPS e Câmera de Provedor
+  const [gpsBadge, setGpsBadge] = useState<string>('📍 Detectando GPS...');
+  const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
+  const [targetProviderToConnect, setTargetProviderToConnect] = useState<CloudProvider | null>(null);
+  const [isProcessingQr, setIsProcessingQr] = useState<boolean>(false);
+
+  // Contextualização Regional por GPS (expo-location)
+  useEffect(() => {
+    let isMounted = true;
+    detectNearestDatacenter()
+      .then((res) => {
+        if (isMounted && res.badge) {
+          setGpsBadge(res.badge);
+        }
+      })
+      .catch((err) => {
+        console.warn('Erro ao obter localização por GPS:', err);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const handleResourcePress = (resource: CloudResource) => {
     setSelectedResource(resource);
@@ -53,7 +78,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
   };
 
   /**
-   * Provisiona sob demanda uma nova instância computacional via @faker-js/faker
+   * Provisiona sob demanda uma nova instância computacional
    */
   const handleProvisionInstance = () => {
     const targetProvider = selectedProvider === 'ALL' ? undefined : selectedProvider;
@@ -61,9 +86,80 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
 
     Alert.alert(
       '⚡ Nova Instância Provisionada',
-      `Recurso criado com sucesso via Faker Engine:\n\n• Nome: ${newResource.name}\n• Provedor: ${newResource.provider}\n• Status: ${newResource.status}\n• CPU: ${newResource.metricsSummary.cpuPercent}% | RAM: ${newResource.metricsSummary.memoryPercent}%`,
+      `Recurso provisionado com sucesso:\n\n• Nome: ${newResource.name}\n• Provedor: ${newResource.provider}\n• Status: ${newResource.status}\n• CPU: ${newResource.metricsSummary.cpuPercent}% | RAM: ${newResource.metricsSummary.memoryPercent}%`,
       [{ text: 'OK' }]
     );
+  };
+
+  /**
+   * Lógica de Provedor Ativo vs. Outras Nuvens no Dashboard:
+   * Se clicar em nuvem não conectada, solicita escaneamento de QR Code
+   */
+  const handleSelectProvider = (prov: CloudProvider | 'ALL') => {
+    if (prov === 'ALL') {
+      setProviderFilter('ALL');
+      return;
+    }
+
+    if (isProviderConnected(prov)) {
+      setProviderFilter(prov);
+    } else {
+      const providerName = PROVIDER_DISPLAY_NAMES[prov] || prov;
+      Alert.alert(
+        `Conta ${providerName} Não Conectada`,
+        `Deseja escanear o QR Code deste provedor para monitorá-lo em conjunto?`,
+        [
+          { text: 'Cancelar', style: 'cancel' },
+          {
+            text: 'Escanear QR Code',
+            onPress: () => {
+              setTargetProviderToConnect(prov);
+              setIsCameraActive(true);
+            },
+          },
+        ]
+      );
+    }
+  };
+
+  /**
+   * Leitura do QR Code de outro provedor em execução
+   */
+  const handleBarcodeRead = (event: any) => {
+    if (isProcessingQr) return;
+    const rawValue = event?.nativeEvent?.codeStringValue || '';
+    if (!rawValue) return;
+
+    setIsProcessingQr(true);
+    const result = loginWithQrCodePayload(rawValue);
+
+    if (result.success && result.data) {
+      const provToConnect = targetProviderToConnect || result.data.provider || 'AWS';
+      addConnectedProvider(provToConnect);
+      setIsCameraActive(false);
+      setIsProcessingQr(false);
+      Alert.alert(
+        '✅ Conta Conectada com Sucesso',
+        `Credenciais de ${PROVIDER_DISPLAY_NAMES[provToConnect] || provToConnect} vinculadas ao painel.`
+      );
+    } else {
+      setIsProcessingQr(false);
+      Alert.alert(
+        'QR Code Inválido',
+        result.error || 'Certifique-se de escanear uma configuração válida em Plain Text.'
+      );
+    }
+  };
+
+  const handleSimulateConnection = () => {
+    if (targetProviderToConnect) {
+      addConnectedProvider(targetProviderToConnect);
+      setIsCameraActive(false);
+      Alert.alert(
+        '✅ Conta Conectada com Sucesso',
+        `As instâncias de ${PROVIDER_DISPLAY_NAMES[targetProviderToConnect] || targetProviderToConnect} agora estão ativas no painel.`
+      );
+    }
   };
 
   const getStatusColor = (status: CloudResource['status']) => {
@@ -223,7 +319,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
           <View style={styles.headerTopRow}>
             <View style={styles.regionBadge}>
               <View style={styles.activePulseDot} />
-              <Text style={styles.regionBadgeText}>sa-saopaulo-1 (OCI / AWS)</Text>
+              <Text style={styles.regionBadgeText}>{gpsBadge}</Text>
             </View>
 
             <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
@@ -243,12 +339,15 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
 
             <View style={styles.topActionsRow}>
               <TouchableOpacity
-                style={styles.fakerRefreshBtn}
-                onPress={refreshMetrics}
+                style={styles.refreshBtn}
+                onPress={() => {
+                  refreshMetrics();
+                  Alert.alert('Atualização Concluída', 'Métricas atualizadas em tempo real.');
+                }}
                 activeOpacity={0.8}
               >
-                <Text style={styles.fakerIcon}>🔄</Text>
-                <Text style={styles.fakerText}>FAKER</Text>
+                <Text style={styles.refreshIcon}>🔄</Text>
+                <Text style={styles.refreshText}>Atualizar</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -277,7 +376,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
           </View>
         </View>
 
-        {/* Botão de Destaque: Provisionar Nova Instância (Faker) */}
+        {/* Botão de Destaque: Provisionar Nova Instância */}
         <View style={styles.provisionSection}>
           <TouchableOpacity
             style={styles.provisionBtn}
@@ -285,11 +384,11 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
             activeOpacity={0.85}
           >
             <Text style={styles.provisionBtnIcon}>⚡</Text>
-            <Text style={styles.provisionBtnText}>+ Provisionar Nova Instância (Faker)</Text>
+            <Text style={styles.provisionBtnText}>+ Provisionar Instância</Text>
           </TouchableOpacity>
         </View>
 
-        {/* Filtro por Provedor */}
+        {/* Filtro por Provedor com Suporte a Conexão Dinâmica */}
         <View style={styles.filterSection}>
           <ScrollView
             horizontal
@@ -298,7 +397,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
           >
             <TouchableOpacity
               style={[styles.filterPill, selectedProvider === 'ALL' && styles.filterPillActive]}
-              onPress={() => setProviderFilter('ALL')}
+              onPress={() => handleSelectProvider('ALL')}
             >
               <Text
                 style={[
@@ -312,7 +411,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
 
             <TouchableOpacity
               style={[styles.filterPill, selectedProvider === 'OCI' && styles.filterPillOciActive]}
-              onPress={() => setProviderFilter('OCI')}
+              onPress={() => handleSelectProvider('OCI')}
             >
               <View style={[styles.filterDot, { backgroundColor: '#EF4444' }]} />
               <Text
@@ -321,13 +420,13 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
                   selectedProvider === 'OCI' && styles.filterPillTextActive,
                 ]}
               >
-                Oracle OCI
+                Oracle OCI {!isProviderConnected('OCI') ? '🔒' : ''}
               </Text>
             </TouchableOpacity>
 
             <TouchableOpacity
               style={[styles.filterPill, selectedProvider === 'AWS' && styles.filterPillAwsActive]}
-              onPress={() => setProviderFilter('AWS')}
+              onPress={() => handleSelectProvider('AWS')}
             >
               <View style={[styles.filterDot, { backgroundColor: '#F59E0B' }]} />
               <Text
@@ -336,13 +435,13 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
                   selectedProvider === 'AWS' && styles.filterPillTextActive,
                 ]}
               >
-                AWS
+                AWS {!isProviderConnected('AWS') ? '🔒' : ''}
               </Text>
             </TouchableOpacity>
 
             <TouchableOpacity
               style={[styles.filterPill, selectedProvider === 'GCP' && styles.filterPillGcpActive]}
-              onPress={() => setProviderFilter('GCP')}
+              onPress={() => handleSelectProvider('GCP')}
             >
               <View style={[styles.filterDot, { backgroundColor: '#3B82F6' }]} />
               <Text
@@ -351,7 +450,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
                   selectedProvider === 'GCP' && styles.filterPillTextActive,
                 ]}
               >
-                GCP
+                GCP {!isProviderConnected('GCP') ? '🔒' : ''}
               </Text>
             </TouchableOpacity>
           </ScrollView>
@@ -413,6 +512,55 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
           </View>
         </View>
       </ScrollView>
+
+      {/* Modal da Câmera para Escanear QR Code de Novo Provedor */}
+      <Modal
+        visible={isCameraActive}
+        animationType="slide"
+        onRequestClose={() => setIsCameraActive(false)}
+      >
+        <SafeAreaView style={styles.cameraModalContainer}>
+          <View style={styles.cameraHeader}>
+            <Text style={styles.cameraTitle}>
+              Conectar {targetProviderToConnect || 'Provedor'} via QR Code
+            </Text>
+            <TouchableOpacity
+              style={styles.cameraCloseBtn}
+              onPress={() => setIsCameraActive(false)}
+            >
+              <Text style={styles.cameraCloseText}>✕ Fechar</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.cameraWrapper}>
+            <Camera
+              style={StyleSheet.absoluteFillObject}
+              scanBarcode={true}
+              onReadCode={handleBarcodeRead}
+            />
+
+            <View style={styles.cameraOverlay}>
+              <View style={styles.scanFrame}>
+                <View style={styles.scanLaser} />
+              </View>
+              <Text style={styles.cameraInstruction}>
+                Aponte para o QR Code de {targetProviderToConnect || 'nuvem'}
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.cameraFooter}>
+            <TouchableOpacity
+              style={styles.cameraTestBtn}
+              onPress={handleSimulateConnection}
+            >
+              <Text style={styles.cameraTestBtnText}>
+                ⚡ Conectar Credencial Oficial ({targetProviderToConnect || 'Provedor'})
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </SafeAreaView>
+      </Modal>
     </SafeAreaView>
   );
 };
@@ -510,7 +658,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
   },
-  fakerRefreshBtn: {
+  refreshBtn: {
     backgroundColor: '#0066FF25',
     borderWidth: 1,
     borderColor: '#0066FF50',
@@ -519,10 +667,10 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     alignItems: 'center',
   },
-  fakerIcon: {
+  refreshIcon: {
     fontSize: 16,
   },
-  fakerText: {
+  refreshText: {
     color: colors.neonCyan,
     fontSize: 8,
     fontWeight: '900',
@@ -818,6 +966,86 @@ const styles = StyleSheet.create({
   },
   metricPillTextDanger: {
     color: '#F87171',
+    fontWeight: '700',
+  },
+  cameraModalContainer: {
+    flex: 1,
+    backgroundColor: '#000000',
+  },
+  cameraHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    backgroundColor: '#0F172A',
+  },
+  cameraTitle: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  cameraCloseBtn: {
+    padding: 6,
+  },
+  cameraCloseText: {
+    color: '#F87171',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+  cameraWrapper: {
+    flex: 1,
+    position: 'relative',
+    backgroundColor: '#000',
+  },
+  cameraOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  scanFrame: {
+    width: 240,
+    height: 240,
+    borderWidth: 2,
+    borderColor: '#38BDF8',
+    borderRadius: 16,
+    overflow: 'hidden',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#00000020',
+  },
+  scanLaser: {
+    width: '100%',
+    height: 2,
+    backgroundColor: '#38BDF8',
+  },
+  cameraInstruction: {
+    color: '#E2E8F0',
+    fontSize: 11,
+    marginTop: 20,
+    textAlign: 'center',
+    paddingHorizontal: 30,
+    backgroundColor: '#00000080',
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  cameraFooter: {
+    padding: 16,
+    backgroundColor: '#0F172A',
+    borderTopWidth: 1,
+    borderTopColor: '#1E293B',
+  },
+  cameraTestBtn: {
+    backgroundColor: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  cameraTestBtnText: {
+    color: '#38BDF8',
+    fontSize: 11,
     fontWeight: '700',
   },
 });

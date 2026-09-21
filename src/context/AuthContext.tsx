@@ -1,11 +1,4 @@
-/**
- * CloudWatch Dashboard - Contexto de Autenticação (AuthContext)
- * Arquitetura Desacoplada:
- * 1. react-native-encrypted-storage: Armazena o JSON completo das credenciais (@oci_credentials) via AES-256-GCM.
- * 2. react-native-keychain: Armazena exclusivamente o token de sessão com controle biométrico (<= 40 bytes),
- *    eliminando a exceção javax.crypto.IllegalBlockSizeException do Android Keystore.
- * Aluno: João Gabriel Barros Guimarães - FATEC 4DSM
- */
+
 
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import type { UserSession, CloudProvider } from '../types';
@@ -94,10 +87,10 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     const displayName = identifier.includes('ocid1')
       ? 'Administrador Oracle OCI'
       : identifier.includes('AKIA')
-      ? 'Administrador AWS'
-      : identifier.includes('@')
-      ? identifier.split('@')[0]
-      : 'DevOps / Cloud Admin';
+        ? 'Administrador AWS'
+        : identifier.includes('@')
+          ? identifier.split('@')[0]
+          : 'DevOps / Cloud Admin';
 
     return {
       userId: 'usr-' + (identifier.length > 8 ? identifier.slice(-8) : identifier),
