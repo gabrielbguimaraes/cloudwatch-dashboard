@@ -169,8 +169,3 @@ O monitoramento classifica as instâncias em três estados com base nos limites 
 * 🟢 **Operacional (HEALTHY):** Servidor operando normalmente, com processamento abaixo de 70% e sem falhas registradas.
 * 🟡 **Atenção (WARNING):** Consumo de processamento entre 70% e 85%, ou oscilações temporárias de resposta.
 * 🔴 **Crítico (CRITICAL):** Consumo de processamento superior a 85%, gargalos severos de memória ou servidores sem resposta.
-
-
-Os arquivos executáveis `.apk` gerados estarão disponíveis em:
-* **Debug:** `android/app/build/outputs/apk/debug/app-debug.apk`
-* **Release:** `android/app/build/outputs/apk/release/app-release.apk` (ou espelhado na raiz como `CloudWatchDashboard.apk`).
