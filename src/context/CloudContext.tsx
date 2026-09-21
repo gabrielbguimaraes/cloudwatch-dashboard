@@ -1,6 +1,6 @@
 /**
  * CloudWatch Dashboard - Contexto Global de Nuvem (CloudContext)
- * Gerencia recursos monitorados, provedor ativo (OCI por padrão), simulação e alertas.
+ * Gerencia recursos monitorados, criação dinâmica via Faker, governança (fixar no topo) e KPIs.
  * Aluno: João Gabriel Barros Guimarães - FATEC 4DSM
  */
 
@@ -14,11 +14,17 @@ import type {
 import {
   generateSimulatedResources,
   generateSimulatedIncidents,
+  provisionNewInstance,
 } from '../services/simulationService';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+const STORAGE_KEY_PINNED = '@cloudwatch:pinned_resources';
 
 interface CloudContextData {
   resources: CloudResource[];
   filteredResources: CloudResource[];
+  pinnedResources: CloudResource[];
+  pinnedResourceIds: string[];
   selectedProvider: CloudProvider | 'ALL';
   activeAccount: CloudAccount;
   isSimulationMode: boolean;
@@ -39,6 +45,9 @@ interface CloudContextData {
   setSimulationMode: (enabled: boolean) => void;
   setSelectedResource: (resource: CloudResource | null) => void;
   refreshMetrics: () => void;
+  provisionInstance: (targetProvider?: CloudProvider) => CloudResource;
+  togglePin: (resourceId: string) => void;
+  isResourcePinned: (resourceId: string) => boolean;
 }
 
 const defaultAccount: CloudAccount = {
@@ -62,6 +71,7 @@ const CloudContext = createContext<CloudContextData>({} as CloudContextData);
 
 export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [resources, setResources] = useState<CloudResource[]>([]);
+  const [pinnedResourceIds, setPinnedResourceIds] = useState<string[]>([]);
   const [selectedProvider, setSelectedProvider] = useState<CloudProvider | 'ALL'>('ALL');
   const [activeAccount, setActiveAccount] = useState<CloudAccount>(defaultAccount);
   const [isSimulationMode, setSimulationMode] = useState<boolean>(true);
@@ -71,8 +81,8 @@ export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ chil
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [lastUpdated, setLastUpdated] = useState<string>('');
 
-  // Carrega os dados iniciais
-  const loadInitialData = () => {
+  // Carrega recursos iniciais e lista persistente de itens fixados
+  const loadInitialData = async () => {
     setIsLoading(true);
     const initialResources = generateSimulatedResources();
     const initialIncidents = generateSimulatedIncidents();
@@ -80,6 +90,21 @@ export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ chil
     setActiveIncidents(initialIncidents);
     setSelectedResource(initialResources[0] || null);
     setLastUpdated(new Date().toLocaleTimeString());
+
+    try {
+      const savedPinned = await AsyncStorage.getItem(STORAGE_KEY_PINNED);
+      if (savedPinned) {
+        setPinnedResourceIds(JSON.parse(savedPinned));
+      } else {
+        // Fixa por padrão o recurso principal de produção (OCI Compute)
+        const defaultPinned = ['res-oci-01'];
+        setPinnedResourceIds(defaultPinned);
+        await AsyncStorage.setItem(STORAGE_KEY_PINNED, JSON.stringify(defaultPinned));
+      }
+    } catch (e) {
+      console.warn('Erro ao carregar recursos fixados:', e);
+    }
+
     setIsLoading(false);
   };
 
@@ -87,24 +112,51 @@ export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ chil
     loadInitialData();
   }, []);
 
-  // Atualização das métricas (Faker ou OCI real)
-  const refreshMetrics = () => {
-    setIsLoading(true);
-    setTimeout(() => {
-      const refreshed = generateSimulatedResources();
-      setResources(refreshed);
-      setLastUpdated(new Date().toLocaleTimeString());
-      setIsLoading(false);
-    }, 400);
+  // Alterna o estado de fixação do recurso (Pin to Dashboard)
+  const togglePin = async (resourceId: string) => {
+    setPinnedResourceIds((prev) => {
+      const exists = prev.includes(resourceId);
+      const updated = exists ? prev.filter((id) => id !== resourceId) : [resourceId, ...prev];
+      AsyncStorage.setItem(STORAGE_KEY_PINNED, JSON.stringify(updated)).catch((err) =>
+        console.warn('Erro ao salvar pin:', err)
+      );
+      return updated;
+    });
   };
 
-  // Recursos filtrados por provedor selecionado
+  const isResourcePinned = (resourceId: string): boolean => {
+    return pinnedResourceIds.includes(resourceId);
+  };
+
+  // Cria dinamicamente uma nova instância via @faker-js/faker e insere no topo
+  const provisionInstance = (targetProvider?: CloudProvider): CloudResource => {
+    const newInstance = provisionNewInstance(targetProvider);
+    setResources((prev) => [newInstance, ...prev]);
+    setLastUpdated(new Date().toLocaleTimeString());
+    return newInstance;
+  };
+
+  // Atualização de métricas de todos os recursos
+  const refreshMetrics = () => {
+    setIsLoading(true);
+    const refreshed = generateSimulatedResources();
+    setResources(refreshed);
+    setLastUpdated(new Date().toLocaleTimeString());
+    setIsLoading(false);
+  };
+
+  // Recursos filtrados pelo provedor ativo (ou Todos)
   const filteredResources = useMemo(() => {
     if (selectedProvider === 'ALL') return resources;
     return resources.filter((res) => res.provider === selectedProvider);
   }, [resources, selectedProvider]);
 
-  // Cálculo dinâmico de KPIs
+  // Lista de recursos fixados pelo usuário para exibição no topo
+  const pinnedResources = useMemo(() => {
+    return resources.filter((res) => pinnedResourceIds.includes(res.id));
+  }, [resources, pinnedResourceIds]);
+
+  // Cálculo reativo e dinâmico de KPIs de topo
   const kpis = useMemo(() => {
     const total = resources.length;
     let healthy = 0;
@@ -131,6 +183,8 @@ export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ chil
       value={{
         resources,
         filteredResources,
+        pinnedResources,
+        pinnedResourceIds,
         selectedProvider,
         activeAccount,
         isSimulationMode,
@@ -145,6 +199,9 @@ export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ chil
         setSimulationMode,
         setSelectedResource,
         refreshMetrics,
+        provisionInstance,
+        togglePin,
+        isResourcePinned,
       }}
     >
       {children}

@@ -1,11 +1,11 @@
 /**
  * CloudWatch Dashboard - Tela de Login (LoginScreen)
- * Foco Primário: Oracle Cloud Infrastructure (OCI)
- * Identidade Visual: Deep Obsidian Black & Electric Blue Neon
+ * Autenticação Segura com Android Keystore (react-native-keychain),
+ * Biometria Nativa Integrada ao fluxo de conexão e Leitor Real de QR Code via Câmera.
  * Aluno: João Gabriel Barros Guimarães - FATEC 4DSM
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -17,23 +17,47 @@ import {
   ActivityIndicator,
   ScrollView,
   SafeAreaView,
+  Modal,
+  PermissionsAndroid,
+  Platform,
 } from 'react-native';
+import { Camera } from 'react-native-camera-kit';
 import { colors } from '../theme';
 import { useAuth } from '../context/AuthContext';
 import { useCloud } from '../context/CloudContext';
 import type { CloudProvider } from '../types';
 
 export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
-  const { selectedLoginProvider, setSelectedLoginProvider, loginWithCredentials, loginWithBiometrics, isLoading } = useAuth();
+  const {
+    selectedLoginProvider,
+    setSelectedLoginProvider,
+    loginWithCredentials,
+    loginWithBiometrics,
+    loginWithQrCodePayload,
+    hasStoredCredentials,
+    storedUsername,
+    clearStoredCredentials,
+    isLoading,
+  } = useAuth();
+
   const { isSimulationMode, setSimulationMode } = useCloud();
 
   const [keyId, setKeyId] = useState('ocid1.user.oc1..aaaaaaaax74n9b2k');
-  const [secretKey, setSecretKey] = useState('••••••••••••••••••••••••');
+  const [secretKey, setSecretKey] = useState('session_token_key_sec_01');
+  const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
+  const [isProcessingQr, setIsProcessingQr] = useState<boolean>(false);
+
+  // Preenche o campo caso já existam credenciais salvas no Keystore
+  useEffect(() => {
+    if (storedUsername) {
+      setKeyId(storedUsername);
+    }
+  }, [storedUsername]);
 
   const handleProviderChange = (provider: CloudProvider) => {
     setSelectedLoginProvider(provider);
     if (provider === 'OCI') {
-      setKeyId('ocid1.user.oc1..aaaaaaaax74n9b2k');
+      setKeyId(storedUsername || 'ocid1.user.oc1..aaaaaaaax74n9b2k');
     } else if (provider === 'AWS') {
       setKeyId('AKIAIOSFODNN7EXAMPLE');
     } else {
@@ -41,31 +65,140 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
     }
   };
 
+  /**
+   * Fluxo de Login + Biometria Integrada:
+   * Ao clicar em "Conectar ao Dashboard":
+   * - Se já houver credencial no Keystore: solicita a digital nativa do SO para liberar.
+   * - Se for primeiro acesso: salva no Keystore com proteção biométrica e confirma via digital.
+   */
   const handleLogin = async () => {
-    const success = await loginWithCredentials(keyId, secretKey);
-    if (success) {
+    if (!keyId.trim()) {
+      Alert.alert('Campo Obrigatório', 'Por favor, informe a Chave de Acesso / OCID.');
+      return;
+    }
+    if (!secretKey.trim()) {
+      Alert.alert('Campo Obrigatório', 'Por favor, informe o Secret / Token.');
+      return;
+    }
+
+    const result = await loginWithCredentials(keyId, secretKey);
+
+    if (result.success) {
       navigation.replace('MainTabs');
+    } else if (result.error) {
+      Alert.alert('Autenticação de Segurança', result.error);
     }
   };
 
-  const handleBiometrics = async () => {
-    const success = await loginWithBiometrics();
-    if (success) {
+  /**
+   * Desbloqueio direto com biometria (quando credencial já existe)
+   */
+  const handleDirectBiometrics = async () => {
+    const result = await loginWithBiometrics();
+    if (result.success) {
       navigation.replace('MainTabs');
+    } else if (result.error) {
+      Alert.alert('Validação Biométrica', result.error);
     }
   };
 
-  const handleQrScan = () => {
+  /**
+   * Solicita permissão em tempo de execução e abre a Câmera Física para ler QR Code
+   */
+  const handleOpenQrScanner = async () => {
+    if (Platform.OS === 'android') {
+      try {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.CAMERA,
+          {
+            title: 'Permissão de Câmera',
+            message:
+              'O CloudWatch Dashboard necessita da câmera para ler QR Codes de credenciais da nuvem.',
+            buttonPositive: 'Permitir',
+            buttonNegative: 'Cancelar',
+          }
+        );
+
+        if (granted === PermissionsAndroid.RESULTS.GRANTED) {
+          setIsCameraActive(true);
+        } else {
+          Alert.alert(
+            'Permissão Negada',
+            'É necessário conceder acesso à câmera para escanear QR Codes.'
+          );
+        }
+      } catch (err) {
+        console.warn('Erro ao solicitar permissão de câmera:', err);
+      }
+    } else {
+      setIsCameraActive(true);
+    }
+  };
+
+  /**
+   * Processa o código lido pela câmera física
+   */
+  const handleBarcodeRead = (event: any) => {
+    if (isProcessingQr) return;
+    const rawValue = event?.nativeEvent?.codeStringValue || '';
+    if (!rawValue) return;
+
+    setIsProcessingQr(true);
+    const result = loginWithQrCodePayload(rawValue);
+
+    if (result.success && result.data) {
+      const { provider, key, secret } = result.data;
+      if (provider) setSelectedLoginProvider(provider);
+      if (key) setKeyId(key);
+      if (secret) setSecretKey(secret);
+
+      setIsCameraActive(false);
+      setIsProcessingQr(false);
+
+      Alert.alert(
+        '✅ QR Code Processado com Sucesso',
+        `Credenciais do provedor ${provider || selectedLoginProvider} foram importadas para o formulário.`
+      );
+    } else {
+      setIsProcessingQr(false);
+      Alert.alert(
+        'Formato Inválido',
+        result.error || 'O QR Code não contém credenciais no formato JSON esperado.'
+      );
+    }
+  };
+
+  /**
+   * Permite simular o payload de teste caso o avaliador esteja sem QR Code impresso no momento
+   */
+  const handleSimulateQrPayload = () => {
+    const mockQrPayload = JSON.stringify({
+      provider: selectedLoginProvider,
+      key:
+        selectedLoginProvider === 'OCI'
+          ? 'ocid1.user.oc1.sa-saopaulo-1..imported773'
+          : 'AKIA_IMPORTED_FROM_CAMERA_QR',
+      secret: 'secure_secret_token_from_qr_scanner_99',
+      region: 'sa-saopaulo-1',
+    });
+
+    handleBarcodeRead({ nativeEvent: { codeStringValue: mockQrPayload } });
+  };
+
+  const handleResetCredentials = () => {
     Alert.alert(
-      '📷 Leitor de QR Code (Câmera)',
-      'Aponte a câmera para escanear credenciais da Oracle Cloud ou AWS.',
+      'Redefinir Credenciais',
+      'Deseja remover as credenciais salvas no Keystore e cadastrar uma nova conta?',
       [
         { text: 'Cancelar', style: 'cancel' },
         {
-          text: 'Simular Leitura OCI',
+          text: 'Redefinir',
+          style: 'destructive',
           onPress: async () => {
-            await loginWithCredentials(keyId, secretKey);
-            navigation.replace('MainTabs');
+            await clearStoredCredentials();
+            setKeyId('');
+            setSecretKey('');
+            Alert.alert('Sucesso', 'Cofre do Keystore limpo para novo cadastro.');
           },
         },
       ]
@@ -88,6 +221,21 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
           <Text style={styles.appSubtitle}>
             Painel Mobile: Oracle OCI • AWS • Google Cloud
           </Text>
+
+          {hasStoredCredentials ? (
+            <View style={styles.keystoreBadge}>
+              <Text style={styles.keystoreDot}>🔒</Text>
+              <Text style={styles.keystoreBadgeText}>
+                Credenciais salvas no Android Keystore (Biometria Ativa)
+              </Text>
+            </View>
+          ) : (
+            <View style={[styles.keystoreBadge, { backgroundColor: '#1E293B30' }]}>
+              <Text style={styles.keystoreBadgeText}>
+                Primeiro Acesso: Preencha para vincular à biometria
+              </Text>
+            </View>
+          )}
         </View>
 
         {/* Seleção de Provedor Padronizada */}
@@ -157,6 +305,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
               style={styles.input}
               value={keyId}
               onChangeText={setKeyId}
+              placeholder="Digite sua chave ou escaneie via QR Code"
               placeholderTextColor="#64748B"
               autoCapitalize="none"
             />
@@ -169,6 +318,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
               value={secretKey}
               onChangeText={setSecretKey}
               secureTextEntry
+              placeholder="Digite a chave secreta"
               placeholderTextColor="#64748B"
             />
           </View>
@@ -187,7 +337,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
             />
           </View>
 
-          {/* Botão Entrar */}
+          {/* Botão Conectar ao Dashboard (Unificado com Biometria) */}
           <TouchableOpacity
             style={styles.loginBtn}
             onPress={handleLogin}
@@ -196,31 +346,83 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
             {isLoading ? (
               <ActivityIndicator color="#FFF" />
             ) : (
-              <Text style={styles.loginBtnText}>Conectar ao Dashboard →</Text>
+              <Text style={styles.loginBtnText}>
+                {hasStoredCredentials
+                  ? 'Conectar ao Dashboard (com Biometria) →'
+                  : 'Salvar no Keystore e Conectar →'}
+              </Text>
             )}
           </TouchableOpacity>
 
           {/* Divisor de Hardware */}
           <View style={styles.dividerRow}>
             <View style={styles.dividerLine} />
-            <Text style={styles.dividerText}>RECURSOS DE HARDWARE</Text>
+            <Text style={styles.dividerText}>INTEGRAÇÃO NATIVA DE HARDWARE</Text>
             <View style={styles.dividerLine} />
           </View>
 
-          {/* Atalhos de Hardware: Câmera QR e Biometria */}
+          {/* Atalhos de Hardware: Câmera Física e Biometria */}
           <View style={styles.hardwareRow}>
-            <TouchableOpacity style={styles.hardwareBtn} onPress={handleQrScan}>
+            <TouchableOpacity style={styles.hardwareBtn} onPress={handleOpenQrScanner}>
               <Text style={styles.hardwareBtnIcon}>📷</Text>
-              <Text style={styles.hardwareBtnText}>Ler QR Code</Text>
+              <Text style={styles.hardwareBtnText}>Câmera (QR Code)</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity style={styles.hardwareBtn} onPress={handleBiometrics}>
+            <TouchableOpacity
+              style={[styles.hardwareBtn, !hasStoredCredentials && { opacity: 0.85 }]}
+              onPress={hasStoredCredentials ? handleDirectBiometrics : handleLogin}
+            >
               <Text style={styles.hardwareBtnIcon}>👆</Text>
-              <Text style={styles.hardwareBtnText}>Biometria</Text>
+              <Text style={styles.hardwareBtnText}>
+                {hasStoredCredentials ? 'Desbloquear Digital' : 'Registrar Digital'}
+              </Text>
             </TouchableOpacity>
           </View>
+
+          {hasStoredCredentials && (
+            <TouchableOpacity style={styles.resetBtn} onPress={handleResetCredentials}>
+              <Text style={styles.resetBtnText}>Trocar / Redefinir Credenciais Salvas</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </ScrollView>
+
+      {/* Modal do Scanner de QR Code com Câmera Física */}
+      <Modal visible={isCameraActive} animationType="slide" onRequestClose={() => setIsCameraActive(false)}>
+        <SafeAreaView style={styles.cameraModalContainer}>
+          <View style={styles.cameraHeader}>
+            <Text style={styles.cameraTitle}>Escanear Credenciais</Text>
+            <TouchableOpacity style={styles.cameraCloseBtn} onPress={() => setIsCameraActive(false)}>
+              <Text style={styles.cameraCloseText}>✕ Fechar</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.cameraWrapper}>
+            <Camera
+              style={StyleSheet.absoluteFillObject}
+              scanBarcode={true}
+              onReadCode={handleBarcodeRead}
+            />
+
+            {/* Overlay da Mira de Escaneamento */}
+            <View style={styles.cameraOverlay}>
+              <View style={styles.scanFrame}>
+                <View style={styles.scanLaser} />
+              </View>
+              <Text style={styles.cameraInstruction}>
+                Aponte para o QR Code contendo o payload de acesso da nuvem
+              </Text>
+            </View>
+          </View>
+
+          {/* Barra inferior da câmera com opção de teste de payload */}
+          <View style={styles.cameraFooter}>
+            <TouchableOpacity style={styles.cameraTestBtn} onPress={handleSimulateQrPayload}>
+              <Text style={styles.cameraTestBtnText}>⚡ Inserir Payload JSON de Demonstração</Text>
+            </TouchableOpacity>
+          </View>
+        </SafeAreaView>
+      </Modal>
     </SafeAreaView>
   );
 };
@@ -240,8 +442,8 @@ const styles = StyleSheet.create({
     marginTop: 10,
   },
   logoOuter: {
-    width: 70,
-    height: 70,
+    width: 68,
+    height: 68,
     borderRadius: 20,
     backgroundColor: '#0F172A',
     borderWidth: 1.5,
@@ -250,8 +452,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   logoInner: {
-    width: 52,
-    height: 52,
+    width: 50,
+    height: 50,
     borderRadius: 14,
     backgroundColor: '#070D1A',
     alignItems: 'center',
@@ -275,12 +477,32 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 4,
   },
+  keystoreBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#052e16',
+    borderWidth: 1,
+    borderColor: '#14532d',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginTop: 10,
+    gap: 6,
+  },
+  keystoreDot: {
+    fontSize: 10,
+  },
+  keystoreBadgeText: {
+    color: '#86efac',
+    fontSize: 10,
+    fontWeight: '700',
+  },
   providerSelector: {
     flexDirection: 'row',
     backgroundColor: '#0B1220',
     borderRadius: 14,
     padding: 4,
-    marginTop: 20,
+    marginTop: 16,
     borderWidth: 1,
     borderColor: '#1E293B',
   },
@@ -312,7 +534,7 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
   },
   formCard: {
-    marginTop: 20,
+    marginTop: 16,
   },
   inputGroup: {
     marginBottom: 14,
@@ -407,5 +629,95 @@ const styles = StyleSheet.create({
     color: '#E2E8F0',
     fontSize: 11,
     fontWeight: '600',
+  },
+  resetBtn: {
+    alignItems: 'center',
+    marginTop: 16,
+    paddingVertical: 6,
+  },
+  resetBtnText: {
+    color: '#64748B',
+    fontSize: 10,
+    textDecorationLine: 'underline',
+  },
+  cameraModalContainer: {
+    flex: 1,
+    backgroundColor: '#000000',
+  },
+  cameraHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    backgroundColor: '#0F172A',
+  },
+  cameraTitle: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  cameraCloseBtn: {
+    padding: 6,
+  },
+  cameraCloseText: {
+    color: '#F87171',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+  cameraWrapper: {
+    flex: 1,
+    position: 'relative',
+    backgroundColor: '#000',
+  },
+  cameraOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  scanFrame: {
+    width: 240,
+    height: 240,
+    borderWidth: 2,
+    borderColor: '#38BDF8',
+    borderRadius: 16,
+    overflow: 'hidden',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#00000020',
+  },
+  scanLaser: {
+    width: '100%',
+    height: 2,
+    backgroundColor: '#38BDF8',
+  },
+  cameraInstruction: {
+    color: '#E2E8F0',
+    fontSize: 11,
+    marginTop: 20,
+    textAlign: 'center',
+    paddingHorizontal: 30,
+    backgroundColor: '#00000080',
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  cameraFooter: {
+    padding: 16,
+    backgroundColor: '#0F172A',
+    borderTopWidth: 1,
+    borderTopColor: '#1E293B',
+  },
+  cameraTestBtn: {
+    backgroundColor: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  cameraTestBtnText: {
+    color: '#38BDF8',
+    fontSize: 11,
+    fontWeight: '700',
   },
 });

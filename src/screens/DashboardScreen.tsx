@@ -2,6 +2,7 @@
  * CloudWatch Dashboard - Tela Principal (DashboardScreen)
  * Foco Primário: Oracle Cloud Infrastructure (OCI) + AWS & GCP
  * Semáforo de Saúde: Verde (Operacional), Amarelo (Atenção), Vermelho (Crítico)
+ * Governança: Seção de Recursos Fixados e Provisionamento Dinâmico com @faker-js/faker.
  * Aluno: João Gabriel Barros Guimarães - FATEC 4DSM
  */
 
@@ -14,6 +15,7 @@ import {
   ScrollView,
   SafeAreaView,
   RefreshControl,
+  Alert,
 } from 'react-native';
 import { colors } from '../theme';
 import { useCloud } from '../context/CloudContext';
@@ -23,6 +25,7 @@ import type { CloudResource, CloudProvider } from '../types';
 export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   const {
     filteredResources,
+    pinnedResources,
     selectedProvider,
     setProviderFilter,
     kpis,
@@ -30,6 +33,9 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
     setTimeRange,
     setSelectedResource,
     refreshMetrics,
+    provisionInstance,
+    togglePin,
+    isResourcePinned,
     isLoading,
     lastUpdated,
   } = useCloud();
@@ -46,13 +52,26 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
     navigation.replace('Login');
   };
 
+  /**
+   * Provisiona sob demanda uma nova instância computacional via @faker-js/faker
+   */
+  const handleProvisionInstance = () => {
+    const targetProvider = selectedProvider === 'ALL' ? undefined : selectedProvider;
+    const newResource = provisionInstance(targetProvider);
+
+    Alert.alert(
+      '⚡ Nova Instância Provisionada',
+      `Recurso criado com sucesso via Faker Engine:\n\n• Nome: ${newResource.name}\n• Provedor: ${newResource.provider}\n• Status: ${newResource.status}\n• CPU: ${newResource.metricsSummary.cpuPercent}% | RAM: ${newResource.metricsSummary.memoryPercent}%`,
+      [{ text: 'OK' }]
+    );
+  };
+
   const getStatusColor = (status: CloudResource['status']) => {
     if (status === 'CRITICAL') return colors.status.danger;
     if (status === 'WARNING') return colors.status.warning;
     return colors.status.healthy;
   };
 
-  // Objeto padronizado de estilo único para tags de provedor (atual e futuros)
   const STANDARD_BADGE_STYLE = {
     bg: '#1E293B',
     border: '#334155',
@@ -75,6 +94,118 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
     };
   };
 
+  /**
+   * Renderizador reutilizável de Card de Recurso com Semáforo e Botão de Fixar
+   */
+  const renderResourceCard = (res: CloudResource, isPinnedSection = false) => {
+    const statusColor = getStatusColor(res.status);
+    const badge = getProviderBadge(res.provider);
+    const isPinned = isResourcePinned(res.id);
+
+    return (
+      <TouchableOpacity
+        key={`${isPinnedSection ? 'pinned-' : 'all-'}${res.id}`}
+        style={[styles.resourceCard, isPinnedSection && styles.resourceCardPinned]}
+        onPress={() => handleResourcePress(res)}
+        activeOpacity={0.7}
+      >
+        {/* Tarja Lateral do Semáforo Rigoroso */}
+        <View style={[styles.semaphoreStripe, { backgroundColor: statusColor }]} />
+
+        <View style={styles.cardContent}>
+          <View style={styles.cardHeader}>
+            <View style={styles.cardHeaderLeft}>
+              <View style={styles.cardBadgeRow}>
+                <View
+                  style={[
+                    styles.providerBadge,
+                    { backgroundColor: badge.bg, borderColor: badge.border },
+                  ]}
+                >
+                  <Text style={[styles.providerBadgeText, { color: badge.text }]}>
+                    {badge.name}
+                  </Text>
+                </View>
+                <Text style={styles.resourceName}>{res.name}</Text>
+              </View>
+              <Text style={styles.resourceSub} numberOfLines={1}>
+                {res.ocid || res.arn || res.id}
+              </Text>
+            </View>
+
+            {/* Ações do Card: Indicador de Saúde e Botão de Fixar */}
+            <View style={styles.cardHeaderRight}>
+              <TouchableOpacity
+                style={styles.pinBtn}
+                onPress={() => togglePin(res.id)}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <Text style={[styles.pinIconText, isPinned && styles.pinIconTextActive]}>
+                  {isPinned ? '📌' : '📍'}
+                </Text>
+              </TouchableOpacity>
+
+              <View style={[styles.statusIndicator, { backgroundColor: statusColor }]} />
+            </View>
+          </View>
+
+          {/* Resumo de Métricas */}
+          <View style={styles.metricsRow}>
+            {res.metricsSummary.cpuPercent !== undefined && (
+              <View
+                style={[
+                  styles.metricPill,
+                  res.status === 'CRITICAL' && styles.metricPillDanger,
+                  res.status === 'WARNING' && styles.metricPillWarning,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.metricPillText,
+                    res.status === 'CRITICAL' && styles.metricPillTextDanger,
+                    res.status === 'WARNING' && styles.metricPillTextWarning,
+                  ]}
+                >
+                  CPU: {res.metricsSummary.cpuPercent}%
+                </Text>
+              </View>
+            )}
+
+            {res.metricsSummary.memoryPercent !== undefined && (
+              <View style={styles.metricPill}>
+                <Text style={styles.metricPillText}>
+                  Mem: {res.metricsSummary.memoryPercent}%
+                </Text>
+              </View>
+            )}
+
+            {res.metricsSummary.latencyMs !== undefined && (
+              <View
+                style={[
+                  styles.metricPill,
+                  res.metricsSummary.latencyMs > 50 && styles.metricPillWarning,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.metricPillText,
+                    res.metricsSummary.latencyMs > 50 && styles.metricPillTextWarning,
+                  ]}
+                >
+                  {res.metricsSummary.latencyMs}ms
+                </Text>
+              </View>
+            )}
+
+            <View style={styles.metricPill}>
+              <Text style={styles.metricPillText}>{res.region}</Text>
+            </View>
+          </View>
+        </View>
+      </TouchableOpacity>
+    );
+  };
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView
@@ -87,7 +218,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
           />
         }
       >
-        {/* Topo Curvo Tecnológico */}
+        {/* Topo Tecnológico */}
         <View style={styles.headerCurved}>
           <View style={styles.headerTopRow}>
             <View style={styles.regionBadge}>
@@ -110,14 +241,16 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
               <Text style={styles.uptimeSub}>Semáforo de Saúde Global Ativo</Text>
             </View>
 
-            <TouchableOpacity
-              style={styles.fakerRefreshBtn}
-              onPress={refreshMetrics}
-              activeOpacity={0.8}
-            >
-              <Text style={styles.fakerIcon}>🔄</Text>
-              <Text style={styles.fakerText}>FAKER</Text>
-            </TouchableOpacity>
+            <View style={styles.topActionsRow}>
+              <TouchableOpacity
+                style={styles.fakerRefreshBtn}
+                onPress={refreshMetrics}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.fakerIcon}>🔄</Text>
+                <Text style={styles.fakerText}>FAKER</Text>
+              </TouchableOpacity>
+            </View>
           </View>
 
           {/* Seletor de Período */}
@@ -144,14 +277,35 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
           </View>
         </View>
 
+        {/* Botão de Destaque: Provisionar Nova Instância (Faker) */}
+        <View style={styles.provisionSection}>
+          <TouchableOpacity
+            style={styles.provisionBtn}
+            onPress={handleProvisionInstance}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.provisionBtnIcon}>⚡</Text>
+            <Text style={styles.provisionBtnText}>+ Provisionar Nova Instância (Faker)</Text>
+          </TouchableOpacity>
+        </View>
+
         {/* Filtro por Provedor */}
         <View style={styles.filterSection}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterScroll}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.filterScroll}
+          >
             <TouchableOpacity
               style={[styles.filterPill, selectedProvider === 'ALL' && styles.filterPillActive]}
               onPress={() => setProviderFilter('ALL')}
             >
-              <Text style={[styles.filterPillText, selectedProvider === 'ALL' && styles.filterPillTextActive]}>
+              <Text
+                style={[
+                  styles.filterPillText,
+                  selectedProvider === 'ALL' && styles.filterPillTextActive,
+                ]}
+              >
                 Todos ({kpis.total})
               </Text>
             </TouchableOpacity>
@@ -161,7 +315,12 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
               onPress={() => setProviderFilter('OCI')}
             >
               <View style={[styles.filterDot, { backgroundColor: '#EF4444' }]} />
-              <Text style={[styles.filterPillText, selectedProvider === 'OCI' && styles.filterPillTextActive]}>
+              <Text
+                style={[
+                  styles.filterPillText,
+                  selectedProvider === 'OCI' && styles.filterPillTextActive,
+                ]}
+              >
                 Oracle OCI
               </Text>
             </TouchableOpacity>
@@ -171,7 +330,12 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
               onPress={() => setProviderFilter('AWS')}
             >
               <View style={[styles.filterDot, { backgroundColor: '#F59E0B' }]} />
-              <Text style={[styles.filterPillText, selectedProvider === 'AWS' && styles.filterPillTextActive]}>
+              <Text
+                style={[
+                  styles.filterPillText,
+                  selectedProvider === 'AWS' && styles.filterPillTextActive,
+                ]}
+              >
                 AWS
               </Text>
             </TouchableOpacity>
@@ -181,7 +345,12 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
               onPress={() => setProviderFilter('GCP')}
             >
               <View style={[styles.filterDot, { backgroundColor: '#3B82F6' }]} />
-              <Text style={[styles.filterPillText, selectedProvider === 'GCP' && styles.filterPillTextActive]}>
+              <Text
+                style={[
+                  styles.filterPillText,
+                  selectedProvider === 'GCP' && styles.filterPillTextActive,
+                ]}
+              >
                 GCP
               </Text>
             </TouchableOpacity>
@@ -198,18 +367,41 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
 
           <View style={[styles.kpiCard, { borderColor: colors.status.healthyBorder }]}>
             <Text style={[styles.kpiLabel, { color: colors.status.healthy }]}>NORMAL</Text>
-            <Text style={[styles.kpiValue, { color: colors.status.healthy }]}>{kpis.healthy}</Text>
+            <Text style={[styles.kpiValue, { color: colors.status.healthy }]}>
+              {kpis.healthy}
+            </Text>
             <Text style={styles.kpiSub}>Operacional</Text>
           </View>
 
           <View style={[styles.kpiCard, { borderColor: colors.status.dangerBorder }]}>
             <Text style={[styles.kpiLabel, { color: colors.status.danger }]}>CRÍTICO</Text>
-            <Text style={[styles.kpiValue, { color: colors.status.danger }]}>{kpis.critical}</Text>
+            <Text style={[styles.kpiValue, { color: colors.status.danger }]}>
+              {kpis.critical}
+            </Text>
             <Text style={styles.kpiSub}>Atenção</Text>
           </View>
         </View>
 
-        {/* Lista de Recursos Monitorados */}
+        {/* Seção de Governança: Recursos Fixados no Início */}
+        {pinnedResources.length > 0 && (
+          <View style={styles.pinnedSection}>
+            <View style={styles.sectionHeader}>
+              <View style={styles.sectionTitleRow}>
+                <Text style={styles.pinnedHeaderIcon}>📌</Text>
+                <Text style={styles.pinnedSectionTitle}>
+                  RECURSOS FIXADOS ({pinnedResources.length})
+                </Text>
+              </View>
+              <Text style={styles.pinnedSub}>Prioridade Alta</Text>
+            </View>
+
+            <View style={styles.resourceList}>
+              {pinnedResources.map((res) => renderResourceCard(res, true))}
+            </View>
+          </View>
+        )}
+
+        {/* Lista Geral de Recursos Monitorados */}
         <View style={styles.resourcesSection}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>INFRAESTRUTURA EM NUVEM</Text>
@@ -217,89 +409,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
           </View>
 
           <View style={styles.resourceList}>
-            {filteredResources.map((res) => {
-              const statusColor = getStatusColor(res.status);
-              const badge = getProviderBadge(res.provider);
-
-              return (
-                <TouchableOpacity
-                  key={res.id}
-                  style={styles.resourceCard}
-                  onPress={() => handleResourcePress(res)}
-                  activeOpacity={0.7}
-                >
-                  {/* Tarja Lateral do Semáforo */}
-                  <View style={[styles.semaphoreStripe, { backgroundColor: statusColor }]} />
-
-                  <View style={styles.cardContent}>
-                    <View style={styles.cardHeader}>
-                      <View>
-                        <View style={styles.cardBadgeRow}>
-                          <View
-                            style={[
-                              styles.providerBadge,
-                              { backgroundColor: badge.bg, borderColor: badge.border },
-                            ]}
-                          >
-                            <Text style={[styles.providerBadgeText, { color: badge.text }]}>
-                              {badge.name}
-                            </Text>
-                          </View>
-                          <Text style={styles.resourceName}>{res.name}</Text>
-                        </View>
-                        <Text style={styles.resourceSub} numberOfLines={1}>
-                          {res.ocid || res.arn || res.id}
-                        </Text>
-                      </View>
-
-                      {/* Luz Indicadora de Status */}
-                      <View style={[styles.statusIndicator, { backgroundColor: statusColor }]} />
-                    </View>
-
-                    {/* Resumo de Métricas */}
-                    <View style={styles.metricsRow}>
-                      {res.metricsSummary.cpuPercent !== undefined && (
-                        <View
-                          style={[
-                            styles.metricPill,
-                            res.status === 'CRITICAL' && styles.metricPillDanger,
-                          ]}
-                        >
-                          <Text
-                            style={[
-                              styles.metricPillText,
-                              res.status === 'CRITICAL' && styles.metricPillTextDanger,
-                            ]}
-                          >
-                            CPU: {res.metricsSummary.cpuPercent}%
-                          </Text>
-                        </View>
-                      )}
-
-                      {res.metricsSummary.memoryPercent !== undefined && (
-                        <View style={styles.metricPill}>
-                          <Text style={styles.metricPillText}>
-                            Mem: {res.metricsSummary.memoryPercent}%
-                          </Text>
-                        </View>
-                      )}
-
-                      {res.metricsSummary.latencyMs !== undefined && (
-                        <View style={styles.metricPill}>
-                          <Text style={styles.metricPillText}>
-                            {res.metricsSummary.latencyMs}ms
-                          </Text>
-                        </View>
-                      )}
-
-                      <View style={styles.metricPill}>
-                        <Text style={styles.metricPillText}>{res.region}</Text>
-                      </View>
-                    </View>
-                  </View>
-                </TouchableOpacity>
-              );
-            })}
+            {filteredResources.map((res) => renderResourceCard(res, false))}
           </View>
         </View>
       </ScrollView>
@@ -319,9 +429,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#091122',
     paddingHorizontal: 20,
     paddingTop: 12,
-    paddingBottom: 22,
-    borderBottomLeftRadius: 32,
-    borderBottomRightRadius: 32,
+    paddingBottom: 20,
+    borderBottomLeftRadius: 30,
+    borderBottomRightRadius: 30,
     borderBottomWidth: 1,
     borderBottomColor: '#172554',
   },
@@ -395,6 +505,11 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     fontSize: 10,
   },
+  topActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
   fakerRefreshBtn: {
     backgroundColor: '#0066FF25',
     borderWidth: 1,
@@ -439,6 +554,30 @@ const styles = StyleSheet.create({
   },
   timeRangeTextActive: {
     color: '#FFFFFF',
+  },
+  provisionSection: {
+    paddingHorizontal: 16,
+    marginTop: 14,
+  },
+  provisionBtn: {
+    backgroundColor: '#1E293B',
+    borderWidth: 1.5,
+    borderColor: '#38BDF8',
+    borderRadius: 14,
+    paddingVertical: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  provisionBtnIcon: {
+    fontSize: 14,
+    color: '#38BDF8',
+  },
+  provisionBtnText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '800',
   },
   filterSection: {
     marginTop: 14,
@@ -518,6 +657,33 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     fontSize: 8,
   },
+  pinnedSection: {
+    marginTop: 18,
+    paddingHorizontal: 16,
+  },
+  pinnedTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  pinnedHeaderIcon: {
+    fontSize: 12,
+  },
+  pinnedSectionTitle: {
+    color: '#F8FAFC',
+    fontSize: 11,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+  },
+  pinnedSub: {
+    color: '#38BDF8',
+    fontSize: 9,
+    fontWeight: '700',
+  },
+  resourceCardPinned: {
+    backgroundColor: '#0F172A',
+    borderColor: '#334155',
+  },
   resourcesSection: {
     marginTop: 18,
     paddingHorizontal: 16,
@@ -527,6 +693,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     marginBottom: 10,
+  },
+  sectionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   sectionTitle: {
     color: colors.textSecondary,
@@ -561,6 +731,25 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'flex-start',
   },
+  cardHeaderLeft: {
+    flex: 1,
+  },
+  cardHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginLeft: 6,
+  },
+  pinBtn: {
+    padding: 2,
+  },
+  pinIconText: {
+    fontSize: 14,
+    opacity: 0.5,
+  },
+  pinIconTextActive: {
+    opacity: 1,
+  },
   cardBadgeRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -588,7 +777,7 @@ const styles = StyleSheet.create({
     fontSize: 9,
     fontFamily: 'monospace',
     marginTop: 3,
-    maxWidth: 240,
+    maxWidth: 220,
   },
   statusIndicator: {
     width: 8,
@@ -608,6 +797,11 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
     borderRadius: 6,
   },
+  metricPillWarning: {
+    backgroundColor: '#78350F40',
+    borderWidth: 1,
+    borderColor: '#F59E0B60',
+  },
   metricPillDanger: {
     backgroundColor: '#7F1D1D50',
     borderWidth: 1,
@@ -617,6 +811,10 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontSize: 9,
     fontFamily: 'monospace',
+  },
+  metricPillTextWarning: {
+    color: '#FBBF24',
+    fontWeight: '700',
   },
   metricPillTextDanger: {
     color: '#F87171',

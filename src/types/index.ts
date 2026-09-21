@@ -158,6 +158,7 @@ export interface CloudResource {
   metricsSummary: MetricsSummary;
   monthlyCostEstimate: number; // Em USD
   lastHealthCheck: string;
+  isPinned?: boolean;
   metadata?: OciComputeMetadata | OciDatabaseMetadata | Record<string, any>;
 }
 

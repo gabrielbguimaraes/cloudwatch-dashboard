@@ -13,6 +13,7 @@ import {
   ScrollView,
   SafeAreaView,
   Alert,
+  Share,
 } from 'react-native';
 import { colors } from '../theme';
 import { useCloud } from '../context/CloudContext';
@@ -22,7 +23,7 @@ import {
 } from '../services/simulationService';
 
 export const MetricsDetailScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
-  const { selectedResource } = useCloud();
+  const { selectedResource, togglePin, isResourcePinned } = useCloud();
   const [logFilter, setLogFilter] = useState<'ALL' | 'ERROR' | 'WARN'>('ALL');
 
   if (!selectedResource) {
@@ -38,6 +39,8 @@ export const MetricsDetailScreen: React.FC<{ navigation: any }> = ({ navigation 
     );
   }
 
+  const isPinned = isResourcePinned(selectedResource.id);
+
   const timeSeries = useMemo(() => {
     return generateTimeSeriesMetrics(selectedResource.id);
   }, [selectedResource.id]);
@@ -48,16 +51,41 @@ export const MetricsDetailScreen: React.FC<{ navigation: any }> = ({ navigation 
     return raw.filter((l) => l.severity === logFilter);
   }, [selectedResource.id, logFilter]);
 
-  const handleExportPdf = () => {
-    Alert.alert(
-      '📄 Relatório PDF Gerado',
-      `O relatório de métricas e conformidade da instância ${selectedResource.name} foi compilado com sucesso via react-native-pdf-lib.`,
-      [{ text: 'OK' }]
-    );
+  /**
+   * Gera relatório formatado de auditoria e abre a folha de compartilhamento nativa do Android
+   */
+  const handleExportPdf = async () => {
+    try {
+      const now = new Date();
+      const reportHeader = `========================================================\nCLOUDWATCH DASHBOARD - RELATÓRIO TÉCNICO DE AUDITORIA\nData de Emissão: ${now.toLocaleDateString()} às ${now.toLocaleTimeString()}\n========================================================\n\n`;
+
+      const resourceInfo = `1. IDENTIFICAÇÃO DO RECURSO:\n• Nome: ${selectedResource.name}\n• Provedor: ${selectedResource.provider}\n• Identificador (OCID/ARN): ${selectedResource.ocid || selectedResource.arn || selectedResource.id}\n• Região: ${selectedResource.region}\n• Status Operacional: ${selectedResource.status}\n• Disponibilidade SLA: ${selectedResource.availabilitySla}%\n• Estimativa Mensal: $${selectedResource.monthlyCostEstimate.toFixed(2)} USD\n\n`;
+
+      const metricsInfo = `2. TELEMETRIA E MÉTRICAS PRINCIPAIS:\n• Utilização de CPU: ${selectedResource.metricsSummary.cpuPercent}%\n• Memória RAM: ${selectedResource.metricsSummary.memoryPercent || 48}%\n• Latência de Rede/IO: ${selectedResource.metricsSummary.latencyMs || 4.2} ms\n• Utilização de Disco: ${selectedResource.metricsSummary.diskPercent || 42}%\n\n`;
+
+      const logsInfo = `3. HISTÓRICO DE LOGS E EVENTOS:\n${logs
+        .map((l) => `[${l.timestamp}] [${l.severity}] ${l.message}`)
+        .join('\n')}\n\n========================================================\nGerado via CloudWatch Mobile • Aluno: João Gabriel B. Guimarães (FATEC)\n========================================================`;
+
+      const fullReport = reportHeader + resourceInfo + metricsInfo + logsInfo;
+
+      await Share.share({
+        title: `Relatório Técnico - ${selectedResource.name}`,
+        message: fullReport,
+      });
+    } catch (error: any) {
+      Alert.alert('Erro ao Exportar', error?.message || 'Falha ao acionar compartilhamento.');
+    }
   };
 
   const handlePin = () => {
-    Alert.alert('📌 Fixado no Dashboard', 'Métrica adicionada ao topo do painel principal.');
+    togglePin(selectedResource.id);
+    Alert.alert(
+      isPinned ? 'Desafixado do Topo' : '📌 Fixado no Topo',
+      isPinned
+        ? `${selectedResource.name} foi removido dos destaques.`
+        : `${selectedResource.name} foi fixado na seção prioritária do Dashboard.`
+    );
   };
 
   const isOci = selectedResource.provider === 'OCI';
@@ -233,12 +261,17 @@ export const MetricsDetailScreen: React.FC<{ navigation: any }> = ({ navigation 
         <View style={styles.actionsRow}>
           <TouchableOpacity style={styles.actionBtnPdf} onPress={handleExportPdf}>
             <Text style={styles.actionBtnIcon}>📄</Text>
-            <Text style={styles.actionBtnPdfText}>Exportar PDF</Text>
+            <Text style={styles.actionBtnPdfText}>Exportar Relatório</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.actionBtnPin} onPress={handlePin}>
+          <TouchableOpacity
+            style={[styles.actionBtnPin, isPinned && styles.actionBtnPinActive]}
+            onPress={handlePin}
+          >
             <Text style={styles.actionBtnIcon}>📌</Text>
-            <Text style={styles.actionBtnPinText}>Fixar no Início</Text>
+            <Text style={[styles.actionBtnPinText, isPinned && styles.actionBtnPinTextActive]}>
+              {isPinned ? 'Fixado no Topo' : 'Fixar no Início'}
+            </Text>
           </TouchableOpacity>
         </View>
       </ScrollView>
@@ -561,5 +594,12 @@ const styles = StyleSheet.create({
     color: '#E2E8F0',
     fontSize: 12,
     fontWeight: '700',
+  },
+  actionBtnPinActive: {
+    backgroundColor: '#0F172A',
+    borderColor: '#38BDF8',
+  },
+  actionBtnPinTextActive: {
+    color: '#38BDF8',
   },
 });

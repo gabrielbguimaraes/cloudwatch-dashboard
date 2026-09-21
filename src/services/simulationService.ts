@@ -13,6 +13,27 @@ import type {
   CloudLogEvent,
   AlertIncident,
 } from '../types';
+import { faker } from '@faker-js/faker';
+
+/**
+ * Avalia o status do semáforo com base nas regras estritas de métricas:
+ * 🟢 Operacional: CPU < 70% e sem erros críticos.
+ * 🟡 Atenção: CPU entre 70% e 85% ou latência elevada (> 50ms).
+ * 🔴 Crítico: CPU > 85% ou falhas de healthcheck.
+ */
+export const evaluateHealthStatus = (
+  cpuPercent: number,
+  latencyMs?: number,
+  hasCriticalErrors = false
+): HealthStatus => {
+  if (cpuPercent > 85 || hasCriticalErrors) {
+    return 'CRITICAL';
+  }
+  if ((cpuPercent >= 70 && cpuPercent <= 85) || (latencyMs !== undefined && latencyMs > 50)) {
+    return 'WARNING';
+  }
+  return 'HEALTHY';
+};
 
 // Gerador pseudo-aleatório seguro e sem dependências rígidas para garantir execução imediata
 const getRandomInt = (min: number, max: number): number => {
@@ -327,4 +348,166 @@ export const generateSimulatedIncidents = (): AlertIncident[] => {
       message: 'Taxa de erros HTTP 5XX superior ao limiar de segurança de 2%.',
     },
   ];
+};
+
+/**
+ * Cria dinamicamente uma nova instância de computação ou serviço em nuvem sob demanda utilizando @faker-js/faker
+ */
+export const provisionNewInstance = (targetProvider?: CloudProvider): CloudResource => {
+  const provider = targetProvider || pickRandom<CloudProvider>(['OCI', 'OCI', 'AWS', 'GCP']);
+  const now = new Date().toISOString();
+  const uid = faker.string.alphanumeric(8).toLowerCase();
+
+  // Simula métricas com probabilidades realistas cobrindo Verde, Amarelo e Vermelho
+  // 60% Verde (<70%), 25% Amarelo (70-85% ou latência alta), 15% Vermelho (>85%)
+  const scenario = Math.random();
+  let cpuPercent: number;
+  let latencyMs: number;
+  let hasCriticalError = false;
+
+  if (scenario < 0.60) {
+    // 🟢 Operacional
+    cpuPercent = getRandomFloat(14, 68);
+    latencyMs = getRandomFloat(2.5, 35);
+  } else if (scenario < 0.85) {
+    // 🟡 Atenção
+    const isLatencyIssue = Math.random() > 0.5;
+    if (isLatencyIssue) {
+      cpuPercent = getRandomFloat(40, 68);
+      latencyMs = getRandomFloat(52, 95);
+    } else {
+      cpuPercent = getRandomFloat(70.5, 84.8);
+      latencyMs = getRandomFloat(8, 45);
+    }
+  } else {
+    // 🔴 Crítico
+    cpuPercent = getRandomFloat(85.5, 98.2);
+    latencyMs = getRandomFloat(40, 150);
+    hasCriticalError = Math.random() > 0.4;
+  }
+
+  const status = evaluateHealthStatus(cpuPercent, latencyMs, hasCriticalError);
+  const memoryPercent = getRandomFloat(35, 94);
+  const diskPercent = getRandomFloat(20, 85);
+  const availabilitySla = pickRandom([99.9, 99.95, 99.99]);
+
+  if (provider === 'OCI') {
+    const shape = pickRandom([
+      'VM.Standard.A1.Flex',
+      'VM.Standard.E4.Flex',
+      'VM.Standard3.Flex',
+      'Autonomous DB (ATP)',
+      'OCI Object Storage',
+    ]);
+    const ocid = `ocid1.instance.oc1.sa-saopaulo-1.ab2x.${uid}${faker.string.alphanumeric(12)}`;
+    const ociService: CloudServiceType = shape.includes('Autonomous')
+      ? 'OCI_DATABASE'
+      : shape.includes('Storage')
+      ? 'OCI_STORAGE'
+      : 'OCI_COMPUTE';
+
+    return {
+      id: `res-oci-${uid}`,
+      ocid,
+      name: `OCI - ${shape} (${faker.hacker.adjective()})`,
+      service: ociService,
+      provider: 'OCI',
+      region: 'sa-saopaulo-1',
+      compartmentId: 'ocid1.compartment.oc1..production-workloads',
+      status,
+      lifecycleState: 'RUNNING',
+      availabilitySla,
+      tags: {
+        Environment: 'Production',
+        Workload: faker.hacker.noun(),
+        ManagedBy: 'Faker-Simulation',
+      },
+      metricsSummary: {
+        cpuPercent,
+        memoryPercent,
+        latencyMs,
+        diskPercent,
+        networkThroughputMbps: getRandomFloat(120, 950),
+      },
+      monthlyCostEstimate: getRandomFloat(28, 140, 2),
+      lastHealthCheck: now,
+      metadata: {
+        shape,
+        ocpuCount: pickRandom([2, 4, 8, 16]),
+        memoryInGBs: pickRandom([16, 24, 32, 64]),
+        availabilityDomain: 'sa-saopaulo-1-AD-1',
+        faultDomain: pickRandom(['FAULT-DOMAIN-1', 'FAULT-DOMAIN-2', 'FAULT-DOMAIN-3']),
+        publicIp: faker.internet.ipv4(),
+        privateIp: `10.0.${getRandomInt(1, 10)}.${getRandomInt(10, 250)}`,
+      },
+    };
+  } else if (provider === 'AWS') {
+    const awsName = pickRandom([
+      'EC2 - Web Cluster Prod',
+      'EC2 - Worker Queue',
+      'RDS - Aurora PostgreSQL',
+      'AWS Lambda Auth API',
+    ]);
+    const arn = `arn:aws:ec2:us-east-1:146139241100:instance/i-${uid}${faker.string.hexadecimal({ length: 8, prefix: '' }).toLowerCase()}`;
+    const awsService: CloudServiceType = awsName.includes('RDS')
+      ? 'RDS'
+      : awsName.includes('Lambda')
+      ? 'LAMBDA'
+      : 'EC2';
+
+    return {
+      id: `res-aws-${uid}`,
+      arn,
+      name: `AWS - ${awsName}`,
+      service: awsService,
+      provider: 'AWS',
+      region: 'us-east-1',
+      status,
+      lifecycleState: 'RUNNING',
+      availabilitySla,
+      tags: {
+        Environment: 'Production',
+        Tier: faker.hacker.adjective(),
+      },
+      metricsSummary: {
+        cpuPercent,
+        memoryPercent,
+        latencyMs,
+        diskPercent,
+      },
+      monthlyCostEstimate: getRandomFloat(45, 180, 2),
+      lastHealthCheck: now,
+    };
+  } else {
+    // GCP
+    const gcpName = pickRandom([
+      'Cloud Run API Gateway',
+      'Compute Engine e2-standard',
+      'Cloud SQL Database',
+    ]);
+
+    return {
+      id: `res-gcp-${uid}`,
+      name: `GCP - ${gcpName} (${faker.hacker.noun()})`,
+      service: gcpName.includes('Run') ? 'GCP_RUN' : 'EC2',
+      provider: 'GCP',
+      region: 'southamerica-east1',
+      status,
+      lifecycleState: 'RUNNING',
+      availabilitySla,
+      tags: {
+        Environment: 'Staging',
+        Service: 'Core-API',
+      },
+      metricsSummary: {
+        cpuPercent,
+        memoryPercent,
+        latencyMs,
+        diskPercent,
+        errorRatePercent: status === 'CRITICAL' ? getRandomFloat(3.5, 8.2) : getRandomFloat(0.1, 1.2),
+      },
+      monthlyCostEstimate: getRandomFloat(22, 95, 2),
+      lastHealthCheck: now,
+    };
+  }
 };
