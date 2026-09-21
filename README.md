@@ -109,11 +109,10 @@ O backlog unificado agrupa as necessidades corporativas de monitoramento móvel 
 | **US01** | Autenticação biométrica vinculada ao Android Keystore sem estouro de bloco | Leitor de Impressão Digital | 8 pts | Concluído |
 | **US02** | Importação de credenciais via leitura óptica de QR Code em texto puro | Câmera Traseira | 8 pts | Concluído |
 | **US03** | Detecção da região de datacenter mais próxima via sensor GPS | Sensor GPS (`expo-location`) | 5 pts | Concluído |
-| **US04** | Validação sintática estrita dos identificadores da Oracle Cloud | `src/utils/validation.ts` | 5 pts | Concluído |
-| **US05** | Painel com semáforo de integridade (Verde, Amarelo, Vermelho) | UI / `ResourceCard` | 5 pts | Concluído |
-| **US06** | Provisionamento dinâmico de instâncias e recálculo dinâmico de KPIs | `simulationService` | 5 pts | Concluído |
-| **US07** | Fixação de recursos prioritários no topo da tela inicial | `CloudContext` | 3 pts | Concluído |
-| **US08** | Geração e compartilhamento de relatório operacional em PDF | `react-native-share` / Intent | 5 pts | Concluído |
+| **US04** | Painel com semáforo de integridade (Verde, Amarelo, Vermelho) | UI / `ResourceCard` | 5 pts | Concluído |
+| **US05** | Provisionamento dinâmico de instâncias e recálculo dinâmico de KPIs | `simulationService` | 5 pts | Concluído |
+| **US06** | Fixação de recursos prioritários no topo da tela inicial | `CloudContext` | 3 pts | Concluído |
+| **US07** | Geração e compartilhamento de relatório operacional em PDF | `react-native-share` / Intent | 5 pts | Concluído |
 
 ---
 
