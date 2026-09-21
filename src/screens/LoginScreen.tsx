@@ -1,7 +1,8 @@
 /**
  * CloudWatch Dashboard - Tela de Login (LoginScreen)
- * Autenticação Segura com Android Keystore (react-native-keychain),
- * Biometria Nativa Integrada ao fluxo de conexão e Leitor Real de QR Code via Câmera.
+ * Validação Sintática Rigorosa OCI (Tenancy, User, Fingerprint, Região),
+ * Arquitetura Desacoplada (EncryptedStorage + Keychain Biometrics),
+ * Leitor Real de QR Code e Nova Logo Minimalista.
  * Aluno: João Gabriel Barros Guimarães - FATEC 4DSM
  */
 
@@ -26,6 +27,12 @@ import { colors } from '../theme';
 import { useAuth } from '../context/AuthContext';
 import { useCloud } from '../context/CloudContext';
 import type { CloudProvider } from '../types';
+import {
+  validateTenancyOcid,
+  validateUserOcid,
+  validateFingerprint,
+  validateRegion,
+} from '../utils/validation';
 
 export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   const {
@@ -35,53 +42,112 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
     loginWithBiometrics,
     loginWithQrCodePayload,
     hasStoredCredentials,
-    storedUsername,
+    storedCredentials,
     clearStoredCredentials,
     isLoading,
   } = useAuth();
 
   const { isSimulationMode, setSimulationMode } = useCloud();
 
-  const [keyId, setKeyId] = useState('ocid1.user.oc1..aaaaaaaax74n9b2k');
-  const [secretKey, setSecretKey] = useState('session_token_key_sec_01');
-  const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
-  const [isProcessingQr, setIsProcessingQr] = useState<boolean>(false);
+  // Estados dos Campos da Oracle Cloud (OCI)
+  const [tenancyId, setTenancyId] = useState('ocid1.tenancy.oc1..aaaaaaaab1234567890');
+  const [userId, setUserId] = useState('ocid1.user.oc1..aaaaaaaax74n9b2k3l4m');
+  const [fingerprint, setFingerprint] = useState('0e:ed:6e:d2:98:cf:84:1e:7d:b7:16:37:ef:8c:e1:59');
+  const [region, setRegion] = useState('sa-saopaulo-1');
+  const [privateKey, setPrivateKey] = useState('session_token_key_sec_01');
 
-  // Preenche o campo caso já existam credenciais salvas no Keystore
+  // Estados dos Campos AWS / GCP
+  const [awsKeyId, setAwsKeyId] = useState('AKIAIOSFODNN7EXAMPLE');
+  const [awsSecretKey, setAwsSecretKey] = useState('wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY');
+  const [gcpEmail, setGcpEmail] = useState('cloudwatch-admin@fatec-corp.iam.gserviceaccount.com');
+  const [gcpPrivateKey, setGcpPrivateKey] = useState('gcp_service_account_private_key_pem');
+
+  // Controle de Interação e Validação
+  const [hasAttemptedSubmit, setHasAttemptedSubmit] = useState(false);
+  const [isCameraActive, setIsCameraActive] = useState(false);
+  const [isProcessingQr, setIsProcessingQr] = useState(false);
+
+  // Preenche os campos caso já existam credenciais salvas no EncryptedStorage
   useEffect(() => {
-    if (storedUsername) {
-      setKeyId(storedUsername);
+    if (storedCredentials) {
+      if (storedCredentials.tenancyId) setTenancyId(storedCredentials.tenancyId);
+      if (storedCredentials.userId) setUserId(storedCredentials.userId);
+      if (storedCredentials.fingerprint) setFingerprint(storedCredentials.fingerprint);
+      if (storedCredentials.region) setRegion(storedCredentials.region);
+      if (storedCredentials.privateKey) setPrivateKey(storedCredentials.privateKey);
+      if (storedCredentials.keyId) setAwsKeyId(storedCredentials.keyId);
     }
-  }, [storedUsername]);
+  }, [storedCredentials]);
+
+  // Validações em Tempo Real (OCI)
+  const isTenancyValid = validateTenancyOcid(tenancyId);
+  const isUserValid = validateUserOcid(userId);
+  const isFingerprintValid = validateFingerprint(fingerprint);
+  const isRegionValid = validateRegion(region);
+  const isPrivateKeyValid = privateKey.trim().length > 0;
+
+  const isOciValid =
+    isTenancyValid && isUserValid && isFingerprintValid && isRegionValid && isPrivateKeyValid;
+
+  const isFormValid =
+    selectedLoginProvider === 'OCI'
+      ? isOciValid
+      : selectedLoginProvider === 'AWS'
+      ? awsKeyId.trim().length > 4 && awsSecretKey.trim().length > 4
+      : gcpEmail.includes('@') && gcpPrivateKey.trim().length > 4;
 
   const handleProviderChange = (provider: CloudProvider) => {
     setSelectedLoginProvider(provider);
-    if (provider === 'OCI') {
-      setKeyId(storedUsername || 'ocid1.user.oc1..aaaaaaaax74n9b2k');
-    } else if (provider === 'AWS') {
-      setKeyId('AKIAIOSFODNN7EXAMPLE');
-    } else {
-      setKeyId('gcp-service-account@iam.gserviceaccount.com');
-    }
+    setHasAttemptedSubmit(false);
   };
 
   /**
-   * Fluxo de Login + Biometria Integrada:
-   * Ao clicar em "Conectar ao Dashboard":
-   * - Se já houver credencial no Keystore: solicita a digital nativa do SO para liberar.
-   * - Se for primeiro acesso: salva no Keystore com proteção biométrica e confirma via digital.
+   * Validação Sintática Rigorosa Antes de Qualquer Ação:
+   * Bloqueia login e prompt biométrico se algum campo estiver inválido.
    */
   const handleLogin = async () => {
-    if (!keyId.trim()) {
-      Alert.alert('Campo Obrigatório', 'Por favor, informe a Chave de Acesso / OCID.');
-      return;
-    }
-    if (!secretKey.trim()) {
-      Alert.alert('Campo Obrigatório', 'Por favor, informe o Secret / Token.');
+    setHasAttemptedSubmit(true);
+
+    if (selectedLoginProvider === 'OCI' && !isOciValid) {
+      Alert.alert(
+        'Credenciais OCI Inválidas',
+        'Por favor, corrija os campos destacados em vermelho antes de prosseguir com a conexão.'
+      );
       return;
     }
 
-    const result = await loginWithCredentials(keyId, secretKey);
+    if (!isFormValid) {
+      Alert.alert('Campos Obrigatórios', 'Preencha todos os campos corretamente para conectar.');
+      return;
+    }
+
+    // Monta o payload conforme o provedor
+    const payload =
+      selectedLoginProvider === 'OCI'
+        ? {
+            provider: 'OCI' as const,
+            tenancyId: tenancyId.trim(),
+            userId: userId.trim(),
+            fingerprint: fingerprint.trim(),
+            region: region.trim(),
+            privateKey: privateKey.trim(),
+          }
+        : selectedLoginProvider === 'AWS'
+        ? {
+            provider: 'AWS' as const,
+            keyId: awsKeyId.trim(),
+            secretKey: awsSecretKey.trim(),
+            region: 'us-east-1',
+          }
+        : {
+            provider: 'GCP' as const,
+            keyId: gcpEmail.trim(),
+            secretKey: gcpPrivateKey.trim(),
+            region: 'southamerica-east1',
+          };
+
+    // Aciona a autenticação no AuthContext (desacoplada: EncryptedStorage + Keychain Token)
+    const result = await loginWithCredentials(payload);
 
     if (result.success) {
       navigation.replace('MainTabs');
@@ -91,9 +157,14 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   };
 
   /**
-   * Desbloqueio direto com biometria (quando credencial já existe)
+   * Desbloqueio direto com biometria nativa para credenciais já registradas
    */
   const handleDirectBiometrics = async () => {
+    if (!hasStoredCredentials) {
+      handleLogin();
+      return;
+    }
+
     const result = await loginWithBiometrics();
     if (result.success) {
       navigation.replace('MainTabs');
@@ -103,7 +174,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   };
 
   /**
-   * Solicita permissão em tempo de execução e abre a Câmera Física para ler QR Code
+   * Scanner de QR Code Real via Câmera Física
    */
   const handleOpenQrScanner = async () => {
     if (Platform.OS === 'android') {
@@ -136,7 +207,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   };
 
   /**
-   * Processa o código lido pela câmera física
+   * Processamento robusto do código QR em Plain Text
    */
   const handleBarcodeRead = (event: any) => {
     if (isProcessingQr) return;
@@ -147,48 +218,51 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
     const result = loginWithQrCodePayload(rawValue);
 
     if (result.success && result.data) {
-      const { provider, key, secret } = result.data;
-      if (provider) setSelectedLoginProvider(provider);
-      if (key) setKeyId(key);
-      if (secret) setSecretKey(secret);
+      const data = result.data;
+      if (data.provider) setSelectedLoginProvider(data.provider);
+      if (data.tenancyId) setTenancyId(data.tenancyId);
+      if (data.userId) setUserId(data.userId);
+      if (data.fingerprint) setFingerprint(data.fingerprint);
+      if (data.region) setRegion(data.region);
+      if (data.privateKey) setPrivateKey(data.privateKey);
 
       setIsCameraActive(false);
       setIsProcessingQr(false);
+      setHasAttemptedSubmit(false);
 
       Alert.alert(
         '✅ QR Code Processado com Sucesso',
-        `Credenciais do provedor ${provider || selectedLoginProvider} foram importadas para o formulário.`
+        'As credenciais OCI foram importadas e preenchidas automaticamente no formulário.'
       );
     } else {
       setIsProcessingQr(false);
       Alert.alert(
-        'Formato Inválido',
-        result.error || 'O QR Code não contém credenciais no formato JSON esperado.'
+        'QR Code Inválido',
+        result.error || 'Certifique-se de escanear uma configuração OCI em Plain Text.'
       );
     }
   };
 
   /**
-   * Permite simular o payload de teste caso o avaliador esteja sem QR Code impresso no momento
+   * Demonstração de payload OCI oficial para testes rápidos do avaliador
    */
   const handleSimulateQrPayload = () => {
-    const mockQrPayload = JSON.stringify({
-      provider: selectedLoginProvider,
-      key:
-        selectedLoginProvider === 'OCI'
-          ? 'ocid1.user.oc1.sa-saopaulo-1..imported773'
-          : 'AKIA_IMPORTED_FROM_CAMERA_QR',
-      secret: 'secure_secret_token_from_qr_scanner_99',
+    const mockOciJson = JSON.stringify({
+      provider: 'OCI',
+      tenancyId: 'ocid1.tenancy.oc1..aaaaaaaab1234567890',
+      userId: 'ocid1.user.oc1..aaaaaaaax74n9b2k3l4m',
+      fingerprint: '0e:ed:6e:d2:98:cf:84:1e:7d:b7:16:37:ef:8c:e1:59',
       region: 'sa-saopaulo-1',
+      privateKey: 'session_token_key_sec_01',
     });
 
-    handleBarcodeRead({ nativeEvent: { codeStringValue: mockQrPayload } });
+    handleBarcodeRead({ nativeEvent: { codeStringValue: mockOciJson } });
   };
 
   const handleResetCredentials = () => {
     Alert.alert(
       'Redefinir Credenciais',
-      'Deseja remover as credenciais salvas no Keystore e cadastrar uma nova conta?',
+      'Deseja remover as credenciais salvas no cofre e cadastrar uma nova conta?',
       [
         { text: 'Cancelar', style: 'cancel' },
         {
@@ -196,9 +270,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
           style: 'destructive',
           onPress: async () => {
             await clearStoredCredentials();
-            setKeyId('');
-            setSecretKey('');
-            Alert.alert('Sucesso', 'Cofre do Keystore limpo para novo cadastro.');
+            Alert.alert('Sucesso', 'Cofre de credenciais redefinido com sucesso.');
           },
         },
       ]
@@ -207,35 +279,29 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <ScrollView contentContainerStyle={styles.container}>
-        {/* Header com Logo Minimalista e Sóbrio */}
+      <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
+        {/* Nova Logo Minimalista Sóbria (Sem Neons Agressivos) */}
         <View style={styles.logoSection}>
           <View style={styles.logoOuter}>
             <View style={styles.logoInner}>
-              <Text style={styles.logoIcon}>⚡</Text>
+              {/* Linha vetorial nativa de telemetria / pulso cardíaco de infraestrutura */}
+              <View style={styles.telemetryBox}>
+                <View style={styles.telemetryLineFlat} />
+                <View style={styles.telemetryPulseUp} />
+                <View style={styles.telemetryPulseDown} />
+                <View style={styles.telemetryDot} />
+                <View style={styles.telemetryPulseRecovery} />
+                <View style={styles.telemetryLineFlat} />
+              </View>
             </View>
           </View>
+
           <Text style={styles.appTitle}>
             Cloud<Text style={styles.appTitleHighlight}>Watch</Text>
           </Text>
           <Text style={styles.appSubtitle}>
             Painel Mobile: Oracle OCI • AWS • Google Cloud
           </Text>
-
-          {hasStoredCredentials ? (
-            <View style={styles.keystoreBadge}>
-              <Text style={styles.keystoreDot}>🔒</Text>
-              <Text style={styles.keystoreBadgeText}>
-                Credenciais salvas no Android Keystore (Biometria Ativa)
-              </Text>
-            </View>
-          ) : (
-            <View style={[styles.keystoreBadge, { backgroundColor: '#1E293B30' }]}>
-              <Text style={styles.keystoreBadgeText}>
-                Primeiro Acesso: Preencha para vincular à biometria
-              </Text>
-            </View>
-          )}
         </View>
 
         {/* Seleção de Provedor Padronizada */}
@@ -295,39 +361,174 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
           </TouchableOpacity>
         </View>
 
-        {/* Inputs de Credenciais */}
+        {/* Formulário com Validação Sintática Rigorosa */}
         <View style={styles.formCard}>
-          <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>
-              {selectedLoginProvider === 'OCI' ? 'USER OCID / FINGERPRINT' : 'ACCESS KEY ID'}
-            </Text>
-            <TextInput
-              style={styles.input}
-              value={keyId}
-              onChangeText={setKeyId}
-              placeholder="Digite sua chave ou escaneie via QR Code"
-              placeholderTextColor="#64748B"
-              autoCapitalize="none"
-            />
-          </View>
+          {selectedLoginProvider === 'OCI' ? (
+            <>
+              {/* Campo 1: Tenancy OCID */}
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>TENANCY OCID</Text>
+                <TextInput
+                  style={[
+                    styles.input,
+                    hasAttemptedSubmit && !isTenancyValid && styles.inputError,
+                  ]}
+                  value={tenancyId}
+                  onChangeText={setTenancyId}
+                  placeholder="ocid1.tenancy.oc1..aaaaaaaax..."
+                  placeholderTextColor="#64748B"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+                {hasAttemptedSubmit && !isTenancyValid && (
+                  <Text style={styles.errorText}>
+                    ⚠️ Deve iniciar com "ocid1.tenancy.oc1.."
+                  </Text>
+                )}
+              </View>
 
-          <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>PRIVATE KEY PEM / SECRET TOKEN</Text>
-            <TextInput
-              style={styles.input}
-              value={secretKey}
-              onChangeText={setSecretKey}
-              secureTextEntry
-              placeholder="Digite a chave secreta"
-              placeholderTextColor="#64748B"
-            />
-          </View>
+              {/* Campo 2: User OCID */}
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>USER OCID</Text>
+                <TextInput
+                  style={[
+                    styles.input,
+                    hasAttemptedSubmit && !isUserValid && styles.inputError,
+                  ]}
+                  value={userId}
+                  onChangeText={setUserId}
+                  placeholder="ocid1.user.oc1..aaaaaaaax..."
+                  placeholderTextColor="#64748B"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+                {hasAttemptedSubmit && !isUserValid && (
+                  <Text style={styles.errorText}>
+                    ⚠️ Deve iniciar com "ocid1.user.oc1.."
+                  </Text>
+                )}
+              </View>
+
+              {/* Campo 3: Fingerprint (16 pares hex) */}
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>FINGERPRINT (16 PARES HEX)</Text>
+                <TextInput
+                  style={[
+                    styles.input,
+                    hasAttemptedSubmit && !isFingerprintValid && styles.inputError,
+                  ]}
+                  value={fingerprint}
+                  onChangeText={setFingerprint}
+                  placeholder="0e:ed:6e:d2:98:cf:84:1e:7d:b7:16:37:ef:8c:e1:59"
+                  placeholderTextColor="#64748B"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+                {hasAttemptedSubmit && !isFingerprintValid && (
+                  <Text style={styles.errorText}>
+                    ⚠️ Exige 16 pares hexadecimais (ex: 0e:ed:6e:...)
+                  </Text>
+                )}
+              </View>
+
+              {/* Campo 4: Região OCI */}
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>REGIÃO OCI</Text>
+                <TextInput
+                  style={[
+                    styles.input,
+                    hasAttemptedSubmit && !isRegionValid && styles.inputError,
+                  ]}
+                  value={region}
+                  onChangeText={setRegion}
+                  placeholder="sa-saopaulo-1 ou us-ashburn-1"
+                  placeholderTextColor="#64748B"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+                {hasAttemptedSubmit && !isRegionValid && (
+                  <Text style={styles.errorText}>
+                    ⚠️ Região OCI inválida (ex: sa-saopaulo-1)
+                  </Text>
+                )}
+              </View>
+
+              {/* Campo 5: Private Key / Token */}
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>PRIVATE KEY PEM / SECRET TOKEN</Text>
+                <TextInput
+                  style={[
+                    styles.input,
+                    hasAttemptedSubmit && !isPrivateKeyValid && styles.inputError,
+                  ]}
+                  value={privateKey}
+                  onChangeText={setPrivateKey}
+                  secureTextEntry
+                  placeholder="Chave privada PEM ou token de sessão"
+                  placeholderTextColor="#64748B"
+                />
+                {hasAttemptedSubmit && !isPrivateKeyValid && (
+                  <Text style={styles.errorText}>⚠️ Chave privada é obrigatória</Text>
+                )}
+              </View>
+            </>
+          ) : selectedLoginProvider === 'AWS' ? (
+            <>
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>ACCESS KEY ID</Text>
+                <TextInput
+                  style={styles.input}
+                  value={awsKeyId}
+                  onChangeText={setAwsKeyId}
+                  placeholder="AKIAIOSFODNN7EXAMPLE"
+                  placeholderTextColor="#64748B"
+                  autoCapitalize="none"
+                />
+              </View>
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>SECRET ACCESS KEY</Text>
+                <TextInput
+                  style={styles.input}
+                  value={awsSecretKey}
+                  onChangeText={setAwsSecretKey}
+                  secureTextEntry
+                  placeholder="Secret Access Key"
+                  placeholderTextColor="#64748B"
+                />
+              </View>
+            </>
+          ) : (
+            <>
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>CLIENT EMAIL</Text>
+                <TextInput
+                  style={styles.input}
+                  value={gcpEmail}
+                  onChangeText={setGcpEmail}
+                  placeholder="service-account@iam.gserviceaccount.com"
+                  placeholderTextColor="#64748B"
+                  autoCapitalize="none"
+                />
+              </View>
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>PRIVATE KEY</Text>
+                <TextInput
+                  style={styles.input}
+                  value={gcpPrivateKey}
+                  onChangeText={setGcpPrivateKey}
+                  secureTextEntry
+                  placeholder="Private Key Token"
+                  placeholderTextColor="#64748B"
+                />
+              </View>
+            </>
+          )}
 
           {/* Toggle Modo Simulação */}
           <View style={styles.simCard}>
             <View>
               <Text style={styles.simTitle}>Modo Simulação</Text>
-              <Text style={styles.simDesc}>Testar com dados e métricas simuladas</Text>
+              <Text style={styles.simDesc}>Testar telemetria com instâncias Faker</Text>
             </View>
             <Switch
               value={isSimulationMode}
@@ -337,9 +538,9 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
             />
           </View>
 
-          {/* Botão Conectar ao Dashboard (Unificado com Biometria) */}
+          {/* Botão Conectar ao Dashboard */}
           <TouchableOpacity
-            style={styles.loginBtn}
+            style={[styles.loginBtn, hasAttemptedSubmit && !isFormValid && styles.loginBtnDisabled]}
             onPress={handleLogin}
             disabled={isLoading}
           >
@@ -354,10 +555,8 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
             )}
           </TouchableOpacity>
 
-          {/* Divisor de Hardware */}
+          {/* Divisor Sóbrio (Texto removido conforme solicitado) */}
           <View style={styles.dividerRow}>
-            <View style={styles.dividerLine} />
-            <Text style={styles.dividerText}>INTEGRAÇÃO NATIVA DE HARDWARE</Text>
             <View style={styles.dividerLine} />
           </View>
 
@@ -368,14 +567,9 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
               <Text style={styles.hardwareBtnText}>Câmera (QR Code)</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity
-              style={[styles.hardwareBtn, !hasStoredCredentials && { opacity: 0.85 }]}
-              onPress={hasStoredCredentials ? handleDirectBiometrics : handleLogin}
-            >
+            <TouchableOpacity style={styles.hardwareBtn} onPress={handleDirectBiometrics}>
               <Text style={styles.hardwareBtnIcon}>👆</Text>
-              <Text style={styles.hardwareBtnText}>
-                {hasStoredCredentials ? 'Desbloquear Digital' : 'Registrar Digital'}
-              </Text>
+              <Text style={styles.hardwareBtnText}>Biometria</Text>
             </TouchableOpacity>
           </View>
 
@@ -410,7 +604,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
                 <View style={styles.scanLaser} />
               </View>
               <Text style={styles.cameraInstruction}>
-                Aponte para o QR Code contendo o payload de acesso da nuvem
+                Aponte para o QR Code em Plain Text da Oracle OCI
               </Text>
             </View>
           </View>
@@ -418,7 +612,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
           {/* Barra inferior da câmera com opção de teste de payload */}
           <View style={styles.cameraFooter}>
             <TouchableOpacity style={styles.cameraTestBtn} onPress={handleSimulateQrPayload}>
-              <Text style={styles.cameraTestBtnText}>⚡ Inserir Payload JSON de Demonstração</Text>
+              <Text style={styles.cameraTestBtnText}>⚡ Inserir Payload JSON OCI Oficial</Text>
             </TouchableOpacity>
           </View>
         </SafeAreaView>
@@ -434,12 +628,11 @@ const styles = StyleSheet.create({
   },
   container: {
     padding: 24,
-    justifyContent: 'space-between',
-    minHeight: '100%',
+    paddingBottom: 40,
   },
   logoSection: {
     alignItems: 'center',
-    marginTop: 10,
+    marginTop: 6,
   },
   logoOuter: {
     width: 68,
@@ -456,11 +649,50 @@ const styles = StyleSheet.create({
     height: 50,
     borderRadius: 14,
     backgroundColor: '#070D1A',
+    borderWidth: 1,
+    borderColor: '#1E293B',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  logoIcon: {
-    fontSize: 26,
+  telemetryBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 38,
+    height: 24,
+    position: 'relative',
+  },
+  telemetryLineFlat: {
+    width: 6,
+    height: 2,
+    backgroundColor: '#38BDF8',
+  },
+  telemetryPulseUp: {
+    width: 8,
+    height: 2,
+    backgroundColor: '#38BDF8',
+    transform: [{ rotate: '-50deg' }, { translateY: -3 }],
+  },
+  telemetryPulseDown: {
+    width: 12,
+    height: 2,
+    backgroundColor: '#38BDF8',
+    transform: [{ rotate: '55deg' }, { translateY: 2 }],
+  },
+  telemetryDot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#38BDF8',
+    position: 'absolute',
+    top: 9,
+    left: 17,
+  },
+  telemetryPulseRecovery: {
+    width: 8,
+    height: 2,
+    backgroundColor: '#38BDF8',
+    transform: [{ rotate: '-45deg' }, { translateY: -2 }],
   },
   appTitle: {
     fontSize: 26,
@@ -477,32 +709,12 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 4,
   },
-  keystoreBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#052e16',
-    borderWidth: 1,
-    borderColor: '#14532d',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-    marginTop: 10,
-    gap: 6,
-  },
-  keystoreDot: {
-    fontSize: 10,
-  },
-  keystoreBadgeText: {
-    color: '#86efac',
-    fontSize: 10,
-    fontWeight: '700',
-  },
   providerSelector: {
     flexDirection: 'row',
     backgroundColor: '#0B1220',
     borderRadius: 14,
     padding: 4,
-    marginTop: 16,
+    marginTop: 18,
     borderWidth: 1,
     borderColor: '#1E293B',
   },
@@ -537,25 +749,35 @@ const styles = StyleSheet.create({
     marginTop: 16,
   },
   inputGroup: {
-    marginBottom: 14,
+    marginBottom: 12,
   },
   inputLabel: {
     color: '#94A3B8',
     fontSize: 10,
     fontWeight: '700',
     fontFamily: 'monospace',
-    marginBottom: 6,
+    marginBottom: 5,
   },
   input: {
     backgroundColor: '#0F172A',
     borderWidth: 1,
     borderColor: '#1E293B',
     borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
     color: '#FFFFFF',
-    fontSize: 12,
+    fontSize: 11,
     fontFamily: 'monospace',
+  },
+  inputError: {
+    borderColor: '#EF4444',
+    backgroundColor: '#1C0E14',
+  },
+  errorText: {
+    color: '#EF4444',
+    fontSize: 10,
+    marginTop: 3,
+    fontWeight: '600',
   },
   simCard: {
     flexDirection: 'row',
@@ -567,6 +789,7 @@ const styles = StyleSheet.create({
     padding: 12,
     borderRadius: 12,
     marginBottom: 16,
+    marginTop: 4,
   },
   simTitle: {
     color: '#FFFFFF',
@@ -584,27 +807,22 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     alignItems: 'center',
   },
+  loginBtnDisabled: {
+    opacity: 0.7,
+  },
   loginBtnText: {
     color: '#FFFFFF',
     fontSize: 13,
     fontWeight: '800',
   },
   dividerRow: {
-    flexDirection: 'row',
     alignItems: 'center',
-    marginVertical: 18,
-    gap: 10,
+    marginVertical: 16,
   },
   dividerLine: {
-    flex: 1,
+    width: '100%',
     height: 1,
     backgroundColor: '#1E293B',
-  },
-  dividerText: {
-    color: '#475569',
-    fontSize: 9,
-    fontWeight: '700',
-    fontFamily: 'monospace',
   },
   hardwareRow: {
     flexDirection: 'row',

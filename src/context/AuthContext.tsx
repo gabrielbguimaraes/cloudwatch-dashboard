@@ -1,20 +1,35 @@
 /**
  * CloudWatch Dashboard - Contexto de Autenticação (AuthContext)
- * Gerencia credenciais reais via Android Keystore (react-native-keychain),
- * autenticação biométrica nativa integrada ao login e importação de QR Code.
+ * Arquitetura Desacoplada:
+ * 1. react-native-encrypted-storage: Armazena o JSON completo das credenciais (@oci_credentials) via AES-256-GCM.
+ * 2. react-native-keychain: Armazena exclusivamente o token de sessão com controle biométrico (<= 40 bytes),
+ *    eliminando a exceção javax.crypto.IllegalBlockSizeException do Android Keystore.
  * Aluno: João Gabriel Barros Guimarães - FATEC 4DSM
  */
 
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import type { UserSession, CloudProvider } from '../types';
 import * as Keychain from 'react-native-keychain';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import EncryptedStorage from 'react-native-encrypted-storage';
 
-export interface QrCredentialPayload {
-  provider?: CloudProvider;
-  key?: string;
-  secret?: string;
+export interface OciStoredCredentials {
+  provider: 'OCI';
+  tenancyId: string;
+  userId: string;
+  fingerprint: string;
+  region: string;
+  privateKey?: string;
+}
+
+export interface GenericCredentialPayload {
+  provider: CloudProvider;
+  keyId?: string;
+  secretKey?: string;
+  tenancyId?: string;
+  userId?: string;
+  fingerprint?: string;
   region?: string;
+  privateKey?: string;
 }
 
 interface AuthContextData {
@@ -23,16 +38,15 @@ interface AuthContextData {
   selectedLoginProvider: CloudProvider;
   isLoading: boolean;
   hasStoredCredentials: boolean;
-  storedUsername: string | null;
+  storedCredentials: GenericCredentialPayload | null;
   setSelectedLoginProvider: (provider: CloudProvider) => void;
   loginWithCredentials: (
-    keyId: string,
-    secretKey: string
+    payload: GenericCredentialPayload
   ) => Promise<{ success: boolean; error?: string; isFirstAccess?: boolean }>;
   loginWithBiometrics: () => Promise<{ success: boolean; error?: string }>;
   loginWithQrCodePayload: (
-    payloadJson: string
-  ) => { success: boolean; data?: QrCredentialPayload; error?: string };
+    rawPayload: string
+  ) => { success: boolean; data?: GenericCredentialPayload; error?: string };
   verifyTwoFactorToken: (token: string) => Promise<boolean>;
   clearStoredCredentials: () => Promise<void>;
   logout: () => void;
@@ -40,51 +54,54 @@ interface AuthContextData {
 
 const AuthContext = createContext<AuthContextData>({} as AuthContextData);
 
-const STORAGE_KEY_USERNAME = '@cloudwatch:saved_key_id';
-const STORAGE_KEY_FLAG = '@cloudwatch:has_keystore_credentials';
+const STORAGE_KEY_CREDENTIALS = '@oci_credentials';
+const KEYCHAIN_SERVICE = 'cloudwatch_auth';
+const KEYCHAIN_SESSION_USER = 'cloudwatch_session';
+const KEYCHAIN_SESSION_TOKEN = 'session_active_token';
 
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [session, setSession] = useState<UserSession | null>(null);
   const [selectedLoginProvider, setSelectedLoginProvider] = useState<CloudProvider>('OCI');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [hasStoredCredentials, setHasStoredCredentials] = useState<boolean>(false);
-  const [storedUsername, setStoredUsername] = useState<string | null>(null);
+  const [storedCredentials, setStoredCredentials] = useState<GenericCredentialPayload | null>(null);
 
-  // Inicializa e verifica se há credenciais salvas no Keystore / AsyncStorage
+  // Inicializa e verifica se há credenciais salvas no EncryptedStorage
   useEffect(() => {
-    const checkSavedCredentials = async () => {
+    const checkStoredCredentials = async () => {
       try {
-        const savedId = await AsyncStorage.getItem(STORAGE_KEY_USERNAME);
-        const flag = await AsyncStorage.getItem(STORAGE_KEY_FLAG);
-        const services = await Keychain.getAllGenericPasswordServices();
-        const existsInKeychain = services && services.includes('cloudwatch_auth');
-
-        if (savedId || flag === 'true' || existsInKeychain) {
+        const raw = await EncryptedStorage.getItem(STORAGE_KEY_CREDENTIALS);
+        if (raw) {
+          const parsed = JSON.parse(raw);
           setHasStoredCredentials(true);
-          if (savedId) {
-            setStoredUsername(savedId);
+          setStoredCredentials(parsed);
+          if (parsed.provider) {
+            setSelectedLoginProvider(parsed.provider);
           }
+        } else {
+          setHasStoredCredentials(false);
+          setStoredCredentials(null);
         }
       } catch (err) {
-        console.warn('Erro ao verificar credenciais salvas:', err);
+        console.warn('Erro ao verificar credenciais salvas no EncryptedStorage:', err);
       }
     };
 
-    checkSavedCredentials();
+    checkStoredCredentials();
   }, []);
 
-  const createSession = (username: string): UserSession => {
-    const displayName = username.includes('ocid1')
+  const createSession = (identifier: string): UserSession => {
+    const displayName = identifier.includes('ocid1')
       ? 'Administrador Oracle OCI'
-      : username.includes('AKIA')
+      : identifier.includes('AKIA')
       ? 'Administrador AWS'
-      : username.includes('@')
-      ? username.split('@')[0]
+      : identifier.includes('@')
+      ? identifier.split('@')[0]
       : 'DevOps / Cloud Admin';
 
     return {
-      userId: 'usr-' + (username.length > 8 ? username.slice(-8) : username),
-      email: username.includes('@') ? username : `${username.slice(0, 12)}@cloudwatch.corp`,
+      userId: 'usr-' + (identifier.length > 8 ? identifier.slice(-8) : identifier),
+      email: identifier.includes('@') ? identifier : `${identifier.slice(0, 12)}@cloudwatch.corp`,
       name: displayName,
       role: 'ADMIN',
       token: 'jwt_keystore_secure_' + Date.now(),
@@ -97,28 +114,20 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   /**
-   * Fluxo Unificado:
-   * 1. Se já existirem credenciais salvas: dispara o prompt nativo de biometria para descriptografar.
-   * 2. Se for primeiro acesso: salva no Android Keystore com BIOMETRY_ANY e dispara confirmação biométrica.
+   * Fluxo de Login Desacoplado:
+   * - Se já há credenciais salvas: dispara biometria nativa pelo Keychain para autorizar a leitura do EncryptedStorage.
+   * - Se for primeiro acesso: salva no EncryptedStorage (sem limite de 256 bytes) e registra chave biométrica leve no Keychain.
    */
   const loginWithCredentials = async (
-    keyId: string,
-    secretKey: string
+    payload: GenericCredentialPayload
   ): Promise<{ success: boolean; error?: string; isFirstAccess?: boolean }> => {
-    if (!keyId || !keyId.trim()) {
-      return { success: false, error: 'O identificador de chave (Key ID / OCID) é obrigatório.' };
-    }
-    if (!secretKey || !secretKey.trim()) {
-      return { success: false, error: 'A chave secreta (Secret Key / Token) é obrigatória.' };
-    }
-
     setIsLoading(true);
 
     try {
       if (hasStoredCredentials) {
         // Acesso Recorrente: Dispara o prompt biométrico nativo do Android
         const credentials = await Keychain.getGenericPassword({
-          service: 'cloudwatch_auth',
+          service: KEYCHAIN_SERVICE,
           authenticationPrompt: {
             title: 'Autenticação Biométrica',
             subtitle: 'CloudWatch Dashboard - Keystore Seguro',
@@ -128,7 +137,12 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         });
 
         if (credentials && credentials.username) {
-          setSession(createSession(credentials.username));
+          // Sucesso na digital: recupera os dados reais do EncryptedStorage
+          const storedJson = await EncryptedStorage.getItem(STORAGE_KEY_CREDENTIALS);
+          const activeCreds = storedJson ? JSON.parse(storedJson) : payload;
+          const userIdentifier = activeCreds.userId || activeCreds.keyId || 'Administrador OCI';
+
+          setSession(createSession(userIdentifier));
           setIsLoading(false);
           return { success: true, isFirstAccess: false };
         } else {
@@ -139,23 +153,25 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           };
         }
       } else {
-        // Primeiro Acesso (Cadastro no Keystore):
-        // 1. Salva com controle biométrico
-        await Keychain.setGenericPassword(keyId.trim(), secretKey.trim(), {
-          service: 'cloudwatch_auth',
+        // Primeiro Acesso (Cadastro):
+        // 1. Salva o payload completo em EncryptedStorage (AES-256-GCM sem limite de tamanho)
+        await EncryptedStorage.setItem(STORAGE_KEY_CREDENTIALS, JSON.stringify(payload));
+
+        // 2. Registra no Keychain apenas o identificador pequeno de sessão (< 40 bytes),
+        // evitando a limitação de 245 bytes da cifra RSA do Android Keystore
+        await Keychain.setGenericPassword(KEYCHAIN_SESSION_USER, KEYCHAIN_SESSION_TOKEN, {
+          service: KEYCHAIN_SERVICE,
           accessControl: Keychain.ACCESS_CONTROL.BIOMETRY_ANY,
           accessible: Keychain.ACCESSIBLE.WHEN_UNLOCKED,
         });
 
-        await AsyncStorage.setItem(STORAGE_KEY_USERNAME, keyId.trim());
-        await AsyncStorage.setItem(STORAGE_KEY_FLAG, 'true');
         setHasStoredCredentials(true);
-        setStoredUsername(keyId.trim());
+        setStoredCredentials(payload);
 
-        // 2. Dispara confirmação biométrica do sistema para vincular
+        // 3. Dispara confirmação biométrica do sistema para vincular o acesso
         try {
           await Keychain.getGenericPassword({
-            service: 'cloudwatch_auth',
+            service: KEYCHAIN_SERVICE,
             authenticationPrompt: {
               title: 'Vincular Biometria',
               subtitle: 'Registro no Android Keystore',
@@ -167,7 +183,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           console.log('Confirmação biométrica inicial ignorada/concluída:', bioConfirmErr);
         }
 
-        setSession(createSession(keyId.trim()));
+        const userIdentifier = payload.userId || payload.keyId || 'Administrador OCI';
+        setSession(createSession(userIdentifier));
         setIsLoading(false);
         return { success: true, isFirstAccess: true };
       }
@@ -176,19 +193,19 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       console.warn('Erro durante autenticação com Keystore:', error);
       return {
         success: false,
-        error: error?.message || 'Falha ao acessar o Android Keystore ou leitor biométrico.',
+        error: error?.message || 'Falha ao processar cofre de credenciais.',
       };
     }
   };
 
   /**
-   * Disparo direto do prompt biométrico nativo para credenciais já registradas
+   * Disparo direto do prompt biométrico nativo para desbloquear credenciais já registradas
    */
   const loginWithBiometrics = async (): Promise<{ success: boolean; error?: string }> => {
     setIsLoading(true);
     try {
       const credentials = await Keychain.getGenericPassword({
-        service: 'cloudwatch_auth',
+        service: KEYCHAIN_SERVICE,
         authenticationPrompt: {
           title: 'Autenticação Biométrica',
           subtitle: 'CloudWatch Dashboard - Keystore Seguro',
@@ -198,7 +215,11 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       });
 
       if (credentials && credentials.username) {
-        setSession(createSession(credentials.username));
+        const storedJson = await EncryptedStorage.getItem(STORAGE_KEY_CREDENTIALS);
+        const activeCreds = storedJson ? JSON.parse(storedJson) : storedCredentials;
+        const userIdentifier = activeCreds?.userId || activeCreds?.keyId || 'Administrador OCI';
+
+        setSession(createSession(userIdentifier));
         setIsLoading(false);
         return { success: true };
       } else {
@@ -219,55 +240,69 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   /**
-   * Processa o payload JSON lido pela câmera via QR Code real
+   * Processa o payload do QR Code em Plain Text com validação robusta
    */
   const loginWithQrCodePayload = (
-    payloadJson: string
-  ): { success: boolean; data?: QrCredentialPayload; error?: string } => {
+    rawPayload: string
+  ): { success: boolean; data?: GenericCredentialPayload; error?: string } => {
+    if (!rawPayload || typeof rawPayload !== 'string') {
+      return {
+        success: false,
+        error: 'QR Code inválido. Certifique-se de escanear uma configuração OCI em Plain Text.',
+      };
+    }
+
+    const trimmed = rawPayload.trim();
+
     try {
-      const parsed = JSON.parse(payloadJson);
-      const provider = parsed.provider?.toUpperCase();
-      const validProvider: CloudProvider =
-        provider === 'AWS' || provider === 'GCP' ? provider : 'OCI';
+      const parsed = JSON.parse(trimmed);
 
-      const key = parsed.key || parsed.accessKey || parsed.ocid || parsed.userOcid || '';
-      const secret = parsed.secret || parsed.privateKey || parsed.secretKey || '';
+      const provider: CloudProvider =
+        parsed.provider?.toUpperCase() === 'AWS' || parsed.provider?.toUpperCase() === 'GCP'
+          ? parsed.provider.toUpperCase()
+          : 'OCI';
+
+      const tenancyId = parsed.tenancyId || parsed.tenancyOcid || '';
+      const userId = parsed.userId || parsed.userOcid || parsed.key || '';
+      const fingerprint = parsed.fingerprint || '';
       const region = parsed.region || 'sa-saopaulo-1';
+      const privateKey = parsed.privateKey || parsed.secret || '';
 
-      if (!key) {
+      if (provider === 'OCI' && !tenancyId && !userId) {
         return {
           success: false,
-          error: 'QR Code lido não possui campo de chave ou identificador ("key" ou "ocid").',
+          error: 'QR Code inválido. Certifique-se de escanear uma configuração OCI em Plain Text.',
         };
       }
 
       return {
         success: true,
         data: {
-          provider: validProvider,
-          key,
-          secret,
+          provider,
+          tenancyId,
+          userId,
+          fingerprint,
           region,
+          privateKey,
         },
       };
-    } catch (err: any) {
+    } catch (err) {
       return {
         success: false,
-        error: 'Payload do QR Code inválido. Deve ser um JSON válido.',
+        error: 'QR Code inválido. Certifique-se de escanear uma configuração OCI em Plain Text.',
       };
     }
   };
 
   /**
-   * Limpa as credenciais salvas no Keystore e no AsyncStorage
+   * Limpa as credenciais salvas no Keystore e no EncryptedStorage
    */
   const clearStoredCredentials = async (): Promise<void> => {
     try {
-      await Keychain.resetGenericPassword({ service: 'cloudwatch_auth' });
-      await AsyncStorage.removeItem(STORAGE_KEY_USERNAME);
-      await AsyncStorage.removeItem(STORAGE_KEY_FLAG);
+      await Keychain.resetGenericPassword({ service: KEYCHAIN_SERVICE });
+      await EncryptedStorage.removeItem(STORAGE_KEY_CREDENTIALS);
       setHasStoredCredentials(false);
-      setStoredUsername(null);
+      setStoredCredentials(null);
     } catch (err) {
       console.warn('Erro ao limpar credenciais salvas:', err);
     }
@@ -293,7 +328,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         selectedLoginProvider,
         isLoading,
         hasStoredCredentials,
-        storedUsername,
+        storedCredentials,
         setSelectedLoginProvider,
         loginWithCredentials,
         loginWithBiometrics,
