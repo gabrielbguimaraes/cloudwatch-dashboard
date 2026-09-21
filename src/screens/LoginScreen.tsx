@@ -585,11 +585,13 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
           </View>
 
           <View style={styles.cameraWrapper}>
-            <Camera
-              style={StyleSheet.absoluteFillObject}
-              scanBarcode={true}
-              onReadCode={handleBarcodeRead}
-            />
+            {isCameraActive && (
+              <Camera
+                style={StyleSheet.absoluteFillObject}
+                scanBarcode={true}
+                onReadCode={handleBarcodeRead}
+              />
+            )}
 
             {/* Overlay da Mira de Escaneamento */}
             <View style={styles.cameraOverlay}>

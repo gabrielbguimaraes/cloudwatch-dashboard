@@ -112,9 +112,30 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
           { text: 'Cancelar', style: 'cancel' },
           {
             text: 'Escanear QR Code',
-            onPress: () => {
+            onPress: async () => {
               setTargetProviderToConnect(prov);
-              setIsCameraActive(true);
+              if (Platform.OS === 'android') {
+                try {
+                  const granted = await PermissionsAndroid.request(
+                    PermissionsAndroid.PERMISSIONS.CAMERA,
+                    {
+                      title: 'Permissão de Câmera',
+                      message: 'O CloudWatch necessita de acesso à câmera para ler QR Codes de provedores.',
+                      buttonPositive: 'Permitir',
+                      buttonNegative: 'Cancelar',
+                    }
+                  );
+                  if (granted === PermissionsAndroid.RESULTS.GRANTED) {
+                    setIsCameraActive(true);
+                  } else {
+                    Alert.alert('Permissão Negada', 'Acesso à câmera é necessário para ler o QR Code.');
+                  }
+                } catch (e) {
+                  console.warn('Erro ao solicitar permissão de câmera:', e);
+                }
+              } else {
+                setIsCameraActive(true);
+              }
             },
           },
         ]
@@ -533,11 +554,13 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
           </View>
 
           <View style={styles.cameraWrapper}>
-            <Camera
-              style={StyleSheet.absoluteFillObject}
-              scanBarcode={true}
-              onReadCode={handleBarcodeRead}
-            />
+            {isCameraActive && (
+              <Camera
+                style={StyleSheet.absoluteFillObject}
+                scanBarcode={true}
+                onReadCode={handleBarcodeRead}
+              />
+            )}
 
             <View style={styles.cameraOverlay}>
               <View style={styles.scanFrame}>
