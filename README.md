@@ -58,14 +58,6 @@ A solução foi estruturada no padrão **Dual-Engine Multi-Cloud**, desacoplando
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Segurança e Resolução do Limite de Bloco RSA
-Para solucionar a exceção nativa `javax.crypto.IllegalBlockSizeException: input must be under 256 bytes` no Android Keystore, adotou-se a separação de responsabilidades criptográficas:
-1. **Cofre Simétrico (AES-256-GCM):** O payload completo com as credenciais da OCI (Tenancy OCID, User OCID, Fingerprint e Chave Privada) é armazenado via `react-native-encrypted-storage` apoiado pelo Android `EncryptedSharedPreferences`.
-2. **Token Biométrico Leve (RSA 2048-bit):** O `react-native-keychain` armazena estritamente um token de sessão de ~38 bytes protegido pelo prompt biométrico (`Keychain.ACCESS_CONTROL.BIOMETRY_ANY`).
-3. **Fluxo de Acesso:** O reconhecimento bem-sucedido da impressão digital no Keystore autoriza a leitura e decodificação do payload persistido no cofre criptografado.
-
----
-
 ## 📋 Product Backlog Geral (Visão Global)
 
 O backlog unificado agrupa as necessidades corporativas de monitoramento móvel em 5 Épicos prioritários, totalizando **110 Story Points**:
@@ -104,15 +96,15 @@ O backlog unificado agrupa as necessidades corporativas de monitoramento móvel 
 
 
 #### Sprint Backlog 1
-| ID | User Story | Componente / Hardware | Complexidade | Status |
-| :--- | :--- | :--- | :---: | :---: |
-| **US01** | Autenticação biométrica vinculada ao Android Keystore sem estouro de bloco | Leitor de Impressão Digital | 8 pts | Concluído |
-| **US02** | Importação de credenciais via leitura óptica de QR Code em texto puro | Câmera Traseira | 8 pts | Concluído |
-| **US03** | Detecção da região de datacenter mais próxima via sensor GPS | Sensor GPS (`expo-location`) | 5 pts | Concluído |
-| **US04** | Painel com semáforo de integridade (Verde, Amarelo, Vermelho) | UI / `ResourceCard` | 5 pts | Concluído |
-| **US05** | Provisionamento dinâmico de instâncias e recálculo dinâmico de KPIs | `simulationService` | 5 pts | Concluído |
+| ID | User Story | Componente / Hardware | Complexidade
+| :--- | :--- | :--- | :---: 
+| **US01** | Autenticação biométrica vinculada ao Android Keystore sem estouro de bloco | Leitor de Impressão Digital | 8 pts
+| **US02** | Importação de credenciais via leitura óptica de QR Code em texto puro | Câmera Traseira | 8 pts
+| **US03** | Detecção da região de datacenter mais próxima via sensor GPS | Sensor GPS (`expo-location`) | 5 pts
+| **US04** | Painel com semáforo de integridade (Verde, Amarelo, Vermelho) | UI / `ResourceCard` | 5 pts
+| **US05** | Provisionamento dinâmico de instâncias e recálculo dinâmico de KPIs | `simulationService` | 5 pts
 | **US06** | Fixação de recursos prioritários no topo da tela inicial | `CloudContext` | 3 pts | Concluído |
-| **US07** | Geração e compartilhamento de relatório operacional em PDF | `react-native-share` / Intent | 5 pts | Concluído |
+| **US07** | Geração e compartilhamento de relatório operacional em PDF | `react-native-share` / Intent | 5 pts
 
 ---
 
