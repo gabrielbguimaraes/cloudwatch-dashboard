@@ -75,7 +75,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={styles.container}>
-        {/* Header com Logo Futurista Hexagonal */}
+        {/* Header com Logo Minimalista e Sóbrio */}
         <View style={styles.logoSection}>
           <View style={styles.logoOuter}>
             <View style={styles.logoInner}>
@@ -85,24 +85,21 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
           <Text style={styles.appTitle}>
             Cloud<Text style={styles.appTitleHighlight}>Watch</Text>
           </Text>
-          <View style={styles.badgeContainer}>
-            <Text style={styles.badgeText}>OCI FIRST • MULTI-CLOUD</Text>
-          </View>
           <Text style={styles.appSubtitle}>
             Painel Mobile: Oracle OCI • AWS • Google Cloud
           </Text>
         </View>
 
-        {/* Seleção de Provedor (Oracle OCI Ativo por Padrão) */}
+        {/* Seleção de Provedor Padronizada */}
         <View style={styles.providerSelector}>
           <TouchableOpacity
             style={[
               styles.providerBtn,
-              selectedLoginProvider === 'OCI' && styles.providerBtnOciActive,
+              selectedLoginProvider === 'OCI' && styles.providerBtnActive,
             ]}
             onPress={() => handleProviderChange('OCI')}
           >
-            <View style={[styles.dot, { backgroundColor: '#EF4444' }]} />
+            <View style={[styles.dot, { backgroundColor: '#C74634' }]} />
             <Text
               style={[
                 styles.providerBtnText,
@@ -116,7 +113,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
           <TouchableOpacity
             style={[
               styles.providerBtn,
-              selectedLoginProvider === 'AWS' && styles.providerBtnAwsActive,
+              selectedLoginProvider === 'AWS' && styles.providerBtnActive,
             ]}
             onPress={() => handleProviderChange('AWS')}
           >
@@ -134,7 +131,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
           <TouchableOpacity
             style={[
               styles.providerBtn,
-              selectedLoginProvider === 'GCP' && styles.providerBtnGcpActive,
+              selectedLoginProvider === 'GCP' && styles.providerBtnActive,
             ]}
             onPress={() => handleProviderChange('GCP')}
           >
@@ -176,17 +173,17 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
             />
           </View>
 
-          {/* Toggle Modo Simulação Faker */}
+          {/* Toggle Modo Simulação */}
           <View style={styles.simCard}>
             <View>
-              <Text style={styles.simTitle}>Modo Simulação (@faker-js/faker)</Text>
-              <Text style={styles.simDesc}>Testar sem custos com nuvem real</Text>
+              <Text style={styles.simTitle}>Modo Simulação</Text>
+              <Text style={styles.simDesc}>Testar com dados e métricas simuladas</Text>
             </View>
             <Switch
               value={isSimulationMode}
               onValueChange={setSimulationMode}
-              trackColor={{ false: '#334155', true: colors.neonBlue }}
-              thumbColor={isSimulationMode ? colors.neonCyan : '#f4f3f4'}
+              trackColor={{ false: '#334155', true: '#2563EB' }}
+              thumbColor={isSimulationMode ? '#60A5FA' : '#94A3B8'}
             />
           </View>
 
@@ -223,13 +220,6 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
             </TouchableOpacity>
           </View>
         </View>
-
-        {/* Rodapé Acadêmico */}
-        <View style={styles.footer}>
-          <Text style={styles.footerText}>
-            João Gabriel Barros Guimarães • 4DSM • FATEC-SJC
-          </Text>
-        </View>
       </ScrollView>
     </SafeAreaView>
   );
@@ -250,30 +240,25 @@ const styles = StyleSheet.create({
     marginTop: 10,
   },
   logoOuter: {
-    width: 76,
-    height: 76,
-    borderRadius: 22,
-    backgroundColor: '#0F1E36',
-    borderWidth: 2,
-    borderColor: '#38BDF860',
+    width: 70,
+    height: 70,
+    borderRadius: 20,
+    backgroundColor: '#0F172A',
+    borderWidth: 1.5,
+    borderColor: '#1E293B',
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: colors.neonBlue,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.5,
-    shadowRadius: 10,
-    elevation: 8,
   },
   logoInner: {
-    width: 58,
-    height: 58,
-    borderRadius: 16,
+    width: 52,
+    height: 52,
+    borderRadius: 14,
     backgroundColor: '#070D1A',
     alignItems: 'center',
     justifyContent: 'center',
   },
   logoIcon: {
-    fontSize: 28,
+    fontSize: 26,
   },
   appTitle: {
     fontSize: 26,
@@ -283,27 +268,12 @@ const styles = StyleSheet.create({
     letterSpacing: -0.5,
   },
   appTitleHighlight: {
-    color: colors.neonCyan,
-  },
-  badgeContainer: {
-    marginTop: 4,
-    backgroundColor: '#0066FF20',
-    paddingHorizontal: 10,
-    paddingVertical: 2,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#0066FF40',
-  },
-  badgeText: {
-    color: colors.neonElectric,
-    fontSize: 9,
-    fontWeight: '700',
-    fontFamily: 'monospace',
+    color: '#38BDF8',
   },
   appSubtitle: {
-    color: colors.textSecondary,
+    color: '#64748B',
     fontSize: 12,
-    marginTop: 6,
+    marginTop: 4,
   },
   providerSelector: {
     flexDirection: 'row',
@@ -323,14 +293,10 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     gap: 6,
   },
-  providerBtnOciActive: {
-    backgroundColor: '#C74634',
-  },
-  providerBtnAwsActive: {
-    backgroundColor: '#B45309',
-  },
-  providerBtnGcpActive: {
-    backgroundColor: '#1D4ED8',
+  providerBtnActive: {
+    backgroundColor: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#334155',
   },
   dot: {
     width: 6,
@@ -338,7 +304,7 @@ const styles = StyleSheet.create({
     borderRadius: 3,
   },
   providerBtnText: {
-    color: colors.textMuted,
+    color: '#64748B',
     fontSize: 11,
     fontWeight: '700',
   },
@@ -352,16 +318,16 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   inputLabel: {
-    color: colors.textSecondary,
+    color: '#94A3B8',
     fontSize: 10,
     fontWeight: '700',
     fontFamily: 'monospace',
     marginBottom: 6,
   },
   input: {
-    backgroundColor: colors.surfaceCard,
+    backgroundColor: '#0F172A',
     borderWidth: 1,
-    borderColor: colors.surfaceBorder,
+    borderColor: '#1E293B',
     borderRadius: 12,
     paddingHorizontal: 14,
     paddingVertical: 10,
@@ -373,9 +339,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: '#0066FF15',
+    backgroundColor: '#0F172A',
     borderWidth: 1,
-    borderColor: '#0066FF30',
+    borderColor: '#1E293B',
     padding: 12,
     borderRadius: 12,
     marginBottom: 16,
@@ -386,20 +352,15 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   simDesc: {
-    color: colors.textSecondary,
+    color: '#64748B',
     fontSize: 10,
     marginTop: 2,
   },
   loginBtn: {
-    backgroundColor: colors.neonBlue,
+    backgroundColor: '#2563EB',
     borderRadius: 12,
     paddingVertical: 14,
     alignItems: 'center',
-    shadowColor: colors.neonBlue,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4,
-    shadowRadius: 8,
-    elevation: 6,
   },
   loginBtnText: {
     color: '#FFFFFF',
@@ -418,7 +379,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#1E293B',
   },
   dividerText: {
-    color: '#64748B',
+    color: '#475569',
     fontSize: 9,
     fontWeight: '700',
     fontFamily: 'monospace',
@@ -429,9 +390,9 @@ const styles = StyleSheet.create({
   },
   hardwareBtn: {
     flex: 1,
-    backgroundColor: colors.surfaceCard,
+    backgroundColor: '#0F172A',
     borderWidth: 1,
-    borderColor: colors.surfaceBorder,
+    borderColor: '#1E293B',
     borderRadius: 12,
     paddingVertical: 12,
     flexDirection: 'row',
@@ -443,19 +404,8 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   hardwareBtnText: {
-    color: colors.textPrimary,
+    color: '#E2E8F0',
     fontSize: 11,
     fontWeight: '600',
-  },
-  footer: {
-    alignItems: 'center',
-    marginTop: 20,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: '#0F172A',
-  },
-  footerText: {
-    color: '#64748B',
-    fontSize: 10,
   },
 });

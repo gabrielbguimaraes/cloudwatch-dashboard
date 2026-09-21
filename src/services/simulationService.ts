@@ -319,7 +319,7 @@ export const generateSimulatedIncidents = (): AlertIncident[] => {
       resourceId: 'res-gcp-01',
       resourceName: 'GCP - Cloud Run API Gateway',
       provider: 'GCP',
-      severity: 'WARNING',
+      severity: 'WARN',
       triggeredAt: new Date(Date.now() - 45 * 60000).toISOString(),
       valueRecorded: 2.8,
       threshold: 2.0,

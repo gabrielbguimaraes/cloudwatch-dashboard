@@ -52,28 +52,26 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
     return colors.status.healthy;
   };
 
+  // Objeto padronizado de estilo único para tags de provedor (atual e futuros)
+  const STANDARD_BADGE_STYLE = {
+    bg: '#1E293B',
+    border: '#334155',
+    text: '#94A3B8',
+  };
+
+  const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
+    OCI: 'ORACLE OCI',
+    AWS: 'AWS',
+    GCP: 'GOOGLE CLOUD',
+    ALL: 'MULTI-CLOUD',
+  };
+
   const getProviderBadge = (provider: CloudProvider) => {
-    if (provider === 'OCI') {
-      return {
-        name: 'ORACLE OCI',
-        bg: colors.oci.badgeBg,
-        text: colors.oci.badgeText,
-        border: colors.oci.badgeBorder,
-      };
-    }
-    if (provider === 'AWS') {
-      return {
-        name: 'AWS',
-        bg: colors.aws.badgeBg,
-        text: colors.aws.badgeText,
-        border: colors.aws.badgeBorder,
-      };
-    }
     return {
-      name: 'GOOGLE CLOUD',
-      bg: colors.gcp.badgeBg,
-      text: colors.gcp.badgeText,
-      border: colors.gcp.badgeBorder,
+      name: PROVIDER_DISPLAY_NAMES[provider] || String(provider),
+      bg: STANDARD_BADGE_STYLE.bg,
+      text: STANDARD_BADGE_STYLE.text,
+      border: STANDARD_BADGE_STYLE.border,
     };
   };
 
@@ -315,7 +313,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
   },
   container: {
-    paddingBottom: 40,
+    paddingBottom: 95,
   },
   headerCurved: {
     backgroundColor: '#091122',
@@ -461,8 +459,8 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   filterPillActive: {
-    backgroundColor: colors.neonCyan,
-    borderColor: colors.neonCyan,
+    backgroundColor: '#2563EB',
+    borderColor: '#2563EB',
   },
   filterPillOciActive: {
     backgroundColor: colors.oci.primary,
