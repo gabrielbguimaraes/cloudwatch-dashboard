@@ -12,7 +12,7 @@ O projeto implementa uma arquitetura híbrida segura, integrando recursos de har
 * **Disciplina:** Programação para Dispositivos Móveis I
 * **Docente Responsável:** Prof. Dr. Eng. Gerson Penha
 * **Discente:** João Gabriel Barros Guimarães (RA: 1461392411007)
-* **Meta da Sprint 1 (MVP Funcional):** 28 de Setembro
+* **Período de Desenvolvimento:** 2º Semestre Letivo
 
 ---
 
@@ -51,7 +51,7 @@ A solução foi estruturada no padrão **Dual-Engine Multi-Cloud**, desacoplando
 │                    CAMADA 4: DUAL-ENGINE DE TELEMETRIA                      │
 │       ┌───────────────────────────────┐ ┌─────────────────────────┐         │
 │       │   simulationService (Faker)   │ │  OCI Telemetry REST API │         │
-│       │   (Motor da Sprint 1 / MVP)   │ │    (Escopo Sprint 2)    │         │
+│       │   (Motor da Sprint 1 / MVP 1) │ │   (Escopo Sprint 2/MVP 2│         │
 │       │ • Flutuação de CPU / Status   │ │ • HTTP Signature RFC    │         │
 │       │ • Provisionamento sob Demanda │ │ • Instâncias VM Compute │         │
 │       └───────────────────────────────┘ └─────────────────────────┘         │
@@ -66,42 +66,92 @@ Para solucionar a exceção nativa `javax.crypto.IllegalBlockSizeException: inpu
 
 ---
 
-## 🎯 Product Backlog & Planejamento das Sprints
+## 📋 Product Backlog Geral (Visão Global)
 
-### 🟢 Sprint 1: MVP Funcional, Hardware Nativo e OCI-First (Concluída)
-*Meta: Entregar autenticação segura com biometria, leitura de QR Code via câmera, proximidade geográfica via GPS, semáforo visual e compilação do instalador APK.*
+O backlog unificado agrupa as necessidades corporativas de monitoramento móvel em 5 Épicos prioritários, totalizando **110 Story Points**:
 
-| ID | Requisito / User Story | Hardware / API | Complexidade | Status |
+| ID | Épico | História de Usuário / Requisito Funcional | Prioridade | Estimativa | Sprint Alocada |
+| :---: | :--- | :--- | :---: | :---: | :---: |
+| **US01** | Autenticação & Hardware | Login com proteção biométrica nativa (Keystore/Biometria) | Alta | 8 pts | Sprint 1 |
+| **US02** | Autenticação & Hardware | Leitura óptica de credenciais de nuvem via câmera (QR Code) | Alta | 8 pts | Sprint 1 |
+| **US03** | Autenticação & Hardware | Detecção contextual de região de datacenter via sensor GPS | Média | 5 pts | Sprint 1 |
+| **US04** | Governança & Validação | Validação sintática rigorosa de identificadores OCI (Regex) | Alta | 5 pts | Sprint 1 |
+| **US05** | Dashboard & Métricas | Semáforo visual de saúde operacional (Healthy, Warning, Danger) | Alta | 5 pts | Sprint 1 |
+| **US06** | Telemetria Dinâmica | Motor dinâmico de telemetria e provisionamento sob demanda | Alta | 5 pts | Sprint 1 |
+| **US07** | Customização & UI | Fixação de instâncias prioritárias no topo do Dashboard | Média | 3 pts | Sprint 1 |
+| **US08** | Auditoria & Relatórios | Exportação e compartilhamento de relatório operacional em PDF | Média | 5 pts | Sprint 1 |
+| **US09** | Conexão Real OCI | Assinador de requisições HTTP REST com chave RSA (RFC Draft) | Alta | 13 pts | Sprint 2 |
+| **US10** | Conexão Real OCI | Listagem real de instâncias ativas via OCI Core Services API | Alta | 8 pts | Sprint 2 |
+| **US11** | Conexão Real OCI | Coleta de métricas reais de CPU/IO via OCI Telemetry Monitoring | Alta | 8 pts | Sprint 2 |
+| **US12** | Visualização Analítica | Gráficos vetoriais de tendências temporais (1h, 24h, 7d) | Média | 8 pts | Sprint 2 |
+| **US13** | Governança Multi-Tenant | Gerenciamento de múltiplos perfis e alternância de região OCI | Média | 5 pts | Sprint 2 |
+| **US14** | Ecossistema Multi-Cloud | Integração do cliente AWS CloudWatch via AWS SDK v3 | Alta | 8 pts | Sprint 3 |
+| **US15** | Ecossistema Multi-Cloud | Integração com Google Cloud Monitoring via Service Account | Alta | 8 pts | Sprint 3 |
+| **US16** | Ações de Infraestrutura | Disparo de controles remotos de ciclo de vida (Start, Stop, Reboot) | Alta | 8 pts | Sprint 3 |
+| **US17** | Alertas & Notificações | Push notifications em background para saturação de limites | Média | 5 pts | Sprint 3 |
+| **US18** | Auditoria Avançada | Exportação de logs de auditoria e conformidade em PDF/CSV | Baixa | 3 pts | Sprint 3 |
+
+---
+
+## ⚡ Planejamento das Sprints & MVPs
+
+### 🟢 Sprint 1: Fundação, Hardware Nativo e OCI-First
+> **🏆 MVP da Sprint 1:**  
+> Aplicativo funcional instalado no smartphone Android (`.apk`), capaz de autenticar o usuário através de biometria nativa, importar credenciais reais da OCI via câmera por QR Code, sugerir o datacenter local mais próximo por satélite (GPS) e exibir um painel dinâmico com semáforo de saúde e provisionamento de instâncias sem dependência de saldo em nuvem.
+
+* **Período:** 20 de Setembro a 28 de Setembro
+* **Esforço:** 44 Story Points
+* **Status da Sprint:** Concluída
+
+#### Sprint Backlog 1
+| ID | User Story | Componente / Hardware | Complexidade | Status |
 | :--- | :--- | :--- | :---: | :---: |
-| **US01** | Autenticação biométrica vinculada a credenciais salvas no cofre | Leitor de Impressão Digital | 8 pts | Concluído |
-| **US02** | Importação de credenciais via leitura óptica de QR Code | Câmera Traseira | 8 pts | Concluído |
-| **US03** | Detecção da região de datacenter mais próxima via satélite | Sensor GPS (`expo-location`) | 5 pts | Concluído |
-| **US04** | Validação sintática estrita dos identificadores da Oracle Cloud | Regex / `validation.ts` | 5 pts | Concluído |
-| **US05** | Painel com semáforo de integridade (Verde, Amarelo, Vermelho) | UI / Componentes | 5 pts | Concluído |
-| **US06** | Provisionamento dinâmico de instâncias e recálculo de telemetria | Engine Dinâmica | 5 pts | Concluído |
-| **US07** | Fixação de instâncias prioritárias no topo do Dashboard | Estado Persistente | 3 pts | Concluído |
-| **US08** | Emissão e compartilhamento de relatório operacional em PDF | `react-native-share` / Intent | 5 pts | Concluído |
-| **US09** | Compilação e empacotamento do instalador executável Android (`.apk`) | Gradle (Debug / Release) | 5 pts | Concluído |
+| **US01** | Autenticação biométrica vinculada ao Android Keystore sem estouro de bloco | Leitor de Impressão Digital | 8 pts | Concluído |
+| **US02** | Importação de credenciais via leitura óptica de QR Code em texto puro | Câmera Traseira | 8 pts | Concluído |
+| **US03** | Detecção da região de datacenter mais próxima via sensor GPS | Sensor GPS (`expo-location`) | 5 pts | Concluído |
+| **US04** | Validação sintática estrita dos identificadores da Oracle Cloud | `src/utils/validation.ts` | 5 pts | Concluído |
+| **US05** | Painel com semáforo de integridade (Verde, Amarelo, Vermelho) | UI / `ResourceCard` | 5 pts | Concluído |
+| **US06** | Provisionamento dinâmico de instâncias e recálculo dinâmico de KPIs | `simulationService` | 5 pts | Concluído |
+| **US07** | Fixação de recursos prioritários no topo da tela inicial | `CloudContext` | 3 pts | Concluído |
+| **US08** | Geração e compartilhamento de relatório operacional em PDF | `react-native-share` / Intent | 5 pts | Concluído |
 
-### 🟡 Sprint 2: Conexão Direta com a API REST da OCI
-*Meta: Conexão real aos endpoints de telemetria da Oracle Cloud Infrastructure via assinaturas criptográficas HTTP.*
+---
 
-| ID | Requisito / User Story | Componente / Tecnologia | Complexidade | Status |
+### 🟡 Sprint 2: Telemetria Real OCI e Análise Vetorial
+> **🏆 MVP da Sprint 2:**  
+> Painel conectado diretamente aos endpoints REST de telemetria da Oracle Cloud Infrastructure em produção, autenticando chamadas via assinaturas digitais RSA-SHA256, substituindo a simulação pela coleta de CPU e memória reais de instâncias de Compute e renderizando curvas de tendências em gráficos vetoriais com intervalos selecionáveis.
+
+* **Período:** 29 de Setembro a 12 de Outubro
+* **Esforço:** 42 Story Points
+* **Status da Sprint:** Planejada
+
+#### Sprint Backlog 2
+| ID | User Story | Componente / Tecnologia | Complexidade | Status |
 | :--- | :--- | :--- | :---: | :---: |
-| **US10** | Assinador de requisições HTTP REST com chave privada RSA (RFC Draft) | Criptografia RSA-SHA256 | 13 pts | Backlog |
-| **US11** | Consulta direta de instâncias ativas na tenancy via OCI Compute API | OCI Core Services API | 8 pts | Backlog |
-| **US12** | Coleta de métricas reais de CPU e I/O via OCI Telemetry Monitoring API | OCI Monitoring Service | 8 pts | Backlog |
+| **US09** | Assinador de requisições HTTP REST com chave privada RSA (RFC Draft) | Criptografia RSA-SHA256 | 13 pts | Backlog |
+| **US10** | Consulta direta de instâncias ativas na tenancy via OCI Compute API | OCI Core Services REST | 8 pts | Backlog |
+| **US11** | Coleta de métricas reais de CPU e I/O via OCI Telemetry Monitoring API | OCI Monitoring Service | 8 pts | Backlog |
+| **US12** | Renderização de gráficos vetoriais com zoom e seletor (1h, 24h, 7d) | `react-native-svg-charts` | 8 pts | Backlog |
 | **US13** | Gerenciamento de múltiplos perfis de tenancy e alternância de região | Multi-Tenant Session Engine | 5 pts | Backlog |
 
-### 🔵 Sprint 3: Gestão Multi-Cloud Completa e Ações Remotas
-*Meta: Conexões diretas à AWS e GCP, push notifications e controles remotos de ciclo de vida de instâncias.*
+---
 
-| ID | Requisito / User Story | Componente / Tecnologia | Complexidade | Status |
+### 🔵 Sprint 3: Gestão Multi-Cloud Completa, Ações Remotas e Alertas
+> **🏆 MVP da Sprint 3:**  
+> Solução corporativa multi-cloud completa, permitindo parear simultaneamente contas da AWS e Google Cloud além da OCI, emitir comandos de ciclo de vida (Start, Stop, Reboot) diretamente pelo celular, receber alertas push em segundo plano sobre saturação de recursos e exportar relatórios consolidados de disponibilidade para auditoria.
+
+* **Período:** 13 de Outubro a 26 de Outubro
+* **Esforço:** 32 Story Points
+* **Status da Sprint:** Planejada
+
+#### Sprint Backlog 3
+| ID | User Story | Componente / Tecnologia | Complexidade | Status |
 | :--- | :--- | :--- | :---: | :---: |
-| **US14** | Integração do cliente AWS CloudWatch via AWS SDK v3 | AWS Monitoring REST | 8 pts | Backlog |
-| **US15** | Integração do Google Cloud Monitoring via Service Account | GCP IAM & Metrics API | 8 pts | Backlog |
+| **US14** | Integração do cliente AWS CloudWatch para métricas de EC2 e RDS | `@aws-sdk/client-cloudwatch`| 8 pts | Backlog |
+| **US15** | Integração com Google Cloud Monitoring via OAuth2 Service Account | GCP Metrics REST API | 8 pts | Backlog |
 | **US16** | Disparo de comandos remotos de ciclo de vida (Start, Stop, Reboot) | Cloud Compute Controls | 8 pts | Backlog |
-| **US17** | Notificações push em segundo plano para alertas críticos de saturação | Firebase Cloud Messaging | 5 pts | Backlog |
+| **US17** | Notificações push em segundo plano para saturação de limites críticos | Firebase Cloud Messaging | 5 pts | Backlog |
+| **US18** | Relatório consolidado multi-cloud com índice de disponibilidade SLA | `react-native-pdf-lib` | 3 pts | Backlog |
 
 ---
 
@@ -138,15 +188,7 @@ O monitoramento classifica as instâncias em três estados com base nos limiares
 
 ---
 
-## 🛠️ Tecnologias e Bibliotecas
 
-* **Core:** React Native (0.76+), TypeScript
-* **Navegação:** React Navigation (Native Stack & Bottom Tabs)
-* **Segurança e Criptografia:** `react-native-keychain`, `react-native-encrypted-storage`
-* **Hardware Nativo:** `react-native-camera-kit`, `expo-location`
-* **Engine de Telemetria:** `@faker-js/faker`
-* **Interface & Ícones:** Material Design Dark Theme, Vetores customizados e suporte a Logo PNG em `src/assets/logo.png`
-
----
-
-
+Os arquivos `.apk` gerados estarão disponíveis em:
+* **Debug:** `android/app/build/outputs/apk/debug/app-debug.apk`
+* **Release:** `android/app/build/outputs/apk/release/app-release.apk` (ou espelhado na raiz do projeto como `CloudWatchDashboard.apk`).
