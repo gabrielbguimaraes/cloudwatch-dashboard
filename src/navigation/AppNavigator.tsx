@@ -8,6 +8,7 @@ import { Text, View, StyleSheet } from 'react-native';
 import { LoginScreen } from '../screens/LoginScreen';
 import { DashboardScreen } from '../screens/DashboardScreen';
 import { MetricsDetailScreen } from '../screens/MetricsDetailScreen';
+import { SettingsScreen } from '../screens/SettingsScreen';
 import { colors } from '../theme';
 
 const Stack = createNativeStackNavigator();
@@ -38,6 +39,14 @@ const MainTabs: React.FC = () => {
         options={{
           tabBarLabel: 'Métricas',
           tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 16 }}>📈</Text>,
+        }}
+      />
+      <Tab.Screen
+        name="Settings"
+        component={SettingsScreen}
+        options={{
+          tabBarLabel: 'Configurações',
+          tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 16 }}>⚙️</Text>,
         }}
       />
     </Tab.Navigator>

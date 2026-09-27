@@ -13,6 +13,9 @@ import {
   Modal,
   Platform,
   PermissionsAndroid,
+  TextInput,
+  ActivityIndicator,
+  Vibration,
 } from 'react-native';
 import { Camera } from 'react-native-camera-kit';
 import { colors } from '../theme';
@@ -50,18 +53,58 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
   const [targetProviderToConnect, setTargetProviderToConnect] = useState<CloudProvider | null>(null);
   const [isProcessingQr, setIsProcessingQr] = useState<boolean>(false);
 
-  // Contextualização Regional por GPS (expo-location)
+  // Estados do Modal Interativo de Provisionamento Personalizado (Tarefa A)
+  const [isProvisionModalVisible, setIsProvisionModalVisible] = useState<boolean>(false);
+  const [serverName, setServerName] = useState<string>('');
+  const [selectedShape, setSelectedShape] = useState<'VM.Standard.E4.Flex' | 'VM.Standard.A1.Flex'>('VM.Standard.E4.Flex');
+  const [selectedOcpu, setSelectedOcpu] = useState<number>(2);
+  const [selectedMemory, setSelectedMemory] = useState<number>(8);
+  const [isProvisioning, setIsProvisioning] = useState<boolean>(false);
+
+  // Estados de Pull-to-Refresh e Filtro de Busca Instantâneo (Tarefa B)
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [searchQuery, setSearchQuery] = useState<string>('');
+
+  const handlePullToRefresh = () => {
+    setIsRefreshing(true);
+    refreshMetrics();
+    setTimeout(() => {
+      setIsRefreshing(false);
+      Vibration.vibrate(30);
+    }, 800);
+  };
+
+  const displayedResources = filteredResources.filter(r => 
+    r.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    r.id.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
+  // Provedor ativo da sessão para o provisionamento
+  const activeSessionProvider: CloudProvider =
+    selectedProvider === 'ALL' ? (connectedProviders[0] || 'OCI') : selectedProvider;
+
+  // Contextualização Regional por GPS (expo-location) - Totalmente blindada contra crashes (Tarefa C)
   useEffect(() => {
     let isMounted = true;
-    detectNearestDatacenter()
-      .then((res) => {
-        if (isMounted && res.badge) {
-          setGpsBadge(res.badge);
-        }
-      })
-      .catch((err) => {
-        console.warn('Erro ao obter localização por GPS:', err);
-      });
+    try {
+      detectNearestDatacenter()
+        .then((res) => {
+          if (isMounted) {
+            setGpsBadge(res?.badge || '📍 sa-saopaulo-1 (Local GPS)');
+          }
+        })
+        .catch((err) => {
+          console.warn('Erro seguro capturado ao obter localização por GPS:', err);
+          if (isMounted) {
+            setGpsBadge('📍 sa-saopaulo-1 (Local GPS)');
+          }
+        });
+    } catch (err) {
+      console.warn('Exceção síncrona na detecção de GPS tratada com fallback:', err);
+      if (isMounted) {
+        setGpsBadge('📍 sa-saopaulo-1 (Local GPS)');
+      }
+    }
     return () => {
       isMounted = false;
     };
@@ -78,17 +121,41 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
   };
 
   /**
-   * Provisiona sob demanda uma nova instância computacional
+   * Abre o Modal Interativo de Provisionamento Personalizado
    */
-  const handleProvisionInstance = () => {
-    const targetProvider = selectedProvider === 'ALL' ? undefined : selectedProvider;
-    const newResource = provisionInstance(targetProvider);
+  const handleOpenProvisionModal = () => {
+    setServerName('');
+    setSelectedShape('VM.Standard.E4.Flex');
+    setSelectedOcpu(2);
+    setSelectedMemory(8);
+    setIsProvisioning(false);
+    setIsProvisionModalVisible(true);
+  };
 
-    Alert.alert(
-      '⚡ Nova Instância Provisionada',
-      `Recurso provisionado com sucesso:\n\n• Nome: ${newResource.name}\n• Provedor: ${newResource.provider}\n• Status: ${newResource.status}\n• CPU: ${newResource.metricsSummary.cpuPercent}% | RAM: ${newResource.metricsSummary.memoryPercent}%`,
-      [{ text: 'OK' }]
-    );
+  /**
+   * Executa o provisionamento personalizado com simulação de delay de 1s e recálculo de KPIs
+   */
+  const handleConfirmProvision = () => {
+    setIsProvisioning(true);
+
+    setTimeout(() => {
+      const newResource = provisionInstance({
+        name: serverName,
+        shape: selectedShape,
+        ocpuCount: selectedOcpu,
+        memoryInGBs: selectedMemory,
+        provider: activeSessionProvider,
+      });
+
+      setIsProvisioning(false);
+      setIsProvisionModalVisible(false);
+
+      Alert.alert(
+        '⚡ Nova Instância Provisionada',
+        `Recurso provisionado com sucesso:\n\n• Nome: ${newResource.name}\n• Provedor: ${newResource.provider}\n• Shape: ${selectedShape}\n• Configuração: ${selectedOcpu} OCPU(s) | ${selectedMemory} GB RAM\n• Status: OPERACIONAL`,
+        [{ text: 'OK' }]
+      );
+    }, 1000);
   };
 
   /**
@@ -329,9 +396,10 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
         contentContainerStyle={styles.container}
         refreshControl={
           <RefreshControl
-            refreshing={isLoading}
-            onRefresh={refreshMetrics}
-            tintColor={colors.neonCyan}
+            refreshing={isRefreshing}
+            onRefresh={handlePullToRefresh}
+            colors={['#38BDF8']}
+            tintColor="#38BDF8"
           />
         }
       >
@@ -401,7 +469,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
         <View style={styles.provisionSection}>
           <TouchableOpacity
             style={styles.provisionBtn}
-            onPress={handleProvisionInstance}
+            onPress={handleOpenProvisionModal}
             activeOpacity={0.85}
           >
             <Text style={styles.provisionBtnIcon}>⚡</Text>
@@ -503,7 +571,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
         </View>
 
         {/* Seção de Governança: Recursos Fixados no Início */}
-        {pinnedResources.length > 0 && (
+        {pinnedResources.length > 0 && !searchQuery.trim() && (
           <View style={styles.pinnedSection}>
             <View style={styles.sectionHeader}>
               <View style={styles.sectionTitleRow}>
@@ -528,11 +596,246 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
             <Text style={styles.sectionUpdated}>Atualizado: {lastUpdated}</Text>
           </View>
 
+          {/* Barra de Busca Instantânea (Tarefa B) */}
+          <View style={styles.searchContainer}>
+            <Text style={styles.searchIcon}>🔍</Text>
+            <TextInput
+              style={styles.searchInput}
+              placeholder="Filtrar por nome ou OCID..."
+              placeholderTextColor="#64748B"
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              autoCapitalize="none"
+              autoCorrect={false}
+              clearButtonMode="while-editing"
+            />
+            {searchQuery.length > 0 && (
+              <TouchableOpacity
+                onPress={() => setSearchQuery('')}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                style={styles.searchClearBtn}
+              >
+                <Text style={styles.searchClearText}>✕</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+
           <View style={styles.resourceList}>
-            {filteredResources.map((res) => renderResourceCard(res, false))}
+            {displayedResources.length > 0 ? (
+              displayedResources.map((res) => renderResourceCard(res, false))
+            ) : (
+              <View style={styles.emptyFilterCard}>
+                <Text style={styles.emptyFilterIcon}>🔎</Text>
+                <Text style={styles.emptyFilterText}>
+                  Nenhum recurso encontrado para este filtro
+                </Text>
+                <Text style={styles.emptyFilterSub}>
+                  Verifique o termo digitado ou limpe a busca para visualizar os recursos
+                </Text>
+              </View>
+            )}
           </View>
         </View>
       </ScrollView>
+
+      {/* Modal Interativo de Provisionamento Personalizado (Tarefa A) */}
+      <Modal
+        visible={isProvisionModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          if (!isProvisioning) setIsProvisionModalVisible(false);
+        }}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.provisionModalCard}>
+            {/* Modal Header */}
+            <View style={styles.provisionModalHeader}>
+              <View>
+                <Text style={styles.provisionModalTitle}>⚡ Provisionar Instância</Text>
+                <View style={styles.activeProviderTag}>
+                  <Text style={styles.activeProviderTagText}>
+                    Nuvem Ativa: {activeSessionProvider}
+                  </Text>
+                </View>
+              </View>
+              <TouchableOpacity
+                style={styles.modalCloseBtn}
+                onPress={() => setIsProvisionModalVisible(false)}
+                disabled={isProvisioning}
+              >
+                <Text style={styles.modalCloseText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView showsVerticalScrollIndicator={false} style={styles.provisionFormScroll}>
+              {/* 1. Nome do Servidor */}
+              <View style={styles.formGroup}>
+                <Text style={styles.formLabel}>NOME DO SERVIDOR</Text>
+                <TextInput
+                  style={styles.formInput}
+                  placeholder="ex: api-gateway-prod-01"
+                  placeholderTextColor="#64748B"
+                  value={serverName}
+                  onChangeText={setServerName}
+                  autoCapitalize="none"
+                  editable={!isProvisioning}
+                />
+              </View>
+
+              {/* 2. Arquitetura / Shape */}
+              <View style={styles.formGroup}>
+                <Text style={styles.formLabel}>ARQUITETURA / SHAPE (OCI)</Text>
+                <View style={styles.shapesContainer}>
+                  <TouchableOpacity
+                    style={[
+                      styles.shapeCard,
+                      selectedShape === 'VM.Standard.E4.Flex' && styles.shapeCardActive,
+                    ]}
+                    onPress={() => setSelectedShape('VM.Standard.E4.Flex')}
+                    disabled={isProvisioning}
+                  >
+                    <View style={styles.shapeRadioRow}>
+                      <View
+                        style={[
+                          styles.radioDot,
+                          selectedShape === 'VM.Standard.E4.Flex' && styles.radioDotActive,
+                        ]}
+                      />
+                      <Text
+                        style={[
+                          styles.shapeName,
+                          selectedShape === 'VM.Standard.E4.Flex' && styles.shapeNameActive,
+                        ]}
+                      >
+                        VM.Standard.E4.Flex
+                      </Text>
+                    </View>
+                    <Text style={styles.shapeSubtitle}>Processador AMD EPYC™ (x86_64)</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.shapeCard,
+                      selectedShape === 'VM.Standard.A1.Flex' && styles.shapeCardActive,
+                    ]}
+                    onPress={() => setSelectedShape('VM.Standard.A1.Flex')}
+                    disabled={isProvisioning}
+                  >
+                    <View style={styles.shapeRadioRow}>
+                      <View
+                        style={[
+                          styles.radioDot,
+                          selectedShape === 'VM.Standard.A1.Flex' && styles.radioDotActive,
+                        ]}
+                      />
+                      <Text
+                        style={[
+                          styles.shapeName,
+                          selectedShape === 'VM.Standard.A1.Flex' && styles.shapeNameActive,
+                        ]}
+                      >
+                        VM.Standard.A1.Flex
+                      </Text>
+                    </View>
+                    <Text style={styles.shapeSubtitle}>Processador Arm Ampere® (AArch64)</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              {/* 3. Recursos: vCPUs e Memória */}
+              <View style={styles.formGroup}>
+                <Text style={styles.formLabel}>vCPUs (OCPUs)</Text>
+                <View style={styles.optionsRow}>
+                  {[1, 2, 4].map((ocpu) => (
+                    <TouchableOpacity
+                      key={`ocpu-${ocpu}`}
+                      style={[
+                        styles.optionChip,
+                        selectedOcpu === ocpu && styles.optionChipActive,
+                      ]}
+                      onPress={() => setSelectedOcpu(ocpu)}
+                      disabled={isProvisioning}
+                    >
+                      <Text
+                        style={[
+                          styles.optionChipText,
+                          selectedOcpu === ocpu && styles.optionChipTextActive,
+                        ]}
+                      >
+                        {ocpu} {ocpu === 1 ? 'OCPU' : 'OCPUs'}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+
+              <View style={styles.formGroup}>
+                <Text style={styles.formLabel}>MEMÓRIA RAM</Text>
+                <View style={styles.optionsRow}>
+                  {[4, 8, 16].map((ram) => (
+                    <TouchableOpacity
+                      key={`ram-${ram}`}
+                      style={[
+                        styles.optionChip,
+                        selectedMemory === ram && styles.optionChipActive,
+                      ]}
+                      onPress={() => setSelectedMemory(ram)}
+                      disabled={isProvisioning}
+                    >
+                      <Text
+                        style={[
+                          styles.optionChipText,
+                          selectedMemory === ram && styles.optionChipTextActive,
+                        ]}
+                      >
+                        {ram} GB RAM
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+
+              {/* Resumo da Configuração */}
+              <View style={styles.provisionSummaryBox}>
+                <Text style={styles.summaryLabel}>ESPECIFICAÇÃO SELECIONADA</Text>
+                <Text style={styles.summaryText}>
+                  {selectedShape} • {selectedOcpu} OCPU(s) • {selectedMemory} GB RAM
+                </Text>
+                <Text style={styles.summarySub}>
+                  Região: sa-saopaulo-1 • SLA: 99.98% • Status: OPERACIONAL
+                </Text>
+              </View>
+            </ScrollView>
+
+            {/* Ações do Modal */}
+            <View style={styles.provisionModalActions}>
+              <TouchableOpacity
+                style={styles.cancelBtn}
+                onPress={() => setIsProvisionModalVisible(false)}
+                disabled={isProvisioning}
+              >
+                <Text style={styles.cancelBtnText}>Cancelar</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.confirmProvisionBtn, isProvisioning && styles.confirmBtnDisabled]}
+                onPress={handleConfirmProvision}
+                disabled={isProvisioning}
+              >
+                {isProvisioning ? (
+                  <>
+                    <ActivityIndicator size="small" color="#FFFFFF" style={{ marginRight: 8 }} />
+                    <Text style={styles.confirmBtnText}>Provisionando recursos...</Text>
+                  </>
+                ) : (
+                  <Text style={styles.confirmBtnText}>Confirmar Provisionamento</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       {/* Modal da Câmera para Escanear QR Code de Novo Provedor */}
       <Modal
@@ -879,6 +1182,63 @@ const styles = StyleSheet.create({
     color: colors.neonCyan,
     fontSize: 9,
   },
+  searchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#0F172A',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+    paddingHorizontal: 12,
+    paddingVertical: Platform.OS === 'ios' ? 10 : 2,
+    marginBottom: 14,
+    gap: 8,
+  },
+  searchIcon: {
+    fontSize: 14,
+  },
+  searchInput: {
+    flex: 1,
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontFamily: 'monospace',
+    paddingVertical: 6,
+  },
+  searchClearBtn: {
+    padding: 4,
+  },
+  searchClearText: {
+    color: '#64748B',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  emptyFilterCard: {
+    backgroundColor: '#0F172A',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+    padding: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 6,
+  },
+  emptyFilterIcon: {
+    fontSize: 24,
+    marginBottom: 8,
+    opacity: 0.7,
+  },
+  emptyFilterText: {
+    color: '#E2E8F0',
+    fontSize: 12,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  emptyFilterSub: {
+    color: '#64748B',
+    fontSize: 10,
+    marginTop: 4,
+    textAlign: 'center',
+  },
   resourceList: {
     gap: 10,
   },
@@ -1070,5 +1430,221 @@ const styles = StyleSheet.create({
     color: '#38BDF8',
     fontSize: 11,
     fontWeight: '700',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.75)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+  },
+  provisionModalCard: {
+    width: '100%',
+    maxWidth: 440,
+    backgroundColor: '#0F172A',
+    borderRadius: 20,
+    borderWidth: 1.5,
+    borderColor: '#1E293B',
+    padding: 20,
+    maxHeight: '90%',
+  },
+  provisionModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    paddingBottom: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1E293B',
+    marginBottom: 14,
+  },
+  provisionModalTitle: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  activeProviderTag: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#1E293B',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 6,
+    marginTop: 4,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  activeProviderTagText: {
+    color: '#38BDF8',
+    fontSize: 10,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+  modalCloseBtn: {
+    padding: 6,
+  },
+  modalCloseText: {
+    color: '#94A3B8',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  provisionFormScroll: {
+    maxHeight: 380,
+  },
+  formGroup: {
+    marginBottom: 14,
+  },
+  formLabel: {
+    color: '#94A3B8',
+    fontSize: 10,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+    marginBottom: 6,
+    textTransform: 'uppercase',
+  },
+  formInput: {
+    backgroundColor: '#070D1A',
+    borderWidth: 1,
+    borderColor: '#1E293B',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    color: '#FFFFFF',
+    fontSize: 13,
+  },
+  shapesContainer: {
+    gap: 8,
+  },
+  shapeCard: {
+    backgroundColor: '#070D1A',
+    borderWidth: 1,
+    borderColor: '#1E293B',
+    borderRadius: 12,
+    padding: 12,
+  },
+  shapeCardActive: {
+    borderColor: '#38BDF8',
+    backgroundColor: '#0C1B33',
+  },
+  shapeRadioRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  radioDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    borderWidth: 2,
+    borderColor: '#475569',
+  },
+  radioDotActive: {
+    borderColor: '#38BDF8',
+    backgroundColor: '#38BDF8',
+  },
+  shapeName: {
+    color: '#E2E8F0',
+    fontSize: 12,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+  shapeNameActive: {
+    color: '#38BDF8',
+  },
+  shapeSubtitle: {
+    color: '#64748B',
+    fontSize: 10,
+    marginTop: 4,
+    marginLeft: 20,
+  },
+  optionsRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  optionChip: {
+    flex: 1,
+    backgroundColor: '#070D1A',
+    borderWidth: 1,
+    borderColor: '#1E293B',
+    borderRadius: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  optionChipActive: {
+    borderColor: '#38BDF8',
+    backgroundColor: '#0C1B33',
+  },
+  optionChipText: {
+    color: '#94A3B8',
+    fontSize: 11,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+  optionChipTextActive: {
+    color: '#38BDF8',
+    fontWeight: '800',
+  },
+  provisionSummaryBox: {
+    backgroundColor: '#070D1A',
+    borderWidth: 1,
+    borderColor: '#1E293B',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 8,
+  },
+  summaryLabel: {
+    color: '#64748B',
+    fontSize: 9,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+    marginBottom: 4,
+  },
+  summaryText: {
+    color: '#F8FAFC',
+    fontSize: 12,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+  summarySub: {
+    color: '#38BDF8',
+    fontSize: 10,
+    marginTop: 2,
+  },
+  provisionModalActions: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 14,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#1E293B',
+  },
+  cancelBtn: {
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#334155',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cancelBtnText: {
+    color: '#94A3B8',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  confirmProvisionBtn: {
+    flex: 1,
+    backgroundColor: '#0284C7',
+    borderRadius: 12,
+    paddingVertical: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  confirmBtnDisabled: {
+    opacity: 0.7,
+  },
+  confirmBtnText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '800',
   },
 });

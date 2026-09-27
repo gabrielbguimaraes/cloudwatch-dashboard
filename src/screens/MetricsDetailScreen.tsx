@@ -10,6 +10,7 @@ import {
   SafeAreaView,
   Alert,
   Share,
+  ActivityIndicator,
 } from 'react-native';
 import { colors } from '../theme';
 import { useCloud } from '../context/CloudContext';
@@ -17,6 +18,7 @@ import {
   generateTimeSeriesMetrics,
   generateSimulatedLogs,
 } from '../services/simulationService';
+import { Print, sharePdfAsync } from '../services/pdfService';
 
 export const MetricsDetailScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   const { selectedResource, togglePin, isResourcePinned } = useCloud();
@@ -47,30 +49,35 @@ export const MetricsDetailScreen: React.FC<{ navigation: any }> = ({ navigation 
     return raw.filter((l) => l.severity === logFilter);
   }, [selectedResource.id, logFilter]);
 
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
+
   /**
-   * Gera relatório formatado de auditoria e abre a folha de compartilhamento nativa do Android
+   * Gera relatório executivo formatado em PDF nativo (A4 corporativo) e compartilha via intent nativo
    */
   const handleExportPdf = async () => {
+    if (isExportingPdf) return;
+    setIsExportingPdf(true);
     try {
-      const now = new Date();
-      const reportHeader = `========================================================\nCLOUDWATCH DASHBOARD - RELATÓRIO TÉCNICO DE AUDITORIA\nData de Emissão: ${now.toLocaleDateString()} às ${now.toLocaleTimeString()}\n========================================================\n\n`;
-
-      const resourceInfo = `1. IDENTIFICAÇÃO DO RECURSO:\n• Nome: ${selectedResource.name}\n• Provedor: ${selectedResource.provider}\n• Identificador (OCID/ARN): ${selectedResource.ocid || selectedResource.arn || selectedResource.id}\n• Região: ${selectedResource.region}\n• Status Operacional: ${selectedResource.status}\n• Disponibilidade SLA: ${selectedResource.availabilitySla}%\n• Estimativa Mensal: $${selectedResource.monthlyCostEstimate.toFixed(2)} USD\n\n`;
-
-      const metricsInfo = `2. TELEMETRIA E MÉTRICAS PRINCIPAIS:\n• Utilização de CPU: ${selectedResource.metricsSummary.cpuPercent}%\n• Memória RAM: ${selectedResource.metricsSummary.memoryPercent || 48}%\n• Latência de Rede/IO: ${selectedResource.metricsSummary.latencyMs || 4.2} ms\n• Utilização de Disco: ${selectedResource.metricsSummary.diskPercent || 42}%\n\n`;
-
-      const logsInfo = `3. HISTÓRICO DE LOGS E EVENTOS:\n${logs
-        .map((l) => `[${l.timestamp}] [${l.severity}] ${l.message}`)
-        .join('\n')}\n\n========================================================\nGerado via CloudWatch Mobile • Aluno: João Gabriel B. Guimarães (FATEC)\n========================================================`;
-
-      const fullReport = reportHeader + resourceInfo + metricsInfo + logsInfo;
-
-      await Share.share({
-        title: `Relatório Técnico - ${selectedResource.name}`,
-        message: fullReport,
+      const html = Print.generateExecutiveReportHtml(selectedResource);
+      const pdfResult = await Print.printToFileAsync({
+        html,
+        serverName: selectedResource.name,
+        provider: selectedResource.provider,
+        region: selectedResource.region,
+        status: selectedResource.status,
+        cpu: `${selectedResource.metricsSummary.cpuPercent}%`,
+        memory: `${selectedResource.metricsSummary.memoryPercent || 48}%`,
+        ocid: selectedResource.ocid || selectedResource.arn || selectedResource.id,
+        sla: `${selectedResource.availabilitySla}%`,
+        auditor: 'João Gabriel Barros Guimarães - FATEC 4DSM',
       });
+
+      await sharePdfAsync(pdfResult.uri, `Relatório de Telemetria e SLA - ${selectedResource.name}`);
     } catch (error: any) {
-      Alert.alert('Erro ao Exportar', error?.message || 'Falha ao acionar compartilhamento.');
+      console.warn('Erro ao exportar PDF:', error);
+      Alert.alert('Erro ao Exportar PDF', error?.message || 'Falha ao gerar ou compartilhar arquivo PDF.');
+    } finally {
+      setIsExportingPdf(false);
     }
   };
 
@@ -255,9 +262,19 @@ export const MetricsDetailScreen: React.FC<{ navigation: any }> = ({ navigation 
 
         {/* Ações: PDF & Pin */}
         <View style={styles.actionsRow}>
-          <TouchableOpacity style={styles.actionBtnPdf} onPress={handleExportPdf}>
-            <Text style={styles.actionBtnIcon}>📄</Text>
-            <Text style={styles.actionBtnPdfText}>Exportar Relatório</Text>
+          <TouchableOpacity
+            style={[styles.actionBtnPdf, isExportingPdf && { opacity: 0.7 }]}
+            onPress={handleExportPdf}
+            disabled={isExportingPdf}
+          >
+            {isExportingPdf ? (
+              <ActivityIndicator size="small" color={colors.neonCyan} />
+            ) : (
+              <Text style={styles.actionBtnIcon}>📄</Text>
+            )}
+            <Text style={styles.actionBtnPdfText}>
+              {isExportingPdf ? 'Gerando PDF...' : 'Exportar Relatório PDF'}
+            </Text>
           </TouchableOpacity>
 
           <TouchableOpacity

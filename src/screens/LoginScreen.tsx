@@ -1,10 +1,3 @@
-/**
- * CloudWatch Dashboard - Tela de Login (LoginScreen)
- * Validação Sintática Rigorosa OCI (Tenancy, User, Fingerprint, Região),
- * Arquitetura Desacoplada (EncryptedStorage + Keychain Biometrics),
- * Leitor Real de QR Code e Nova Logo Minimalista.
- * Aluno: João Gabriel Barros Guimarães - FATEC 4DSM
- */
 
 import React, { useState, useEffect } from 'react';
 import {
@@ -22,6 +15,7 @@ import {
   PermissionsAndroid,
   Platform,
   Image,
+  Vibration,
 } from 'react-native';
 import { Camera } from 'react-native-camera-kit';
 import { colors } from '../theme';
@@ -94,8 +88,8 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
     selectedLoginProvider === 'OCI'
       ? isOciValid
       : selectedLoginProvider === 'AWS'
-      ? awsKeyId.trim().length > 4 && awsSecretKey.trim().length > 4
-      : gcpEmail.includes('@') && gcpPrivateKey.trim().length > 4;
+        ? awsKeyId.trim().length > 4 && awsSecretKey.trim().length > 4
+        : gcpEmail.includes('@') && gcpPrivateKey.trim().length > 4;
 
   const handleProviderChange = (provider: CloudProvider) => {
     setSelectedLoginProvider(provider);
@@ -126,21 +120,21 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
     const payload =
       selectedLoginProvider === 'OCI'
         ? {
-            provider: 'OCI' as const,
-            tenancyId: tenancyId.trim(),
-            userId: userId.trim(),
-            fingerprint: fingerprint.trim(),
-            region: region.trim(),
-            privateKey: privateKey.trim(),
-          }
+          provider: 'OCI' as const,
+          tenancyId: tenancyId.trim(),
+          userId: userId.trim(),
+          fingerprint: fingerprint.trim(),
+          region: region.trim(),
+          privateKey: privateKey.trim(),
+        }
         : selectedLoginProvider === 'AWS'
-        ? {
+          ? {
             provider: 'AWS' as const,
             keyId: awsKeyId.trim(),
             secretKey: awsSecretKey.trim(),
             region: 'us-east-1',
           }
-        : {
+          : {
             provider: 'GCP' as const,
             keyId: gcpEmail.trim(),
             secretKey: gcpPrivateKey.trim(),
@@ -151,6 +145,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
     const result = await loginWithCredentials(payload);
 
     if (result.success) {
+      Vibration.vibrate(40);
       navigation.replace('MainTabs');
     } else if (result.error) {
       Alert.alert('Autenticação de Segurança', result.error);
@@ -168,6 +163,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
 
     const result = await loginWithBiometrics();
     if (result.success) {
+      Vibration.vibrate(40);
       navigation.replace('MainTabs');
     } else if (result.error) {
       Alert.alert('Validação Biométrica', result.error);
@@ -219,6 +215,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
     const result = loginWithQrCodePayload(rawValue);
 
     if (result.success && result.data) {
+      Vibration.vibrate(40);
       const data = result.data;
       if (data.provider) setSelectedLoginProvider(data.provider);
       if (data.tenancyId) setTenancyId(data.tenancyId);
@@ -281,7 +278,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-        {/* Logo Personalizada via Imagem */}
+        {/* Logo Personalizada via Imagem Oficial */}
         <View style={styles.logoSection}>
           <Image
             source={require('../assets/logo.png')}
@@ -585,13 +582,11 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
           </View>
 
           <View style={styles.cameraWrapper}>
-            {isCameraActive && (
-              <Camera
-                style={StyleSheet.absoluteFillObject}
-                scanBarcode={true}
-                onReadCode={handleBarcodeRead}
-              />
-            )}
+            <Camera
+              style={StyleSheet.absoluteFillObject}
+              scanBarcode={true}
+              onReadCode={handleBarcodeRead}
+            />
 
             {/* Overlay da Mira de Escaneamento */}
             <View style={styles.cameraOverlay}>

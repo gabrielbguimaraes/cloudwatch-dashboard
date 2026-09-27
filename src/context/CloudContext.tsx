@@ -20,6 +20,14 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const STORAGE_KEY_PINNED = '@cloudwatch:pinned_resources';
 
+export interface CustomProvisionOptions {
+  name: string;
+  shape: 'VM.Standard.E4.Flex' | 'VM.Standard.A1.Flex';
+  ocpuCount: number; // 1, 2 ou 4 OCPUs
+  memoryInGBs: number; // 4, 8 ou 16 GB RAM
+  provider: CloudProvider;
+}
+
 interface CloudContextData {
   resources: CloudResource[];
   filteredResources: CloudResource[];
@@ -48,7 +56,7 @@ interface CloudContextData {
   setSimulationMode: (enabled: boolean) => void;
   setSelectedResource: (resource: CloudResource | null) => void;
   refreshMetrics: () => void;
-  provisionInstance: (targetProvider?: CloudProvider) => CloudResource;
+  provisionInstance: (options?: CustomProvisionOptions | CloudProvider) => CloudResource;
   togglePin: (resourceId: string) => void;
   isResourcePinned: (resourceId: string) => boolean;
 }
@@ -132,9 +140,58 @@ export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ chil
     return pinnedResourceIds.includes(resourceId);
   };
 
-  // Cria dinamicamente uma nova instância via @faker-js/faker e insere no topo
-  const provisionInstance = (targetProvider?: CloudProvider): CloudResource => {
-    const newInstance = provisionNewInstance(targetProvider);
+  // Cria nova instância (personalizada pelo usuário ou aleatória nos bastidores) e insere no topo
+  const provisionInstance = (options?: CustomProvisionOptions | CloudProvider): CloudResource => {
+    let newInstance: CloudResource;
+    if (options && typeof options === 'object') {
+      const { name, shape, ocpuCount, memoryInGBs, provider } = options;
+      const uid = Math.random().toString(36).substring(2, 10);
+      const isOci = provider === 'OCI';
+      const isAws = provider === 'AWS';
+      const service = isOci ? 'OCI_COMPUTE' : isAws ? 'EC2' : 'GCP_RUN';
+      const region = activeAccount.defaultRegion || 'sa-saopaulo-1';
+      const serverName = name.trim() || `${provider} - ${shape} (Worker-${uid.substring(0, 4)})`;
+
+      newInstance = {
+        id: `res-${provider.toLowerCase()}-${uid}`,
+        ocid: isOci ? `ocid1.instance.oc1.${region}.ab2x.${uid}a1b2c3d4e5f6` : undefined,
+        arn: isAws ? `arn:aws:ec2:us-east-1:146139241100:instance/i-${uid}` : undefined,
+        name: serverName,
+        service,
+        provider,
+        region,
+        compartmentId: isOci ? 'ocid1.compartment.oc1..production-workloads' : undefined,
+        status: 'HEALTHY',
+        lifecycleState: 'RUNNING',
+        availabilitySla: 99.98,
+        tags: {
+          Environment: 'Production',
+          Shape: shape,
+          ManagedBy: 'CloudWatch-Mobile',
+        },
+        metricsSummary: {
+          cpuPercent: Math.round(15 + Math.random() * 20),
+          memoryPercent: Math.round((memoryInGBs / 16) * 45 + Math.random() * 5),
+          latencyMs: parseFloat((3.2 + Math.random() * 2).toFixed(1)),
+          diskPercent: 24,
+          networkThroughputMbps: 350,
+        },
+        monthlyCostEstimate: parseFloat((18.0 + ocpuCount * 11.5 + memoryInGBs * 2.1).toFixed(2)),
+        lastHealthCheck: new Date().toISOString(),
+        metadata: {
+          shape,
+          ocpuCount,
+          memoryInGBs,
+          availabilityDomain: `${region}-AD-1`,
+          faultDomain: 'FAULT-DOMAIN-1',
+          publicIp: `129.148.${Math.floor(Math.random() * 200 + 1)}.${Math.floor(Math.random() * 250 + 1)}`,
+          privateIp: `10.0.${Math.floor(Math.random() * 10 + 1)}.${Math.floor(Math.random() * 250 + 1)}`,
+        },
+      };
+    } else {
+      newInstance = provisionNewInstance(options);
+    }
+
     setResources((prev) => [newInstance, ...prev]);
     setLastUpdated(new Date().toLocaleTimeString());
     return newInstance;

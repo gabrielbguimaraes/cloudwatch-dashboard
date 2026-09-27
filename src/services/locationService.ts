@@ -22,16 +22,26 @@ export interface GpsRegionResult {
 /**
  * Verifica se a latitude/longitude pertence ao continente Sul-Americano
  * Coordenadas aproximadas: Latitude [-56, 13], Longitude [-82, -34]
+ * Totalmente blindado contra null, undefined ou NaN.
  */
-export const isCoordinatesInSouthAmerica = (latitude: number, longitude: number): boolean => {
+export const isCoordinatesInSouthAmerica = (
+  latitude?: number | null,
+  longitude?: number | null
+): boolean => {
+  if (latitude == null || longitude == null || isNaN(latitude) || isNaN(longitude)) {
+    return false;
+  }
   return latitude >= -56.0 && latitude <= 13.0 && longitude >= -82.0 && longitude <= -34.0;
 };
 
 /**
- * Requisita localização de forma segura e seleciona o Datacenter de menor latência
- * Nunca lança exceção não tratada.
+ * Requisita localização de forma segura e seleciona o Datacenter de menor latência.
+ * Blindagem total: se o GPS estiver desativado, permissão negada ou coords for nulo,
+ * retorna imediatamente o fallback 'sa-saopaulo-1' sem lançar exceções.
  */
-export const detectNearestDatacenter = async (): Promise<GpsRegionResult> => {
+export const detectNearestDatacenter = async (
+  customCoords?: { latitude?: number | null; longitude?: number | null } | null
+): Promise<GpsRegionResult> => {
   const fallbackResult: GpsRegionResult = {
     region: 'sa-saopaulo-1',
     isSouthAmerica: true,
@@ -40,6 +50,20 @@ export const detectNearestDatacenter = async (): Promise<GpsRegionResult> => {
   };
 
   try {
+    // Se coordenadas explícitas foram passadas e forem válidas
+    if (customCoords && customCoords.latitude != null && customCoords.longitude != null) {
+      const inSa = isCoordinatesInSouthAmerica(customCoords.latitude, customCoords.longitude);
+      return {
+        region: inSa ? 'sa-saopaulo-1' : 'us-ashburn-1',
+        isSouthAmerica: inSa,
+        badge: inSa ? '📍 sa-saopaulo-1 (Local GPS)' : '📍 us-ashburn-1 (US-East / GPS)',
+        coords: {
+          latitude: customCoords.latitude,
+          longitude: customCoords.longitude,
+        },
+        isFallback: false,
+      };
+    }
     // 1. Inspeciona o Timezone do dispositivo (Rápido, síncrono e nativo ao motor JS)
     const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
     const isSouthAmericaTz =
