@@ -285,10 +285,11 @@ export const SettingsScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
           </View>
         </View>
 
-        {/* 2. Gerenciamento de Provedores Conectados (Relacao 1:N) */}
+        {/* 2. Gerenciamento de Provedores Conectados */}
         <View style={styles.card}>
           <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTag}>PROVEDORES DE INFRAESTRUTURA (1:N)</Text>
+            <Text style={styles.sectionTag}>PROVEDORES CONECTADOS</Text>
+            <Text style={styles.sectionSubtitle}>Selecione e autentique as nuvens que deseja monitorar</Text>
           </View>
 
           {clouds.map((cloud, index) => {
@@ -609,6 +610,12 @@ const styles = StyleSheet.create({
     color: NEUTRAL_THEME.textSecondary,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     letterSpacing: 0.8,
+  },
+  sectionSubtitle: {
+    fontSize: 11,
+    color: NEUTRAL_THEME.textSecondary,
+    marginTop: 2,
+    lineHeight: 16,
   },
   profileRow: {
     flexDirection: 'row',

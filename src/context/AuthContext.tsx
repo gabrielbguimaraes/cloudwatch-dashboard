@@ -12,6 +12,7 @@ import type {
   UserSessionState,
 } from '../types/auth';
 import type { UserSession, CloudProvider } from '../types';
+import { apiService } from '../services/api';
 
 interface AuthContextData {
   masterUser: MasterProfile | null;
@@ -62,7 +63,7 @@ const KEYCHAIN_USER = 'cloudwatch_master';
 const DEFAULT_ACCOUNTS: Record<SupportedCloud, CloudCredentialConfig> = {
   OCI: {
     provider: 'OCI',
-    isConfigured: true, // Inicialmente disponivel com credenciais nativas
+    isConfigured: true,
     biometricsEnabled: false,
     accountIdentifier: 'ocid1.tenancy.oc1..aaaaaaaab1234567890',
     region: 'sa-saopaulo-1',
@@ -113,7 +114,6 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         if (storedAccounts) {
           const parsedAccounts = JSON.parse(storedAccounts);
           setCloudAccounts(parsedAccounts);
-          // Determina a primeira nuvem configurada
           const firstConfigured = (['OCI', 'AWS', 'GCP'] as SupportedCloud[]).find(
             (c) => parsedAccounts[c]?.isConfigured
           );
@@ -132,7 +132,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   }, []);
 
   /**
-   * Registro da Conta Mestre Local
+   * Registro da Conta Mestre (Offline-First + Sync Remoto)
    */
   const registerMasterAccount = async (
     username: string,
@@ -140,7 +140,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     password: string
   ): Promise<{ success: boolean; error?: string }> => {
     if (!username.trim() || !email.trim() || !password.trim()) {
-      return { success: false, error: 'Preencha todos os campos obrigatorios.' };
+      return { success: false, error: 'Informe usuario, e-mail e senha para prosseguir.' };
     }
 
     try {
@@ -151,10 +151,16 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         createdAt: new Date().toISOString(),
       };
 
+      // 1. Armazenamento local imediato (Offline-First)
       await EncryptedStorage.setItem(STORAGE_KEY_MASTER_USER, JSON.stringify(profile));
       await EncryptedStorage.setItem(STORAGE_KEY_MASTER_PASS, password);
 
-      // Vincula Keychain token leve para autorizacao biometrica
+      // 2. Registro no PostgreSQL remoto via Micro-BFF (sem bloquear se offline)
+      apiService.registerMaster(profile.username, profile.email, password).catch((err) => {
+        console.log('Sincronizacao remota em segundo plano:', err);
+      });
+
+      // 3. Vincula Keychain token leve para autorizacao biometrica (com try/catch blindado)
       try {
         await Keychain.setGenericPassword(KEYCHAIN_USER, profile.id, {
           service: KEYCHAIN_SERVICE,
@@ -162,7 +168,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           accessible: Keychain.ACCESSIBLE.WHEN_UNLOCKED,
         });
       } catch (kcErr) {
-        console.log('Keychain inicial configurado:', kcErr);
+        console.log('Biometria de hardware nao configurada ou restrita:', kcErr);
       }
 
       setMasterUser(profile);
@@ -175,7 +181,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   /**
-   * Vincula ou Atualiza um Provedor de Nuvem (1:N)
+   * Vincula ou Atualiza um Provedor de Nuvem
    */
   const linkCloudProvider = async (
     provider: SupportedCloud,
@@ -186,7 +192,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       // 1. Criptografa chaves isoladas no EncryptedStorage
       await EncryptedStorage.setItem(`@cloud_creds_${provider}`, JSON.stringify(credentials));
 
-      // 2. Se biometria ativada, dispara prompt nativo para validar digital
+      // 2. Se biometria ativada, dispara prompt nativo de forma nao-bloqueante
       let bioSuccess = false;
       if (enableBiometrics) {
         try {
@@ -238,7 +244,20 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       setCloudAccounts(newAccounts);
       await AsyncStorage.setItem(STORAGE_KEY_CLOUD_ACCOUNTS, JSON.stringify(newAccounts));
 
-      // Se a nuvem ativa atual nao estiver configurada, seleciona a nova
+      // Sincroniza com Micro-BFF remoto se conectado
+      if (masterUser?.id) {
+        apiService
+          .linkCloudProvider(
+            masterUser.id,
+            provider,
+            identifier,
+            region,
+            credentials,
+            bioSuccess
+          )
+          .catch(() => {});
+      }
+
       if (!cloudAccounts[activeProvider]?.isConfigured) {
         setActiveProvider(provider);
       }
@@ -256,16 +275,20 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const toggleBiometrics = async (provider: SupportedCloud, enabled: boolean): Promise<boolean> => {
     try {
       if (enabled) {
-        const auth = await Keychain.getGenericPassword({
-          service: KEYCHAIN_SERVICE,
-          authenticationPrompt: {
-            title: `Ativar Biometria (${provider})`,
-            subtitle: 'Autenticacao segura',
-            description: 'Confirme sua digital para ativar o bloqueio biometrico',
-            cancel: 'Cancelar',
-          },
-        });
-        if (!auth || !auth.username) return false;
+        try {
+          const auth = await Keychain.getGenericPassword({
+            service: KEYCHAIN_SERVICE,
+            authenticationPrompt: {
+              title: `Ativar Biometria (${provider})`,
+              subtitle: 'Autenticacao segura',
+              description: 'Confirme sua digital para ativar o bloqueio biometrico',
+              cancel: 'Cancelar',
+            },
+          });
+          if (!auth || !auth.username) return false;
+        } catch {
+          return false;
+        }
       }
 
       const updated = {
@@ -309,7 +332,6 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       setCloudAccounts(updated);
       await AsyncStorage.setItem(STORAGE_KEY_CLOUD_ACCOUNTS, JSON.stringify(updated));
 
-      // Se a nuvem ativa for a desconectada, comuta para outra configurada
       if (activeProvider === provider) {
         const remaining = (['OCI', 'AWS', 'GCP'] as SupportedCloud[]).find(
           (c) => c !== provider && updated[c]?.isConfigured
@@ -328,7 +350,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   /**
-   * Comuta o provedor ativo com Step-Up Biometric Authentication se ativada
+   * Comuta o provedor ativo com Step-Up Biometric Authentication nao-bloqueante
    */
   const switchActiveProvider = async (provider: SupportedCloud): Promise<boolean> => {
     const targetConfig = cloudAccounts[provider];
@@ -340,7 +362,6 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       return true;
     }
 
-    // Se a nuvem alvo exige biometria, valida no leitor nativo
     if (targetConfig.biometricsEnabled) {
       try {
         const credentials = await Keychain.getGenericPassword({
@@ -357,7 +378,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           return false;
         }
       } catch (err) {
-        console.warn('Autenticacao biometrica step-up cancelada:', err);
+        console.warn('Autenticacao biometrica step-up cancelada ou indisponivel:', err);
         return false;
       }
     }
@@ -368,7 +389,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   /**
-   * Login Mestre com usuario e senha
+   * Login Mestre com usuario e senha (Offline-First)
    */
   const loginMaster = async (
     username: string,
@@ -379,27 +400,58 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       const storedUserJson = await EncryptedStorage.getItem(STORAGE_KEY_MASTER_USER);
       const storedPass = await EncryptedStorage.getItem(STORAGE_KEY_MASTER_PASS);
 
-      if (!storedUserJson || !storedPass) {
-        setIsLoading(false);
-        return { success: false, error: 'Nenhuma conta mestre cadastrada no dispositivo.' };
+      // 1. Validacao local
+      if (storedUserJson && storedPass) {
+        const parsed: MasterProfile = JSON.parse(storedUserJson);
+        const isMatch =
+          (username.trim().toLowerCase() === parsed.username.toLowerCase() ||
+            username.trim().toLowerCase() === parsed.email.toLowerCase()) &&
+          password === storedPass;
+
+        if (isMatch) {
+          setMasterUser(parsed);
+          setIsAuthenticated(true);
+          setIsLoading(false);
+          apiService.loginMaster(username, password).catch(() => {});
+          return { success: true };
+        }
       }
 
-      const parsed: MasterProfile = JSON.parse(storedUserJson);
-
-      const isMatch =
-        (username.trim().toLowerCase() === parsed.username.toLowerCase() ||
-          username.trim().toLowerCase() === parsed.email.toLowerCase()) &&
-        password === storedPass;
-
-      if (isMatch) {
-        setMasterUser(parsed);
+      // 2. Tenta validacao remota no PostgreSQL via Micro-BFF
+      const remoteRes = await apiService.loginMaster(username, password);
+      if (remoteRes.success && remoteRes.data?.user) {
+        const profile: MasterProfile = {
+          id: remoteRes.data.user.id || `usr-${Date.now().toString(36)}`,
+          username: remoteRes.data.user.username || username,
+          email: remoteRes.data.user.email || `${username}@cloudwatch.corp`,
+          createdAt: remoteRes.data.user.created_at || new Date().toISOString(),
+        };
+        await EncryptedStorage.setItem(STORAGE_KEY_MASTER_USER, JSON.stringify(profile));
+        await EncryptedStorage.setItem(STORAGE_KEY_MASTER_PASS, password);
+        setMasterUser(profile);
         setIsAuthenticated(true);
         setIsLoading(false);
         return { success: true };
-      } else {
-        setIsLoading(false);
-        return { success: false, error: 'Credenciais mestre invalidas.' };
       }
+
+      // 3. Fallback: se nenhum usuario foi cadastrado ainda no app, cria a conta local
+      if (!storedUserJson && !storedPass) {
+        const newProfile: MasterProfile = {
+          id: `usr-${Date.now().toString(36)}`,
+          username: username.trim(),
+          email: username.includes('@') ? username.trim().toLowerCase() : `${username.trim()}@fatec.sp.gov.br`,
+          createdAt: new Date().toISOString(),
+        };
+        await EncryptedStorage.setItem(STORAGE_KEY_MASTER_USER, JSON.stringify(newProfile));
+        await EncryptedStorage.setItem(STORAGE_KEY_MASTER_PASS, password);
+        setMasterUser(newProfile);
+        setIsAuthenticated(true);
+        setIsLoading(false);
+        return { success: true };
+      }
+
+      setIsLoading(false);
+      return { success: false, error: 'Credenciais invalidas. Verifique seu usuario e senha.' };
     } catch (err: any) {
       setIsLoading(false);
       return { success: false, error: err?.message || 'Falha ao autenticar conta mestre.' };
@@ -407,27 +459,31 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   /**
-   * Login Mestre por Biometria
+   * Login Mestre por Biometria com Fallback Nao-Bloqueante
    */
   const loginWithBiometrics = async (): Promise<{ success: boolean; error?: string }> => {
     setIsLoading(true);
     try {
-      const credentials = await Keychain.getGenericPassword({
-        service: KEYCHAIN_SERVICE,
-        authenticationPrompt: {
-          title: 'Autenticacao Biometrica',
-          subtitle: 'Estacao de Comando Multi-Cloud',
-          description: 'Toque no sensor de impressao digital para acessar',
-          cancel: 'Cancelar',
-        },
-      });
+      let credentials: any = null;
+      try {
+        credentials = await Keychain.getGenericPassword({
+          service: KEYCHAIN_SERVICE,
+          authenticationPrompt: {
+            title: 'Autenticacao Biometrica',
+            subtitle: 'Console de Operacoes',
+            description: 'Toque no sensor digital para entrar',
+            cancel: 'Cancelar',
+          },
+        });
+      } catch (kcErr) {
+        console.warn('Sensor biometrico indisponivel:', kcErr);
+      }
 
       if (credentials && credentials.username) {
         const storedUserJson = await EncryptedStorage.getItem(STORAGE_KEY_MASTER_USER);
         if (storedUserJson) {
           setMasterUser(JSON.parse(storedUserJson));
         } else {
-          // Fallback para conta mestre padrao
           const defaultUser: MasterProfile = {
             id: 'usr-admin',
             username: 'joao.guimaraes',
@@ -442,11 +498,17 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         return { success: true };
       } else {
         setIsLoading(false);
-        return { success: false, error: 'Biometria cancelada ou nao reconhecida.' };
+        return {
+          success: false,
+          error: 'Biometria indisponivel ou cancelada. Utilize a senha mestre para acessar.',
+        };
       }
     } catch (err: any) {
       setIsLoading(false);
-      return { success: false, error: err?.message || 'Falha na validacao biometrica.' };
+      return {
+        success: false,
+        error: 'Sensor biometrico nao reconhecido. Utilize a senha mestre.',
+      };
     }
   };
 
@@ -467,7 +529,6 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     logoutMaster();
   };
 
-  // Objeto de sessao adaptado para retrocompatibilidade
   const session: UserSession | null = isAuthenticated
     ? {
         userId: masterUser?.id || 'usr-master',
@@ -501,7 +562,6 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         loginWithBiometrics,
         logoutMaster,
         logout,
-        // Compatibilidade legada
         hasStoredCredentials: !!masterUser,
         storedCredentials: null,
         selectedLoginProvider: activeProvider,

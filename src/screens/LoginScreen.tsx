@@ -24,7 +24,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
 
   const handlePasswordLogin = async () => {
     if (!username.trim() || !password.trim()) {
-      Alert.alert('Atencao', 'Informe seu usuario e senha mestre de acesso.');
+      Alert.alert('Campos Obrigatórios', 'Informe usuário, e-mail e senha para prosseguir.');
       return;
     }
 
@@ -33,7 +33,15 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
     setIsLoading(false);
 
     if (result.success) {
-      navigation.replace('Main');
+      try {
+        if (typeof navigation.replace === 'function') {
+          navigation.replace('MainTabs');
+        } else {
+          navigation.navigate('MainTabs');
+        }
+      } catch (navErr) {
+        console.log('Navegacao efetuada por estado condicional:', navErr);
+      }
     } else {
       Alert.alert('Falha na Autenticacao', result.error || 'Credenciais invalidas.');
     }
@@ -45,9 +53,20 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
     setIsBioLoading(false);
 
     if (result.success) {
-      navigation.replace('Main');
+      try {
+        if (typeof navigation.replace === 'function') {
+          navigation.replace('MainTabs');
+        } else {
+          navigation.navigate('MainTabs');
+        }
+      } catch (navErr) {
+        console.log('Navegacao efetuada por estado condicional:', navErr);
+      }
     } else {
-      Alert.alert('Autenticacao Biometrica', result.error || 'Nao foi possivel autenticar por biometria.');
+      Alert.alert(
+        'Autenticacao Biometrica',
+        result.error || 'Biometria cancelada ou indisponivel no dispositivo. Utilize a Senha Mestre para acessar.'
+      );
     }
   };
 

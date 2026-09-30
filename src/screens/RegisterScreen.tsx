@@ -43,6 +43,7 @@ export const RegisterScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
   // Campos GCP
   const [gcpProjectId, setGcpProjectId] = useState('');
   const [gcpClientEmail, setGcpClientEmail] = useState('');
+  const [gcpPrivateKey, setGcpPrivateKey] = useState('');
   const [gcpZone, setGcpZone] = useState('southamerica-east1-a');
 
   const configuredCount = Object.values(cloudAccounts).filter((acc) => acc.isConfigured).length;
@@ -79,6 +80,7 @@ export const RegisterScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
       creds = {
         projectId: gcpProjectId.trim(),
         clientEmail: gcpClientEmail.trim(),
+        privateKey: gcpPrivateKey.trim(),
         zone: gcpZone.trim(),
         region: 'southamerica-east1',
       };
@@ -109,12 +111,12 @@ export const RegisterScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
   };
 
   const handleFinalize = async () => {
-    if (!username.trim() || !email.trim()) {
-      Alert.alert('Atencao', 'Informe seu Nome de Usuario e E-mail Corporativo.');
+    if (!username.trim() || !email.trim() || !password.trim()) {
+      Alert.alert('Campos Obrigatórios', 'Informe usuário, e-mail e senha para prosseguir.');
       return;
     }
 
-    if (!password || password.length < 6) {
+    if (password.length < 6) {
       Alert.alert('Senha Invalida', 'A senha mestre deve conter no minimo 6 caracteres.');
       return;
     }
@@ -127,7 +129,7 @@ export const RegisterScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
     if (configuredCount === 0) {
       Alert.alert(
         'Vinculacao Obrigatoria',
-        'Configure e vincule ao menos 1 provedor de nuvem (OCI, AWS ou GCP) para continuar.'
+        'Selecione e configure ao menos 1 provedor de nuvem para continuar.'
       );
       return;
     }
@@ -137,7 +139,15 @@ export const RegisterScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
     setIsSubmitting(false);
 
     if (res.success) {
-      navigation.replace('Main');
+      try {
+        if (typeof navigation.replace === 'function') {
+          navigation.replace('MainTabs');
+        } else {
+          navigation.navigate('MainTabs');
+        }
+      } catch (navErr) {
+        console.log('Navegacao efetuada por estado condicional:', navErr);
+      }
     } else {
       Alert.alert('Erro no Cadastro', res.error || 'Nao foi possivel registrar a conta mestre.');
     }
@@ -149,7 +159,7 @@ export const RegisterScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
         {/* Cabecalho Sobrio */}
         <View style={styles.header}>
           <Text style={styles.title}>Criacao de Conta Mestre</Text>
-          <Text style={styles.subtitle}>Estacao Central de Governanca Multi-Cloud</Text>
+          <Text style={styles.subtitle}>Acesse sua conta para continuar</Text>
         </View>
 
         {/* Formulario Conta Mestre */}
@@ -169,7 +179,7 @@ export const RegisterScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
           </View>
 
           <View style={styles.formGroup}>
-            <Text style={styles.label}>E-MAIL CORPORATIVO</Text>
+            <Text style={styles.label}>E-MAIL</Text>
             <TextInput
               style={styles.input}
               value={email}
@@ -206,17 +216,17 @@ export const RegisterScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
           </View>
         </View>
 
-        {/* Secao Interativa: Vincular Provedores de Infraestrutura (1:N) */}
+        {/* Secao Interativa: Provedores Conectados */}
         <View style={styles.sectionCard}>
           <View style={styles.providerSectionHeader}>
-            <Text style={styles.sectionHeader}>VINCULAR PROVEDORES (RELACAO 1:N)</Text>
+            <Text style={styles.sectionHeader}>PROVEDORES CONECTADOS</Text>
             <Text style={styles.configuredCounter}>
-              {configuredCount} de 3 vinculados
+              {configuredCount} de 3 configurados
             </Text>
           </View>
 
           <Text style={styles.providerHelperText}>
-            Configure 1, 2 ou as 3 nuvens simultaneamente sob a mesma estacao de comando:
+            Selecione e autentique as nuvens que deseja monitorar:
           </Text>
 
           {/* Card OCI */}
@@ -465,6 +475,18 @@ export const RegisterScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
                       onChangeText={setGcpClientEmail}
                       placeholder="sa-monitor@cloudwatch-prod.iam.gserviceaccount.com"
                       placeholderTextColor="#5F6368"
+                      autoCapitalize="none"
+                    />
+                  </View>
+                  <View style={styles.formGroup}>
+                    <Text style={styles.label}>SERVICE ACCOUNT KEY / PRIVATE KEY</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={gcpPrivateKey}
+                      onChangeText={setGcpPrivateKey}
+                      placeholder="Chave JSON ou PEM"
+                      placeholderTextColor="#5F6368"
+                      secureTextEntry
                       autoCapitalize="none"
                     />
                   </View>
