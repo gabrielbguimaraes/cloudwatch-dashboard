@@ -6,6 +6,7 @@ yarn-error.log*
 
 # Android binaries and build artifacts
 *.apk
+!CloudWatchDashboard.apk
 *.aab
 *.keystore
 !android/app/debug.keystore
