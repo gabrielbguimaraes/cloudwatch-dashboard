@@ -45,7 +45,7 @@ export const detectNearestDatacenter = async (
   const fallbackResult: GpsRegionResult = {
     region: 'sa-saopaulo-1',
     isSouthAmerica: true,
-    badge: '📍 sa-saopaulo-1 (Local GPS)',
+    badge: 'sa-saopaulo-1 (Local GPS)',
     isFallback: true,
   };
 
@@ -56,7 +56,7 @@ export const detectNearestDatacenter = async (
       return {
         region: inSa ? 'sa-saopaulo-1' : 'us-ashburn-1',
         isSouthAmerica: inSa,
-        badge: inSa ? '📍 sa-saopaulo-1 (Local GPS)' : '📍 us-ashburn-1 (US-East / GPS)',
+        badge: inSa ? 'sa-saopaulo-1 (Local GPS)' : 'us-ashburn-1 (US-East / GPS)',
         coords: {
           latitude: customCoords.latitude,
           longitude: customCoords.longitude,
@@ -110,7 +110,7 @@ export const detectNearestDatacenter = async (
           return {
             region: 'sa-saopaulo-1',
             isSouthAmerica: true,
-            badge: city ? `📍 sa-saopaulo-1 (${city})` : '📍 sa-saopaulo-1 (Brasil / GPS)',
+            badge: city ? `sa-saopaulo-1 (${city})` : 'sa-saopaulo-1 (Brasil / GPS)',
             coords: !isNaN(lat) && !isNaN(lon) ? { latitude: lat, longitude: lon } : undefined,
             city,
             isFallback: false,
@@ -119,7 +119,7 @@ export const detectNearestDatacenter = async (
           return {
             region: 'us-ashburn-1',
             isSouthAmerica: false,
-            badge: city ? `📍 us-ashburn-1 (${city})` : '📍 us-ashburn-1 (US-East / GPS)',
+            badge: city ? `us-ashburn-1 (${city})` : 'us-ashburn-1 (US-East / GPS)',
             coords: !isNaN(lat) && !isNaN(lon) ? { latitude: lat, longitude: lon } : undefined,
             city,
             isFallback: false,
@@ -135,14 +135,14 @@ export const detectNearestDatacenter = async (
       return {
         region: 'sa-saopaulo-1',
         isSouthAmerica: true,
-        badge: '📍 sa-saopaulo-1 (Local GPS)',
+        badge: 'sa-saopaulo-1 (Local GPS)',
         isFallback: false,
       };
     } else if (timeZone) {
       return {
         region: 'us-ashburn-1',
         isSouthAmerica: false,
-        badge: '📍 us-ashburn-1 (Global)',
+        badge: 'us-ashburn-1 (Global)',
         isFallback: false,
       };
     }

@@ -13,9 +13,9 @@ import {
   Vibration,
   Platform,
 } from 'react-native';
-import { colors, fonts } from '../theme';
-import { getProviderTheme } from '../theme/providerConfig';
 import { useCloud } from '../context/CloudContext';
+import { CloudLogo } from '../components/common/CloudLogo';
+import { CLOUD_PALETTES, NEUTRAL_THEME } from '../theme/tokens';
 import {
   generateTimeSeriesMetrics,
   generateSimulatedLogs,
@@ -45,7 +45,7 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
   const [editName, setEditName] = useState('');
   const [editShape, setEditShape] = useState('');
 
-  // Sincronização inteligente com route.params?.selectedInstanceId
+  // Sincronizacao automatica com route.params?.selectedInstanceId
   useEffect(() => {
     const targetId = route?.params?.selectedInstanceId || route?.params?.resourceId;
     if (targetId && resources.length > 0) {
@@ -58,7 +58,7 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
     }
   }, [route?.params?.selectedInstanceId, route?.params?.resourceId, resources]);
 
-  // Instância ativa viva referenciada diretamente do array de recursos do contexto
+  // Instancia ativa viva
   const activeInstance: CloudResource | null = useMemo(() => {
     if (!selectedResource) {
       return resources.length > 0 ? resources[0] : null;
@@ -80,9 +80,9 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
   }
 
   const isPinned = isResourcePinned(activeInstance.id);
-  const providerTheme = getProviderTheme(activeInstance.provider);
+  const activePalette = CLOUD_PALETTES[activeInstance.provider] || CLOUD_PALETTES.OCI;
 
-  // Gráfico vetorial de CPU proporcional à carga em tempo real da máquina
+  // Grafico vetorial de CPU proporcional a carga real
   const timeSeries = useMemo(() => {
     const points = generateTimeSeriesMetrics(activeInstance.id);
     const targetCpu = activeInstance.metricsSummary?.cpuPercent ?? 10;
@@ -100,55 +100,31 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
     });
   }, [activeInstance.id, activeInstance.metricsSummary?.cpuPercent]);
 
-  // Console de auditoria filtrado rigorosamente para a máquina ativa
+  // Console de auditoria filtrado para a maquina ativa
   const logs = useMemo(() => {
     const raw = generateSimulatedLogs(activeInstance.id);
     if (logFilter === 'ALL') return raw;
     return raw.filter((l) => l.severity === logFilter);
   }, [activeInstance.id, logFilter]);
 
-  // Status semáforo sóbrio Google Cloud Monitoring M3
-  const getStatusBadge = (status: string) => {
+  const getStatusStyle = (status: string) => {
     switch (status) {
-      case 'CRITICAL':
-      case 'STOPPED':
-        return {
-          bg: '#2D1515',
-          border: '#4D1F1F',
-          text: '#F28B82',
-          label: status === 'STOPPED' ? 'PARADO (0% CPU)' : 'ALERTA CRÍTICO',
-        };
-      case 'WARNING':
-        return {
-          bg: '#2E230B',
-          border: '#4D3A12',
-          text: '#FDD663',
-          label: 'ATENÇÃO',
-        };
-      case 'REBOOTING':
-        return {
-          bg: '#0B2538',
-          border: '#164E63',
-          text: '#38BDF8',
-          label: 'REINICIANDO...',
-        };
-      case 'HEALTHY':
       case 'RUNNING':
+      case 'HEALTHY':
+        return NEUTRAL_THEME.statusRunning;
+      case 'REBOOTING':
+      case 'WARNING':
+      case 'DEGRADED':
+        return NEUTRAL_THEME.statusDegraded;
+      case 'STOPPED':
+      case 'CRITICAL':
       default:
-        return {
-          bg: '#132B1D',
-          border: '#1E462E',
-          text: '#81C995',
-          label: 'OPERACIONAL',
-        };
+        return NEUTRAL_THEME.statusStopped;
     }
   };
 
-  const statusBadge = getStatusBadge(activeInstance.status);
+  const statusStyle = getStatusStyle(activeInstance.status);
 
-  /**
-   * Exporta Relatório Executivo em PDF
-   */
   const handleExportPdf = async () => {
     if (isExportingPdf) return;
     setIsExportingPdf(true);
@@ -164,19 +140,12 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
         memory: `${activeInstance.metricsSummary?.memoryPercent || 48}%`,
         ocid: activeInstance.ocid || activeInstance.arn || activeInstance.id,
         sla: `${activeInstance.availabilitySla}%`,
-        auditor: 'João Gabriel Barros Guimarães - FATEC 4DSM',
+        auditor: 'Joao Gabriel Barros Guimaraes - FATEC 4DSM',
       });
 
-      await sharePdfAsync(
-        pdfResult.uri,
-        `Relatório de Telemetria e SLA - ${activeInstance.name}`
-      );
+      await sharePdfAsync(pdfResult.uri, `Relatorio de Telemetria e SLA - ${activeInstance.name}`);
     } catch (error: any) {
-      console.warn('Erro ao exportar PDF:', error);
-      Alert.alert(
-        'Erro ao Exportar PDF',
-        error?.message || 'Falha ao gerar ou compartilhar arquivo PDF.'
-      );
+      Alert.alert('Erro ao Exportar PDF', error?.message || 'Falha ao gerar relatorio PDF.');
     } finally {
       setIsExportingPdf(false);
     }
@@ -184,12 +153,6 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
 
   const handlePin = () => {
     togglePin(activeInstance.id);
-    Alert.alert(
-      isPinned ? 'Desafixado do Topo' : '📌 Fixado no Topo',
-      isPinned
-        ? `${activeInstance.name} foi removido dos destaques.`
-        : `${activeInstance.name} foi fixado na seção prioritária do Dashboard.`
-    );
   };
 
   const handleRestart = () => {
@@ -203,25 +166,24 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
     setEditShape(
       (activeInstance.metadata as any)?.shape ||
         activeInstance.tags?.Shape ||
-        'VM.Standard.E4.Flex'
+        'VM.Standard.A1.Flex'
     );
     setIsEditModalVisible(true);
   };
 
   const handleSaveEdit = () => {
     if (!editName.trim()) {
-      Alert.alert('Nome Inválido', 'O nome da máquina não pode ficar em branco.');
+      Alert.alert('Nome Invalido', 'O nome da maquina nao pode ficar em branco.');
       return;
     }
-    editInstance(activeInstance.id, editName, editShape);
+    editInstance(activeInstance.id, editName.trim(), editShape.trim());
     setIsEditModalVisible(false);
-    Alert.alert('Instância Atualizada', 'O nome do servidor foi atualizado com sucesso.');
   };
 
   const handleDelete = () => {
     Alert.alert(
       'Encerrar Servidor',
-      'Tem certeza que deseja terminar esta instância permanentemente?',
+      'Tem certeza que deseja terminar esta instancia permanentemente?',
       [
         { text: 'Cancelar', style: 'cancel' },
         {
@@ -239,28 +201,28 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={styles.container}>
-        {/* Header com Navegação de Retorno e Status Sóbrio */}
+        {/* Header com Navegacao de Retorno */}
         <View style={styles.navHeader}>
           <TouchableOpacity style={styles.navBackBtn} onPress={() => navigation.goBack()}>
-            <Text style={styles.navBackIcon}>←</Text>
+            <Text style={styles.navBackIcon}>{'<'}</Text>
             <Text style={styles.navBackText}>Voltar</Text>
           </TouchableOpacity>
 
           <View
             style={[
               styles.statusBadge,
-              { backgroundColor: statusBadge.bg, borderColor: statusBadge.border },
+              { backgroundColor: statusStyle.bg, borderColor: statusStyle.border },
             ]}
           >
-            <Text style={[styles.statusBadgeText, { color: statusBadge.text }]}>
-              {statusBadge.label}
+            <Text style={[styles.statusBadgeText, { color: statusStyle.text }]}>
+              {activeInstance.status}
             </Text>
           </View>
         </View>
 
-        {/* 🧭 Seletor Horizontal de Instâncias (Picker Carrossel) */}
+        {/* Seletor Horizontal de Instancias (Carrossel Picker) */}
         <View style={styles.pickerSection}>
-          <Text style={styles.pickerSectionTitle}>SELETOR DE INSTÂNCIAS CONECTADAS</Text>
+          <Text style={styles.pickerSectionTitle}>SELETOR DE INSTANCIAS CONECTADAS</Text>
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
@@ -268,9 +230,13 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
           >
             {resources.map((inst) => {
               const isSelected = activeInstance.id === inst.id;
-              const isCrit = inst.status === 'CRITICAL' || (inst.status as string) === 'STOPPED';
-              const isWarn = inst.status === 'WARNING';
-              const pTheme = getProviderTheme(inst.provider);
+              const pTheme = CLOUD_PALETTES[inst.provider] || CLOUD_PALETTES.OCI;
+              const dotColor =
+                inst.status === 'HEALTHY' || inst.lifecycleState === 'RUNNING'
+                  ? NEUTRAL_THEME.statusRunning.text
+                  : inst.status === 'WARNING' || inst.status === 'REBOOTING'
+                    ? NEUTRAL_THEME.statusDegraded.text
+                    : NEUTRAL_THEME.statusStopped.text;
 
               return (
                 <TouchableOpacity
@@ -278,30 +244,19 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
                   style={[
                     styles.instanceChip,
                     isSelected && {
-                      backgroundColor: '#1E242C',
-                      borderColor: pTheme.primaryColor,
+                      backgroundColor: '#20242C',
+                      borderColor: pTheme.borderFocus,
                       borderWidth: 1.5,
                     },
                   ]}
                   onPress={() => setSelectedResource(inst)}
                   activeOpacity={0.7}
                 >
-                  <View
-                    style={[
-                      styles.instanceChipDot,
-                      {
-                        backgroundColor: isCrit
-                          ? colors.status.danger
-                          : isWarn
-                            ? colors.status.warning
-                            : colors.status.healthy,
-                      },
-                    ]}
-                  />
+                  <View style={[styles.instanceChipDot, { backgroundColor: dotColor }]} />
                   <Text
                     style={[
                       styles.instanceChipName,
-                      isSelected && { color: '#FFFFFF', fontWeight: '800' },
+                      isSelected && { color: '#E8EAED', fontWeight: '800' },
                     ]}
                     numberOfLines={1}
                   >
@@ -310,7 +265,7 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
                   <Text
                     style={[
                       styles.instanceChipCpu,
-                      isSelected && { color: pTheme.primaryColor, fontWeight: '800' },
+                      isSelected && { color: pTheme.primary, fontWeight: '800' },
                     ]}
                   >
                     {inst.metricsSummary?.cpuPercent ?? 0}%
@@ -321,23 +276,20 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
           </ScrollView>
         </View>
 
-        {/* Metadados e Título da Instância Ativa */}
+        {/* Metadados e Titulo da Instancia Ativa */}
         <View style={styles.metaSection}>
           <View
             style={[
               styles.providerPill,
               {
-                backgroundColor: providerTheme.primaryBg,
-                borderColor: providerTheme.borderColor,
+                backgroundColor: activePalette.badgeBg,
+                borderColor: activePalette.borderFocus,
               },
             ]}
           >
-            <Text style={[styles.providerPillText, { color: providerTheme.accentColor }]}>
-              {activeInstance.provider === 'OCI'
-                ? 'ORACLE CLOUD (OCI)'
-                : activeInstance.provider === 'AWS'
-                  ? 'AMAZON WEB SERVICES (AWS)'
-                  : 'GOOGLE CLOUD (GCP)'}
+            <CloudLogo provider={activeInstance.provider} size={14} />
+            <Text style={[styles.providerPillText, { color: activePalette.badgeText }]}>
+              {activePalette.name}
             </Text>
           </View>
 
@@ -347,7 +299,7 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
           </Text>
         </View>
 
-        {/* Gráfico Vetorial de Desempenho em Tempo Real */}
+        {/* Grafico Vetorial de Desempenho em Tempo Real */}
         <View style={styles.chartCard}>
           <View style={styles.chartHeader}>
             <View style={styles.chartTitleRow}>
@@ -357,8 +309,8 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
                   {
                     backgroundColor:
                       (activeInstance.metricsSummary?.cpuPercent ?? 0) > 85
-                        ? colors.status.danger
-                        : colors.provider.oci,
+                        ? NEUTRAL_THEME.statusStopped.text
+                        : activePalette.primary,
                   },
                 ]}
               />
@@ -368,7 +320,7 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
               style={[
                 styles.chartPeak,
                 (activeInstance.metricsSummary?.cpuPercent ?? 0) > 85 && {
-                  color: colors.status.danger,
+                  color: NEUTRAL_THEME.statusStopped.text,
                 },
               ]}
             >
@@ -396,8 +348,8 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
                         {
                           height: `${heightPercent}%`,
                           backgroundColor: isOverThreshold
-                            ? colors.status.danger
-                            : '#81C995',
+                            ? NEUTRAL_THEME.statusStopped.text
+                            : NEUTRAL_THEME.statusRunning.text,
                         },
                       ]}
                     />
@@ -411,7 +363,7 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
           </View>
         </View>
 
-        {/* 💻 Botão Expansível: Console Serial Linux Emulado */}
+        {/* Botao Expansivel: Console Serial Linux Emulado */}
         <TouchableOpacity
           style={styles.serialConsoleBtn}
           onPress={() => setIsSerialConsoleOpen(true)}
@@ -421,7 +373,7 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
           <Text style={styles.serialConsoleBtnText}>Abrir Console Serial da VM</Text>
         </TouchableOpacity>
 
-        {/* 4 Métricas Chave do Recurso */}
+        {/* 4 Metricas Chave do Recurso */}
         <View style={styles.metricsGrid}>
           <View style={styles.metricCard}>
             <Text style={styles.metricLabel}>CONSUMO ATUAL</Text>
@@ -429,8 +381,8 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
               style={[
                 styles.metricValue,
                 (activeInstance.metricsSummary?.cpuPercent ?? 0) > 85
-                  ? { color: colors.status.danger }
-                  : { color: colors.status.healthy },
+                  ? { color: NEUTRAL_THEME.statusStopped.text }
+                  : { color: NEUTRAL_THEME.statusRunning.text },
               ]}
             >
               {activeInstance.metricsSummary?.cpuPercent ?? 0}% CPU
@@ -438,14 +390,14 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
           </View>
 
           <View style={styles.metricCard}>
-            <Text style={styles.metricLabel}>MEMÓRIA ALOCADA</Text>
+            <Text style={styles.metricLabel}>MEMORIA ALOCADA</Text>
             <Text style={styles.metricValue}>
               {activeInstance.metricsSummary?.memoryPercent || 48}% RAM
             </Text>
           </View>
 
           <View style={styles.metricCard}>
-            <Text style={styles.metricLabel}>LATÊNCIA DE I/O</Text>
+            <Text style={styles.metricLabel}>LATENCIA DE I/O</Text>
             <Text style={styles.metricValue}>
               {activeInstance.metricsSummary?.latencyMs || 4.2} ms
             </Text>
@@ -457,8 +409,8 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
               style={[
                 styles.metricValue,
                 activeInstance.availabilitySla < 99.5
-                  ? { color: colors.status.warning }
-                  : { color: colors.status.healthy },
+                  ? { color: NEUTRAL_THEME.statusDegraded.text }
+                  : { color: NEUTRAL_THEME.statusRunning.text },
               ]}
             >
               {activeInstance.availabilitySla}%
@@ -466,7 +418,7 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
           </View>
         </View>
 
-        {/* Console de Auditoria e Logs Filtrado para a Máquina Ativa */}
+        {/* Console de Auditoria e Logs Filtrado para a Maquina Ativa */}
         <View style={styles.logsSection}>
           <View style={styles.logsHeader}>
             <Text style={styles.logsTitle}>CONSOLE DE AUDITORIA & LOGS</Text>
@@ -503,8 +455,8 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
                   <Text
                     style={[
                       styles.logSeverity,
-                      log.severity === 'ERROR' && { color: colors.status.danger },
-                      log.severity === 'WARN' && { color: colors.status.warning },
+                      log.severity === 'ERROR' && { color: NEUTRAL_THEME.statusStopped.text },
+                      log.severity === 'WARN' && { color: NEUTRAL_THEME.statusDegraded.text },
                     ]}
                   >
                     [{log.severity}]
@@ -519,11 +471,10 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
           </View>
         </View>
 
-        {/* Controles de Ciclo de Vida */}
+        {/* Controles de Ciclo de Vida (Sem Emojis) */}
         <View style={styles.lifecycleCard}>
           <Text style={styles.lifecycleTitle}>CONTROLES DE CICLO DE VIDA</Text>
           <View style={styles.lifecycleButtonsRow}>
-            {/* Botão Reiniciar */}
             <TouchableOpacity
               style={[
                 styles.lifecycleBtn,
@@ -535,41 +486,31 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
               activeOpacity={0.7}
             >
               {activeInstance.status === 'REBOOTING' ? (
-                <>
-                  <ActivityIndicator size="small" color="#38BDF8" style={{ marginRight: 6 }} />
-                  <Text style={styles.lifecycleBtnRestartText}>Reiniciando...</Text>
-                </>
+                <ActivityIndicator size="small" color="#38BDF8" />
               ) : (
-                <>
-                  <Text style={styles.lifecycleBtnIcon}>🔄</Text>
-                  <Text style={styles.lifecycleBtnRestartText}>Reiniciar</Text>
-                </>
+                <Text style={styles.lifecycleBtnRestartText}>Reiniciar</Text>
               )}
             </TouchableOpacity>
 
-            {/* Botão Editar */}
             <TouchableOpacity
               style={[styles.lifecycleBtn, styles.lifecycleBtnEdit]}
               onPress={handleOpenEdit}
               activeOpacity={0.7}
             >
-              <Text style={styles.lifecycleBtnIcon}>✏️</Text>
               <Text style={styles.lifecycleBtnEditText}>Editar</Text>
             </TouchableOpacity>
 
-            {/* Botão Excluir */}
             <TouchableOpacity
               style={[styles.lifecycleBtn, styles.lifecycleBtnDelete]}
               onPress={handleDelete}
               activeOpacity={0.7}
             >
-              <Text style={styles.lifecycleBtnIcon}>🗑️</Text>
               <Text style={styles.lifecycleBtnDeleteText}>Excluir</Text>
             </TouchableOpacity>
           </View>
         </View>
 
-        {/* Ações: PDF & Pin */}
+        {/* Acoes: PDF & Pin (Sem Emojis) */}
         <View style={styles.actionsRow}>
           <TouchableOpacity
             style={[styles.actionBtnPdf, isExportingPdf && { opacity: 0.7 }]}
@@ -579,25 +520,21 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
             {isExportingPdf ? (
               <ActivityIndicator size="small" color="#81C995" />
             ) : (
-              <Text style={styles.actionBtnIcon}>📄</Text>
+              <Text style={styles.actionBtnPdfText}>Exportar Relatorio PDF</Text>
             )}
-            <Text style={styles.actionBtnPdfText}>
-              {isExportingPdf ? 'Gerando PDF...' : 'Exportar Relatório PDF'}
-            </Text>
           </TouchableOpacity>
 
           <TouchableOpacity
             style={[styles.actionBtnPin, isPinned && styles.actionBtnPinActive]}
             onPress={handlePin}
           >
-            <Text style={styles.actionBtnIcon}>📌</Text>
             <Text
               style={[
                 styles.actionBtnPinText,
                 isPinned && styles.actionBtnPinTextActive,
               ]}
             >
-              {isPinned ? 'Fixado no Topo' : 'Fixar no Início'}
+              {isPinned ? 'Fixado no Topo' : 'Fixar no Topo'}
             </Text>
           </TouchableOpacity>
         </View>
@@ -613,15 +550,12 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
         <View style={styles.modalOverlay}>
           <View style={styles.serialConsoleCard}>
             <View style={styles.serialConsoleHeader}>
-              <View style={styles.serialConsoleTitleRow}>
-                <Text style={styles.serialConsoleDot}>●</Text>
-                <Text style={styles.serialConsoleTitle}>Console Serial Linux (ttyS0)</Text>
-              </View>
+              <Text style={styles.serialConsoleTitle}>Console Serial Linux (ttyS0)</Text>
               <TouchableOpacity
                 onPress={() => setIsSerialConsoleOpen(false)}
                 hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               >
-                <Text style={styles.modalCloseText}>✕</Text>
+                <Text style={styles.modalCloseText}>FECHAR</Text>
               </TouchableOpacity>
             </View>
 
@@ -668,7 +602,7 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
         </View>
       </Modal>
 
-      {/* Modal: Edição de Nome e Shape da Instância */}
+      {/* Modal: Edicao de Nome e Shape da Instancia (Sem Emojis) */}
       <Modal
         visible={isEditModalVisible}
         transparent
@@ -678,12 +612,12 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
         <View style={styles.modalOverlay}>
           <View style={styles.editModalCard}>
             <View style={styles.editModalHeader}>
-              <Text style={styles.editModalTitle}>✏️ Editar Instância</Text>
+              <Text style={styles.editModalTitle}>Editar Instancia</Text>
               <TouchableOpacity
                 onPress={() => setIsEditModalVisible(false)}
                 hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               >
-                <Text style={styles.modalCloseText}>✕</Text>
+                <Text style={styles.modalCloseText}>FECHAR</Text>
               </TouchableOpacity>
             </View>
 
@@ -693,8 +627,8 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
                 style={styles.formInput}
                 value={editName}
                 onChangeText={setEditName}
-                placeholder="Nome da instância"
-                placeholderTextColor="#64748B"
+                placeholder="Nome da instancia"
+                placeholderTextColor="#5F6368"
                 autoCapitalize="none"
               />
             </View>
@@ -705,8 +639,8 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
                 style={styles.formInput}
                 value={editShape}
                 onChangeText={setEditShape}
-                placeholder="Shape (ex: VM.Standard.E4.Flex)"
-                placeholderTextColor="#64748B"
+                placeholder="Shape (ex: VM.Standard.A1.Flex)"
+                placeholderTextColor="#5F6368"
                 autoCapitalize="none"
               />
             </View>
@@ -720,7 +654,7 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
               </TouchableOpacity>
 
               <TouchableOpacity style={styles.saveModalBtn} onPress={handleSaveEdit}>
-                <Text style={styles.saveModalBtnText}>Salvar Alterações</Text>
+                <Text style={styles.saveModalBtnText}>Salvar Alteracoes</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -746,9 +680,9 @@ const styles = StyleSheet.create({
     padding: 20,
   },
   emptyText: {
-    color: '#94A3B8',
+    color: '#9AA0A6',
     fontSize: 14,
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   backBtn: {
     marginTop: 12,
@@ -760,7 +694,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
   },
   backBtnText: {
-    color: '#FFFFFF',
+    color: '#E8EAED',
     fontWeight: '700',
   },
   navHeader: {
@@ -778,34 +712,35 @@ const styles = StyleSheet.create({
   },
   navBackIcon: {
     color: '#81C995',
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '700',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   navBackText: {
-    color: '#94A3B8',
+    color: '#9AA0A6',
     fontSize: 12,
     fontWeight: '600',
   },
   statusBadge: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 20,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
     borderWidth: 1,
   },
   statusBadgeText: {
     fontSize: 9,
     fontWeight: '800',
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   pickerSection: {
     marginTop: 14,
     marginBottom: 4,
   },
   pickerSectionTitle: {
-    color: '#94A3B8',
+    color: '#9AA0A6',
     fontSize: 9,
     fontWeight: '800',
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     letterSpacing: 0.5,
     marginBottom: 8,
   },
@@ -819,7 +754,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#181C22',
     borderWidth: 1,
     borderColor: '#282E38',
-    borderRadius: 20,
+    borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 6,
     gap: 6,
@@ -830,41 +765,44 @@ const styles = StyleSheet.create({
     borderRadius: 3,
   },
   instanceChipName: {
-    color: '#CBD5E1',
+    color: '#9AA0A6',
     fontSize: 11,
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     maxWidth: 130,
   },
   instanceChipCpu: {
-    color: '#94A3B8',
+    color: '#5F6368',
     fontSize: 10,
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   metaSection: {
     marginTop: 12,
   },
   providerPill: {
     alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
     paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
+    paddingVertical: 4,
+    borderRadius: 4,
     borderWidth: 1,
     marginBottom: 6,
   },
   providerPillText: {
     fontSize: 9,
     fontWeight: '800',
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   resourceTitle: {
-    color: '#FFFFFF',
+    color: '#E8EAED',
     fontSize: 18,
-    fontWeight: '900',
+    fontWeight: '800',
   },
   resourceOcid: {
-    color: '#94A3B8',
+    color: '#5F6368',
     fontSize: 10,
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     marginTop: 2,
   },
   chartCard: {
@@ -892,7 +830,7 @@ const styles = StyleSheet.create({
     borderRadius: 3,
   },
   chartTitle: {
-    color: '#E2E8F0',
+    color: '#E8EAED',
     fontSize: 11,
     fontWeight: '700',
   },
@@ -900,7 +838,7 @@ const styles = StyleSheet.create({
     color: '#81C995',
     fontSize: 11,
     fontWeight: '800',
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   chartCanvas: {
     height: 120,
@@ -921,7 +859,7 @@ const styles = StyleSheet.create({
   thresholdLabel: {
     color: '#F28B82',
     fontSize: 8,
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     marginTop: -10,
   },
   barsContainer: {
@@ -938,14 +876,14 @@ const styles = StyleSheet.create({
   },
   barFill: {
     width: '100%',
-    borderRadius: 3,
+    borderRadius: 2,
     minHeight: 6,
     opacity: 0.9,
   },
   barLabel: {
-    color: '#64748B',
+    color: '#5F6368',
     fontSize: 7,
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     marginTop: 4,
   },
   serialConsoleBtn: {
@@ -955,22 +893,22 @@ const styles = StyleSheet.create({
     backgroundColor: '#05080C',
     borderWidth: 1,
     borderColor: '#1E242C',
-    borderRadius: 10,
+    borderRadius: 8,
     paddingVertical: 10,
     marginTop: 10,
     gap: 8,
   },
   serialConsoleBtnIcon: {
     color: '#81C995',
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '900',
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   serialConsoleBtnText: {
-    color: '#E2E8F0',
-    fontSize: 12,
+    color: '#E8EAED',
+    fontSize: 11,
     fontWeight: '700',
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   metricsGrid: {
     flexDirection: 'row',
@@ -984,21 +922,21 @@ const styles = StyleSheet.create({
     backgroundColor: '#181C22',
     borderWidth: 1,
     borderColor: '#282E38',
-    borderRadius: 12,
+    borderRadius: 10,
     padding: 10,
   },
   metricLabel: {
-    color: '#94A3B8',
+    color: '#9AA0A6',
     fontSize: 8,
     fontWeight: '800',
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   metricValue: {
-    color: '#FFFFFF',
+    color: '#E8EAED',
     fontSize: 13,
-    fontWeight: '900',
+    fontWeight: '800',
     marginTop: 2,
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   logsSection: {
     marginTop: 16,
@@ -1010,19 +948,19 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   logsTitle: {
-    color: '#94A3B8',
+    color: '#9AA0A6',
     fontSize: 10,
     fontWeight: '700',
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   logFilters: {
     flexDirection: 'row',
     gap: 8,
   },
   filterTag: {
-    color: '#64748B',
+    color: '#5F6368',
     fontSize: 9,
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   filterTagActive: {
     color: '#81C995',
@@ -1032,14 +970,14 @@ const styles = StyleSheet.create({
     backgroundColor: '#05080C',
     borderWidth: 1,
     borderColor: '#1E242C',
-    borderRadius: 12,
+    borderRadius: 10,
     padding: 10,
     gap: 8,
   },
   emptyLogsText: {
-    color: '#64748B',
+    color: '#5F6368',
     fontSize: 10,
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     fontStyle: 'italic',
   },
   logRow: {
@@ -1051,17 +989,17 @@ const styles = StyleSheet.create({
     color: '#81C995',
     fontSize: 9,
     fontWeight: '800',
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   logTime: {
-    color: '#64748B',
+    color: '#5F6368',
     fontSize: 9,
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   logMsg: {
-    color: '#CBD5E1',
+    color: '#E8EAED',
     fontSize: 9,
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     flex: 1,
   },
   actionsRow: {
@@ -1074,19 +1012,14 @@ const styles = StyleSheet.create({
     backgroundColor: '#132B1D',
     borderWidth: 1,
     borderColor: '#1E462E',
-    borderRadius: 10,
+    borderRadius: 8,
     paddingVertical: 12,
-    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
-  },
-  actionBtnIcon: {
-    fontSize: 14,
   },
   actionBtnPdfText: {
     color: '#81C995',
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '700',
   },
   actionBtnPin: {
@@ -1094,20 +1027,18 @@ const styles = StyleSheet.create({
     backgroundColor: '#181C22',
     borderWidth: 1,
     borderColor: '#282E38',
-    borderRadius: 10,
+    borderRadius: 8,
     paddingVertical: 12,
-    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
   },
   actionBtnPinText: {
-    color: '#E2E8F0',
-    fontSize: 12,
+    color: '#E8EAED',
+    fontSize: 11,
     fontWeight: '700',
   },
   actionBtnPinActive: {
-    backgroundColor: '#1E242C',
+    backgroundColor: '#20242C',
     borderColor: '#81C995',
   },
   actionBtnPinTextActive: {
@@ -1116,16 +1047,16 @@ const styles = StyleSheet.create({
   lifecycleCard: {
     marginTop: 16,
     backgroundColor: '#181C22',
-    borderRadius: 12,
+    borderRadius: 10,
     borderWidth: 1,
     borderColor: '#282E38',
     padding: 12,
   },
   lifecycleTitle: {
-    color: '#94A3B8',
+    color: '#9AA0A6',
     fontSize: 9,
     fontWeight: '800',
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     marginBottom: 10,
     letterSpacing: 0.5,
   },
@@ -1135,21 +1066,19 @@ const styles = StyleSheet.create({
   },
   lifecycleBtn: {
     flex: 1,
-    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 10,
-    borderRadius: 8,
+    borderRadius: 6,
     borderWidth: 1,
-    gap: 6,
   },
   lifecycleBtnRestart: {
     backgroundColor: '#0B2538',
     borderColor: '#164E63',
   },
   lifecycleBtnEdit: {
-    backgroundColor: '#1F242C',
-    borderColor: '#374151',
+    backgroundColor: '#20242C',
+    borderColor: '#3C4043',
   },
   lifecycleBtnDelete: {
     backgroundColor: '#2D1515',
@@ -1158,16 +1087,13 @@ const styles = StyleSheet.create({
   lifecycleBtnDisabled: {
     opacity: 0.7,
   },
-  lifecycleBtnIcon: {
-    fontSize: 13,
-  },
   lifecycleBtnRestartText: {
     color: '#38BDF8',
     fontSize: 11,
     fontWeight: '700',
   },
   lifecycleBtnEditText: {
-    color: '#94A3B8',
+    color: '#9AA0A6',
     fontSize: 11,
     fontWeight: '700',
   },
@@ -1186,10 +1112,10 @@ const styles = StyleSheet.create({
   editModalCard: {
     width: '100%',
     maxWidth: 400,
-    backgroundColor: '#181C22',
+    backgroundColor: '#1A1D24',
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: '#282E38',
+    borderColor: '#2D3139',
     padding: 18,
   },
   editModalHeader: {
@@ -1202,24 +1128,24 @@ const styles = StyleSheet.create({
     borderBottomColor: '#282E38',
   },
   editModalTitle: {
-    color: '#FFFFFF',
+    color: '#E8EAED',
     fontSize: 14,
     fontWeight: '800',
   },
   modalCloseText: {
-    color: '#94A3B8',
-    fontSize: 16,
+    color: '#9AA0A6',
+    fontSize: 11,
     fontWeight: '700',
-    padding: 4,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   formGroup: {
     marginBottom: 12,
   },
   formLabel: {
-    color: '#94A3B8',
+    color: '#9AA0A6',
     fontSize: 9,
     fontWeight: '700',
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     marginBottom: 6,
   },
   formInput: {
@@ -1227,11 +1153,11 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     borderWidth: 1,
     borderColor: '#282E38',
-    color: '#FFFFFF',
+    color: '#E8EAED',
     paddingHorizontal: 12,
     paddingVertical: 8,
     fontSize: 12,
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   modalActionsRow: {
     flexDirection: 'row',
@@ -1242,11 +1168,11 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingVertical: 10,
     borderRadius: 8,
-    backgroundColor: '#1E242C',
+    backgroundColor: '#282E38',
     alignItems: 'center',
   },
   cancelModalBtnText: {
-    color: '#94A3B8',
+    color: '#9AA0A6',
     fontWeight: '700',
     fontSize: 12,
   },
@@ -1282,20 +1208,11 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#1E242C',
   },
-  serialConsoleTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  serialConsoleDot: {
-    color: '#81C995',
-    fontSize: 12,
-  },
   serialConsoleTitle: {
-    color: '#E2E8F0',
+    color: '#E8EAED',
     fontSize: 12,
     fontWeight: '800',
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   serialTerminalScreen: {
     backgroundColor: '#05080C',
@@ -1311,16 +1228,16 @@ const styles = StyleSheet.create({
   },
   serialConsoleLine: {
     fontSize: 10,
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     lineHeight: 16,
   },
   serialConsoleGreen: {
     color: '#81C995',
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   serialConsoleWhite: {
-    color: '#E2E8F0',
-    fontFamily: fonts.mono,
+    color: '#E8EAED',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   serialConsolePromptRow: {
     marginTop: 8,
@@ -1329,27 +1246,27 @@ const styles = StyleSheet.create({
     color: '#81C995',
     fontSize: 10,
     fontWeight: '800',
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   serialConsoleCursor: {
     color: '#FFFFFF',
     fontSize: 11,
     fontWeight: '900',
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   serialConsoleCloseBtn: {
     marginTop: 14,
-    backgroundColor: '#1E242C',
+    backgroundColor: '#20242C',
     borderWidth: 1,
-    borderColor: '#282E38',
+    borderColor: '#2D3139',
     borderRadius: 8,
     paddingVertical: 10,
     alignItems: 'center',
   },
   serialConsoleCloseBtnText: {
-    color: '#E2E8F0',
+    color: '#E8EAED',
     fontSize: 11,
     fontWeight: '700',
-    fontFamily: fonts.mono,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
 });

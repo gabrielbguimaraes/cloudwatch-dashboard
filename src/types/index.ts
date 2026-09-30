@@ -1,5 +1,7 @@
 
 
+export * from './auth';
+
 /** Provedores de Nuvem Suportados (OCI Primário) */
 export type CloudProvider = 'OCI' | 'AWS' | 'GCP';
 

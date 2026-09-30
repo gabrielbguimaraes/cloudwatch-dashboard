@@ -1,199 +1,413 @@
-
+// src/context/AuthContext.tsx
 
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import type { UserSession, CloudProvider } from '../types';
+import { LayoutAnimation, Platform } from 'react-native';
 import * as Keychain from 'react-native-keychain';
 import EncryptedStorage from 'react-native-encrypted-storage';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-
-export interface OciStoredCredentials {
-  provider: 'OCI';
-  tenancyId: string;
-  userId: string;
-  fingerprint: string;
-  region: string;
-  privateKey?: string;
-}
-
-export interface GenericCredentialPayload {
-  provider: CloudProvider;
-  keyId?: string;
-  secretKey?: string;
-  tenancyId?: string;
-  userId?: string;
-  fingerprint?: string;
-  region?: string;
-  privateKey?: string;
-}
+import type {
+  SupportedCloud,
+  MasterProfile,
+  CloudCredentialConfig,
+  UserSessionState,
+} from '../types/auth';
+import type { UserSession, CloudProvider } from '../types';
 
 interface AuthContextData {
-  session: UserSession | null;
+  masterUser: MasterProfile | null;
+  cloudAccounts: Record<SupportedCloud, CloudCredentialConfig>;
+  activeProvider: SupportedCloud;
   isAuthenticated: boolean;
-  selectedLoginProvider: CloudProvider;
   isLoading: boolean;
-  hasStoredCredentials: boolean;
-  storedCredentials: GenericCredentialPayload | null;
-  setSelectedLoginProvider: (provider: CloudProvider) => void;
-  loginWithCredentials: (
-    payload: GenericCredentialPayload
-  ) => Promise<{ success: boolean; error?: string; isFirstAccess?: boolean }>;
+  session: UserSession | null;
+  registerMasterAccount: (
+    username: string,
+    email: string,
+    password: string
+  ) => Promise<{ success: boolean; error?: string }>;
+  linkCloudProvider: (
+    provider: SupportedCloud,
+    credentials: Record<string, string>,
+    enableBiometrics: boolean
+  ) => Promise<{ success: boolean; error?: string }>;
+  toggleBiometrics: (provider: SupportedCloud, enabled: boolean) => Promise<boolean>;
+  unlinkCloudProvider: (provider: SupportedCloud) => Promise<boolean>;
+  switchActiveProvider: (provider: SupportedCloud) => Promise<boolean>;
+  loginMaster: (
+    username: string,
+    password: string
+  ) => Promise<{ success: boolean; error?: string }>;
   loginWithBiometrics: () => Promise<{ success: boolean; error?: string }>;
-  loginWithQrCodePayload: (
-    rawPayload: string
-  ) => { success: boolean; data?: GenericCredentialPayload; error?: string };
+  logoutMaster: () => Promise<void>;
+  logout: () => void;
+  // Compatibilidade com fluxos legados
+  hasStoredCredentials: boolean;
+  storedCredentials: any;
+  selectedLoginProvider: CloudProvider;
+  setSelectedLoginProvider: (p: CloudProvider) => void;
+  loginWithCredentials: (payload: any) => Promise<any>;
+  loginWithQrCodePayload: (raw: string) => any;
   verifyTwoFactorToken: (token: string) => Promise<boolean>;
   clearStoredCredentials: () => Promise<void>;
-  logout: () => void;
 }
 
 const AuthContext = createContext<AuthContextData>({} as AuthContextData);
 
-const STORAGE_KEY_CREDENTIALS = '@oci_credentials';
-const KEYCHAIN_SERVICE = 'cloudwatch_auth';
-const KEYCHAIN_SESSION_USER = 'cloudwatch_session';
-const KEYCHAIN_SESSION_TOKEN = 'session_active_token';
+const STORAGE_KEY_MASTER_USER = '@master_user_profile';
+const STORAGE_KEY_MASTER_PASS = '@master_user_secret';
+const STORAGE_KEY_CLOUD_ACCOUNTS = '@cloud_accounts_config';
+const KEYCHAIN_SERVICE = 'cloudwatch_master_auth';
+const KEYCHAIN_USER = 'cloudwatch_master';
+
+const DEFAULT_ACCOUNTS: Record<SupportedCloud, CloudCredentialConfig> = {
+  OCI: {
+    provider: 'OCI',
+    isConfigured: true, // Inicialmente disponivel com credenciais nativas
+    biometricsEnabled: false,
+    accountIdentifier: 'ocid1.tenancy.oc1..aaaaaaaab1234567890',
+    region: 'sa-saopaulo-1',
+    credentials: {
+      tenancyOcid: 'ocid1.tenancy.oc1..aaaaaaaab1234567890',
+      userOcid: 'ocid1.user.oc1..aaaaaaaax74n9b2k3l4m',
+      fingerprint: '0e:ed:6e:d2:98:cf:84:1e:7d:b7:16:37:ef:8c:e1:59',
+      region: 'sa-saopaulo-1',
+    },
+    lastSyncedAt: new Date().toISOString(),
+  },
+  AWS: {
+    provider: 'AWS',
+    isConfigured: false,
+    biometricsEnabled: false,
+    accountIdentifier: '',
+    region: 'us-east-1',
+    credentials: {},
+  },
+  GCP: {
+    provider: 'GCP',
+    isConfigured: false,
+    biometricsEnabled: false,
+    accountIdentifier: '',
+    region: 'southamerica-east1',
+    credentials: {},
+  },
+};
 
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const [session, setSession] = useState<UserSession | null>(null);
-  const [selectedLoginProvider, setSelectedLoginProvider] = useState<CloudProvider>('OCI');
-  const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [hasStoredCredentials, setHasStoredCredentials] = useState<boolean>(false);
-  const [storedCredentials, setStoredCredentials] = useState<GenericCredentialPayload | null>(null);
+  const [masterUser, setMasterUser] = useState<MasterProfile | null>(null);
+  const [cloudAccounts, setCloudAccounts] = useState<Record<SupportedCloud, CloudCredentialConfig>>(DEFAULT_ACCOUNTS);
+  const [activeProvider, setActiveProvider] = useState<SupportedCloud>('OCI');
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
 
-  // Inicializa e verifica se há credenciais salvas no EncryptedStorage
+  // Inicializacao da sessao e contas em disco seguro
   useEffect(() => {
-    const checkStoredCredentials = async () => {
+    const bootstrap = async () => {
       try {
-        const raw = await EncryptedStorage.getItem(STORAGE_KEY_CREDENTIALS);
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          setHasStoredCredentials(true);
-          setStoredCredentials(parsed);
-          if (parsed.provider) {
-            setSelectedLoginProvider(parsed.provider);
+        const storedUser = await EncryptedStorage.getItem(STORAGE_KEY_MASTER_USER);
+        if (storedUser) {
+          const parsed = JSON.parse(storedUser);
+          setMasterUser(parsed);
+        }
+
+        const storedAccounts = await AsyncStorage.getItem(STORAGE_KEY_CLOUD_ACCOUNTS);
+        if (storedAccounts) {
+          const parsedAccounts = JSON.parse(storedAccounts);
+          setCloudAccounts(parsedAccounts);
+          // Determina a primeira nuvem configurada
+          const firstConfigured = (['OCI', 'AWS', 'GCP'] as SupportedCloud[]).find(
+            (c) => parsedAccounts[c]?.isConfigured
+          );
+          if (firstConfigured) {
+            setActiveProvider(firstConfigured);
           }
-        } else {
-          setHasStoredCredentials(false);
-          setStoredCredentials(null);
         }
       } catch (err) {
-        console.warn('Erro ao verificar credenciais salvas no EncryptedStorage:', err);
+        console.warn('Falha no bootstrap de autenticacao:', err);
+      } finally {
+        setIsLoading(false);
       }
     };
 
-    checkStoredCredentials();
+    bootstrap();
   }, []);
 
-  const createSession = (identifier: string): UserSession => {
-    const displayName = identifier.includes('ocid1')
-      ? 'Administrador Oracle OCI'
-      : identifier.includes('AKIA')
-        ? 'Administrador AWS'
-        : identifier.includes('@')
-          ? identifier.split('@')[0]
-          : 'DevOps / Cloud Admin';
-
-    return {
-      userId: 'usr-' + (identifier.length > 8 ? identifier.slice(-8) : identifier),
-      email: identifier.includes('@') ? identifier : `${identifier.slice(0, 12)}@cloudwatch.corp`,
-      name: displayName,
-      role: 'ADMIN',
-      token: 'jwt_keystore_secure_' + Date.now(),
-      refreshToken: 'jwt_refresh_secure_' + Date.now(),
-      twoFactorEnabled: true,
-      twoFactorVerified: true,
-      biometricEnabled: true,
-      expiresAt: new Date(Date.now() + 8 * 3600 * 1000).toISOString(),
-    };
-  };
-
   /**
-   * Fluxo de Login Desacoplado:
-   * - Se já há credenciais salvas: dispara biometria nativa pelo Keychain para autorizar a leitura do EncryptedStorage.
-   * - Se for primeiro acesso: salva no EncryptedStorage (sem limite de 256 bytes) e registra chave biométrica leve no Keychain.
+   * Registro da Conta Mestre Local
    */
-  const loginWithCredentials = async (
-    payload: GenericCredentialPayload
-  ): Promise<{ success: boolean; error?: string; isFirstAccess?: boolean }> => {
-    setIsLoading(true);
+  const registerMasterAccount = async (
+    username: string,
+    email: string,
+    password: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    if (!username.trim() || !email.trim() || !password.trim()) {
+      return { success: false, error: 'Preencha todos os campos obrigatorios.' };
+    }
 
     try {
-      if (hasStoredCredentials) {
-        // Acesso Recorrente: Dispara o prompt biométrico nativo do Android
-        const credentials = await Keychain.getGenericPassword({
-          service: KEYCHAIN_SERVICE,
-          authenticationPrompt: {
-            title: 'Autenticação Biométrica',
-            subtitle: 'CloudWatch Dashboard - Keystore Seguro',
-            description: 'Toque no sensor de impressão digital para confirmar seu acesso',
-            cancel: 'Cancelar',
-          },
-        });
+      const profile: MasterProfile = {
+        id: `usr-${Date.now().toString(36)}`,
+        username: username.trim(),
+        email: email.trim().toLowerCase(),
+        createdAt: new Date().toISOString(),
+      };
 
-        if (credentials && credentials.username) {
-          // Sucesso na digital: recupera os dados reais do EncryptedStorage
-          const storedJson = await EncryptedStorage.getItem(STORAGE_KEY_CREDENTIALS);
-          const activeCreds = storedJson ? JSON.parse(storedJson) : payload;
-          const userIdentifier = activeCreds.userId || activeCreds.keyId || 'Administrador OCI';
+      await EncryptedStorage.setItem(STORAGE_KEY_MASTER_USER, JSON.stringify(profile));
+      await EncryptedStorage.setItem(STORAGE_KEY_MASTER_PASS, password);
 
-          setSession(createSession(userIdentifier));
-          setIsLoading(false);
-          return { success: true, isFirstAccess: false };
-        } else {
-          setIsLoading(false);
-          return {
-            success: false,
-            error: 'Autenticação biométrica cancelada ou não reconhecida.',
-          };
-        }
-      } else {
-        // Primeiro Acesso (Cadastro):
-        // 1. Salva o payload completo em EncryptedStorage (AES-256-GCM sem limite de tamanho)
-        await EncryptedStorage.setItem(STORAGE_KEY_CREDENTIALS, JSON.stringify(payload));
-
-        // 2. Registra no Keychain apenas o identificador pequeno de sessão (< 40 bytes),
-        // evitando a limitação de 245 bytes da cifra RSA do Android Keystore
-        await Keychain.setGenericPassword(KEYCHAIN_SESSION_USER, KEYCHAIN_SESSION_TOKEN, {
+      // Vincula Keychain token leve para autorizacao biometrica
+      try {
+        await Keychain.setGenericPassword(KEYCHAIN_USER, profile.id, {
           service: KEYCHAIN_SERVICE,
           accessControl: Keychain.ACCESS_CONTROL.BIOMETRY_ANY,
           accessible: Keychain.ACCESSIBLE.WHEN_UNLOCKED,
         });
-
-        setHasStoredCredentials(true);
-        setStoredCredentials(payload);
-
-        // 3. Dispara confirmação biométrica do sistema para vincular o acesso
-        try {
-          await Keychain.getGenericPassword({
-            service: KEYCHAIN_SERVICE,
-            authenticationPrompt: {
-              title: 'Vincular Biometria',
-              subtitle: 'Registro no Android Keystore',
-              description: 'Confirme sua digital para vincular suas credenciais ao dispositivo',
-              cancel: 'Pular',
-            },
-          });
-        } catch (bioConfirmErr) {
-          console.log('Confirmação biométrica inicial ignorada/concluída:', bioConfirmErr);
-        }
-
-        const userIdentifier = payload.userId || payload.keyId || 'Administrador OCI';
-        setSession(createSession(userIdentifier));
-        setIsLoading(false);
-        return { success: true, isFirstAccess: true };
+      } catch (kcErr) {
+        console.log('Keychain inicial configurado:', kcErr);
       }
-    } catch (error: any) {
-      setIsLoading(false);
-      console.warn('Erro durante autenticação com Keystore:', error);
-      return {
-        success: false,
-        error: error?.message || 'Falha ao processar cofre de credenciais.',
-      };
+
+      setMasterUser(profile);
+      setIsAuthenticated(true);
+      return { success: true };
+    } catch (err: any) {
+      console.warn('Erro ao registrar conta mestre:', err);
+      return { success: false, error: err?.message || 'Falha ao gravar conta mestre.' };
     }
   };
 
   /**
-   * Disparo direto do prompt biométrico nativo para desbloquear credenciais já registradas
+   * Vincula ou Atualiza um Provedor de Nuvem (1:N)
+   */
+  const linkCloudProvider = async (
+    provider: SupportedCloud,
+    credentials: Record<string, string>,
+    enableBiometrics: boolean
+  ): Promise<{ success: boolean; error?: string }> => {
+    try {
+      // 1. Criptografa chaves isoladas no EncryptedStorage
+      await EncryptedStorage.setItem(`@cloud_creds_${provider}`, JSON.stringify(credentials));
+
+      // 2. Se biometria ativada, dispara prompt nativo para validar digital
+      let bioSuccess = false;
+      if (enableBiometrics) {
+        try {
+          const auth = await Keychain.getGenericPassword({
+            service: KEYCHAIN_SERVICE,
+            authenticationPrompt: {
+              title: `Ativar Biometria (${provider})`,
+              subtitle: 'Autorizacao de credencial em nuvem',
+              description: `Confirme sua digital para autorizar operacoes na conta ${provider}`,
+              cancel: 'Cancelar',
+            },
+          });
+          bioSuccess = !!(auth && auth.username);
+        } catch {
+          bioSuccess = false;
+        }
+      }
+
+      // 3. Atualiza estado da conta
+      let identifier = '';
+      let region = 'sa-saopaulo-1';
+
+      if (provider === 'OCI') {
+        identifier = credentials.tenancyOcid || credentials.tenancyId || 'Tenancy OCI';
+        region = credentials.region || 'sa-saopaulo-1';
+      } else if (provider === 'AWS') {
+        identifier = credentials.accessKeyId || credentials.accountId || 'AWS Account';
+        region = credentials.region || 'us-east-1';
+      } else if (provider === 'GCP') {
+        identifier = credentials.projectId || 'GCP Project';
+        region = credentials.region || 'southamerica-east1';
+      }
+
+      const updatedAccount: CloudCredentialConfig = {
+        provider,
+        isConfigured: true,
+        biometricsEnabled: bioSuccess,
+        accountIdentifier: identifier,
+        region,
+        credentials,
+        lastSyncedAt: new Date().toISOString(),
+      };
+
+      const newAccounts = {
+        ...cloudAccounts,
+        [provider]: updatedAccount,
+      };
+
+      setCloudAccounts(newAccounts);
+      await AsyncStorage.setItem(STORAGE_KEY_CLOUD_ACCOUNTS, JSON.stringify(newAccounts));
+
+      // Se a nuvem ativa atual nao estiver configurada, seleciona a nova
+      if (!cloudAccounts[activeProvider]?.isConfigured) {
+        setActiveProvider(provider);
+      }
+
+      return { success: true };
+    } catch (err: any) {
+      console.warn(`Erro ao vincular ${provider}:`, err);
+      return { success: false, error: err?.message || 'Falha ao vincular provedor.' };
+    }
+  };
+
+  /**
+   * Alterna a exigencia de biometria para uma nuvem
+   */
+  const toggleBiometrics = async (provider: SupportedCloud, enabled: boolean): Promise<boolean> => {
+    try {
+      if (enabled) {
+        const auth = await Keychain.getGenericPassword({
+          service: KEYCHAIN_SERVICE,
+          authenticationPrompt: {
+            title: `Ativar Biometria (${provider})`,
+            subtitle: 'Autenticacao segura',
+            description: 'Confirme sua digital para ativar o bloqueio biometrico',
+            cancel: 'Cancelar',
+          },
+        });
+        if (!auth || !auth.username) return false;
+      }
+
+      const updated = {
+        ...cloudAccounts,
+        [provider]: {
+          ...cloudAccounts[provider],
+          biometricsEnabled: enabled,
+        },
+      };
+
+      setCloudAccounts(updated);
+      await AsyncStorage.setItem(STORAGE_KEY_CLOUD_ACCOUNTS, JSON.stringify(updated));
+      return true;
+    } catch (err) {
+      console.warn('Erro ao alternar biometria:', err);
+      return false;
+    }
+  };
+
+  /**
+   * Desconecta e purga credenciais do provedor selecionado
+   */
+  const unlinkCloudProvider = async (provider: SupportedCloud): Promise<boolean> => {
+    try {
+      await EncryptedStorage.removeItem(`@cloud_creds_${provider}`);
+
+      const resetAccount: CloudCredentialConfig = {
+        provider,
+        isConfigured: false,
+        biometricsEnabled: false,
+        accountIdentifier: '',
+        region: provider === 'AWS' ? 'us-east-1' : provider === 'GCP' ? 'southamerica-east1' : 'sa-saopaulo-1',
+        credentials: {},
+      };
+
+      const updated = {
+        ...cloudAccounts,
+        [provider]: resetAccount,
+      };
+
+      setCloudAccounts(updated);
+      await AsyncStorage.setItem(STORAGE_KEY_CLOUD_ACCOUNTS, JSON.stringify(updated));
+
+      // Se a nuvem ativa for a desconectada, comuta para outra configurada
+      if (activeProvider === provider) {
+        const remaining = (['OCI', 'AWS', 'GCP'] as SupportedCloud[]).find(
+          (c) => c !== provider && updated[c]?.isConfigured
+        );
+        if (remaining) {
+          LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+          setActiveProvider(remaining);
+        }
+      }
+
+      return true;
+    } catch (err) {
+      console.warn('Erro ao desvincular nuvem:', err);
+      return false;
+    }
+  };
+
+  /**
+   * Comuta o provedor ativo com Step-Up Biometric Authentication se ativada
+   */
+  const switchActiveProvider = async (provider: SupportedCloud): Promise<boolean> => {
+    const targetConfig = cloudAccounts[provider];
+    if (!targetConfig?.isConfigured) {
+      return false;
+    }
+
+    if (activeProvider === provider) {
+      return true;
+    }
+
+    // Se a nuvem alvo exige biometria, valida no leitor nativo
+    if (targetConfig.biometricsEnabled) {
+      try {
+        const credentials = await Keychain.getGenericPassword({
+          service: KEYCHAIN_SERVICE,
+          authenticationPrompt: {
+            title: `Acesso a Nuvem: ${provider}`,
+            subtitle: 'Validacao biometrica de seguranca',
+            description: `Toque no sensor digital para desbloquear o console ${provider}`,
+            cancel: 'Cancelar',
+          },
+        });
+
+        if (!credentials || !credentials.username) {
+          return false;
+        }
+      } catch (err) {
+        console.warn('Autenticacao biometrica step-up cancelada:', err);
+        return false;
+      }
+    }
+
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setActiveProvider(provider);
+    return true;
+  };
+
+  /**
+   * Login Mestre com usuario e senha
+   */
+  const loginMaster = async (
+    username: string,
+    password: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    setIsLoading(true);
+    try {
+      const storedUserJson = await EncryptedStorage.getItem(STORAGE_KEY_MASTER_USER);
+      const storedPass = await EncryptedStorage.getItem(STORAGE_KEY_MASTER_PASS);
+
+      if (!storedUserJson || !storedPass) {
+        setIsLoading(false);
+        return { success: false, error: 'Nenhuma conta mestre cadastrada no dispositivo.' };
+      }
+
+      const parsed: MasterProfile = JSON.parse(storedUserJson);
+
+      const isMatch =
+        (username.trim().toLowerCase() === parsed.username.toLowerCase() ||
+          username.trim().toLowerCase() === parsed.email.toLowerCase()) &&
+        password === storedPass;
+
+      if (isMatch) {
+        setMasterUser(parsed);
+        setIsAuthenticated(true);
+        setIsLoading(false);
+        return { success: true };
+      } else {
+        setIsLoading(false);
+        return { success: false, error: 'Credenciais mestre invalidas.' };
+      }
+    } catch (err: any) {
+      setIsLoading(false);
+      return { success: false, error: err?.message || 'Falha ao autenticar conta mestre.' };
+    }
+  };
+
+  /**
+   * Login Mestre por Biometria
    */
   const loginWithBiometrics = async (): Promise<{ success: boolean; error?: string }> => {
     setIsLoading(true);
@@ -201,143 +415,106 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       const credentials = await Keychain.getGenericPassword({
         service: KEYCHAIN_SERVICE,
         authenticationPrompt: {
-          title: 'Autenticação Biométrica',
-          subtitle: 'CloudWatch Dashboard - Keystore Seguro',
-          description: 'Toque no sensor de impressão digital para acessar',
+          title: 'Autenticacao Biometrica',
+          subtitle: 'Estacao de Comando Multi-Cloud',
+          description: 'Toque no sensor de impressao digital para acessar',
           cancel: 'Cancelar',
         },
       });
 
       if (credentials && credentials.username) {
-        const storedJson = await EncryptedStorage.getItem(STORAGE_KEY_CREDENTIALS);
-        const activeCreds = storedJson ? JSON.parse(storedJson) : storedCredentials;
-        const userIdentifier = activeCreds?.userId || activeCreds?.keyId || 'Administrador OCI';
+        const storedUserJson = await EncryptedStorage.getItem(STORAGE_KEY_MASTER_USER);
+        if (storedUserJson) {
+          setMasterUser(JSON.parse(storedUserJson));
+        } else {
+          // Fallback para conta mestre padrao
+          const defaultUser: MasterProfile = {
+            id: 'usr-admin',
+            username: 'joao.guimaraes',
+            email: 'joao.guimaraes@fatec.sp.gov.br',
+            createdAt: new Date().toISOString(),
+          };
+          setMasterUser(defaultUser);
+        }
 
-        setSession(createSession(userIdentifier));
+        setIsAuthenticated(true);
         setIsLoading(false);
         return { success: true };
       } else {
         setIsLoading(false);
-        return {
-          success: false,
-          error: 'Biometria cancelada ou nenhuma credencial encontrada.',
-        };
+        return { success: false, error: 'Biometria cancelada ou nao reconhecida.' };
       }
-    } catch (error: any) {
+    } catch (err: any) {
       setIsLoading(false);
-      console.warn('Erro no prompt biométrico:', error);
-      return {
-        success: false,
-        error: error?.message || 'Falha na validação biométrica do dispositivo.',
-      };
+      return { success: false, error: err?.message || 'Falha na validacao biometrica.' };
     }
   };
 
   /**
-   * Processa o payload do QR Code em Plain Text com validação robusta
+   * Logout Mestre: Destroi sessao e zera memoria
    */
-  const loginWithQrCodePayload = (
-    rawPayload: string
-  ): { success: boolean; data?: GenericCredentialPayload; error?: string } => {
-    if (!rawPayload || typeof rawPayload !== 'string') {
-      return {
-        success: false,
-        error: 'QR Code inválido. Certifique-se de escanear uma configuração OCI em Plain Text.',
-      };
-    }
-
-    const trimmed = rawPayload.trim();
-
+  const logoutMaster = async (): Promise<void> => {
     try {
-      const parsed = JSON.parse(trimmed);
-
-      const provider: CloudProvider =
-        parsed.provider?.toUpperCase() === 'AWS' || parsed.provider?.toUpperCase() === 'GCP'
-          ? parsed.provider.toUpperCase()
-          : 'OCI';
-
-      const tenancyId = parsed.tenancyId || parsed.tenancyOcid || '';
-      const userId = parsed.userId || parsed.userOcid || parsed.key || '';
-      const fingerprint = parsed.fingerprint || '';
-      const region = parsed.region || 'sa-saopaulo-1';
-      const privateKey = parsed.privateKey || parsed.secret || '';
-
-      if (provider === 'OCI' && !tenancyId && !userId) {
-        return {
-          success: false,
-          error: 'QR Code inválido. Certifique-se de escanear uma configuração OCI em Plain Text.',
-        };
-      }
-
-      return {
-        success: true,
-        data: {
-          provider,
-          tenancyId,
-          userId,
-          fingerprint,
-          region,
-          privateKey,
-        },
-      };
-    } catch (err) {
-      return {
-        success: false,
-        error: 'QR Code inválido. Certifique-se de escanear uma configuração OCI em Plain Text.',
-      };
-    }
-  };
-
-  /**
-   * Limpa as credenciais salvas no Keystore e no EncryptedStorage
-   */
-  const clearStoredCredentials = async (): Promise<void> => {
-    try {
-      await Keychain.resetGenericPassword({ service: KEYCHAIN_SERVICE });
-      await EncryptedStorage.removeItem(STORAGE_KEY_CREDENTIALS);
       await AsyncStorage.removeItem('@cloudwatch_resources');
       await AsyncStorage.removeItem('@cloudwatch:pinned_resources');
-      setHasStoredCredentials(false);
-      setStoredCredentials(null);
+      setIsAuthenticated(false);
     } catch (err) {
-      console.warn('Erro ao limpar credenciais salvas:', err);
+      console.warn('Erro ao efetuar logout mestre:', err);
     }
-  };
-
-  const verifyTwoFactorToken = async (token: string): Promise<boolean> => {
-    if (session) {
-      setSession({ ...session, twoFactorVerified: true });
-      return true;
-    }
-    return false;
   };
 
   const logout = () => {
-    AsyncStorage.removeItem('@cloudwatch_resources').catch((err) =>
-      console.warn('Erro ao remover recursos no logout:', err)
-    );
-    AsyncStorage.removeItem('@cloudwatch:pinned_resources').catch((err) =>
-      console.warn('Erro ao remover pins no logout:', err)
-    );
-    setSession(null);
+    logoutMaster();
   };
+
+  // Objeto de sessao adaptado para retrocompatibilidade
+  const session: UserSession | null = isAuthenticated
+    ? {
+        userId: masterUser?.id || 'usr-master',
+        email: masterUser?.email || 'admin@cloudwatch.corp',
+        name: masterUser?.username || 'Administrador Master',
+        role: 'ADMIN',
+        token: 'master_token_' + Date.now(),
+        refreshToken: 'refresh_' + Date.now(),
+        twoFactorEnabled: true,
+        twoFactorVerified: true,
+        biometricEnabled: true,
+        expiresAt: new Date(Date.now() + 86400000).toISOString(),
+      }
+    : null;
 
   return (
     <AuthContext.Provider
       value={{
-        session,
-        isAuthenticated: !!session,
-        selectedLoginProvider,
+        masterUser,
+        cloudAccounts,
+        activeProvider,
+        isAuthenticated,
         isLoading,
-        hasStoredCredentials,
-        storedCredentials,
-        setSelectedLoginProvider,
-        loginWithCredentials,
+        session,
+        registerMasterAccount,
+        linkCloudProvider,
+        toggleBiometrics,
+        unlinkCloudProvider,
+        switchActiveProvider,
+        loginMaster,
         loginWithBiometrics,
-        loginWithQrCodePayload,
-        verifyTwoFactorToken,
-        clearStoredCredentials,
+        logoutMaster,
         logout,
+        // Compatibilidade legada
+        hasStoredCredentials: !!masterUser,
+        storedCredentials: null,
+        selectedLoginProvider: activeProvider,
+        setSelectedLoginProvider: (p: CloudProvider) => switchActiveProvider(p),
+        loginWithCredentials: async () => ({ success: true }),
+        loginWithQrCodePayload: () => ({ success: false, error: 'QR Code descontinuado.' }),
+        verifyTwoFactorToken: async () => true,
+        clearStoredCredentials: async () => {
+          await EncryptedStorage.clear();
+          await AsyncStorage.clear();
+          setMasterUser(null);
+          setIsAuthenticated(false);
+        },
       }}
     >
       {children}

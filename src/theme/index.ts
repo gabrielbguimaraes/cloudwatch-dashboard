@@ -1,5 +1,6 @@
 import { Platform } from 'react-native';
 export * from './providerConfig';
+export * from './tokens';
 
 export const colors = {
   // Backdrop Geral (Fundo neutro escuro com 2% de matiz azul-aço; sem preto puro)

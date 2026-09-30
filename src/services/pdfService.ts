@@ -46,10 +46,10 @@ export const generateExecutiveReportHtml = (
         : '#16A34A';
   const statusText =
     resource.status === 'CRITICAL'
-      ? '🔴 CRÍTICO'
+      ? 'CRÍTICO'
       : resource.status === 'WARNING'
-        ? '🟡 ATENÇÃO'
-        : '🟢 OPERACIONAL';
+        ? 'ATENÇÃO'
+        : 'OPERACIONAL';
 
   return `
 <!DOCTYPE html>

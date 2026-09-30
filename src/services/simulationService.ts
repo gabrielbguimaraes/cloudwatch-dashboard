@@ -13,9 +13,9 @@ import { faker } from '@faker-js/faker';
 
 /**
  * Avalia o status do semáforo com base nas regras estritas de métricas:
- * 🟢 Operacional: CPU < 70% e sem erros críticos.
- * 🟡 Atenção: CPU entre 70% e 85% ou latência elevada (> 50ms).
- * 🔴 Crítico: CPU > 85% ou falhas de healthcheck.
+ * - Operacional: CPU < 70% e sem erros críticos.
+ * - Atenção: CPU entre 70% e 85% ou latência elevada (> 50ms).
+ * - Crítico: CPU > 85% ou falhas de healthcheck.
  */
 export const evaluateHealthStatus = (
   cpuPercent: number,
@@ -362,11 +362,11 @@ export const provisionNewInstance = (targetProvider?: CloudProvider): CloudResou
   let hasCriticalError = false;
 
   if (scenario < 0.60) {
-    // 🟢 Operacional
+    // Operacional
     cpuPercent = getRandomFloat(14, 68);
     latencyMs = getRandomFloat(2.5, 35);
   } else if (scenario < 0.85) {
-    // 🟡 Atenção
+    // Atencao
     const isLatencyIssue = Math.random() > 0.5;
     if (isLatencyIssue) {
       cpuPercent = getRandomFloat(40, 68);
@@ -376,7 +376,7 @@ export const provisionNewInstance = (targetProvider?: CloudProvider): CloudResou
       latencyMs = getRandomFloat(8, 45);
     }
   } else {
-    // 🔴 Crítico
+    // Critico
     cpuPercent = getRandomFloat(85.5, 98.2);
     latencyMs = getRandomFloat(40, 150);
     hasCriticalError = Math.random() > 0.4;
