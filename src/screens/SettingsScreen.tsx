@@ -7,7 +7,9 @@ import {
   ScrollView,
   SafeAreaView,
   Alert,
+  Platform,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { colors } from '../theme';
 import { useAuth } from '../context/AuthContext';
 
@@ -28,12 +30,12 @@ export const SettingsScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
   const region = storedCredentials?.region || 'sa-saopaulo-1';
 
   /**
-   * Encerra a sessão ativa, limpa os dados do EncryptedStorage e Keystore e redireciona
+   * Encerra a sessão ativa, limpa os dados do EncryptedStorage e Keystore e redireciona (Zero-Trust)
    */
   const handleLogoutAndClearVault = () => {
     Alert.alert(
       'Encerrar Sessão',
-      'Deseja remover as chaves biométricas do Android Keystore, limpar o cofre EncryptedStorage e encerrar a sessão?',
+      'Deseja remover as chaves biométricas do Android Keystore, limpar o cofre EncryptedStorage, apagar os recursos em cache e encerrar a sessão?',
       [
         { text: 'Cancelar', style: 'cancel' },
         {
@@ -41,6 +43,8 @@ export const SettingsScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
           style: 'destructive',
           onPress: async () => {
             try {
+              await AsyncStorage.removeItem('@cloudwatch_resources');
+              await AsyncStorage.removeItem('@cloudwatch:pinned_resources');
               await clearStoredCredentials();
               logout();
             } catch (err) {
@@ -218,10 +222,10 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   card: {
-    backgroundColor: '#0F172A',
+    backgroundColor: '#181C22',
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: '#1E293B',
+    borderColor: '#282E38',
     padding: 16,
     marginBottom: 16,
   },
@@ -238,7 +242,7 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '800',
     color: colors.textSecondary,
-    fontFamily: 'monospace',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     letterSpacing: 0.5,
   },
   sessionRow: {
@@ -258,24 +262,24 @@ const styles = StyleSheet.create({
   },
   monospaceValue: {
     fontSize: 11,
-    fontFamily: 'monospace',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     color: '#E2E8F0',
-    backgroundColor: '#0B1220',
+    backgroundColor: '#12161D',
     paddingHorizontal: 8,
     paddingVertical: 5,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#1E293B',
+    borderColor: '#282E38',
   },
   providerBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#0B1220',
+    backgroundColor: '#12161D',
     paddingHorizontal: 10,
     paddingVertical: 4,
     borderRadius: 20,
     borderWidth: 1,
-    borderColor: '#334155',
+    borderColor: '#282E38',
     gap: 6,
   },
   dot: {
@@ -287,25 +291,25 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '800',
     color: '#FFFFFF',
-    fontFamily: 'monospace',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   regionChip: {
-    backgroundColor: '#0066FF20',
+    backgroundColor: '#38BDF820',
     paddingHorizontal: 10,
     paddingVertical: 4,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#0066FF40',
+    borderColor: '#38BDF840',
   },
   regionChipText: {
     fontSize: 11,
-    color: colors.neonCyan,
-    fontFamily: 'monospace',
+    color: '#38BDF8',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     fontWeight: '700',
   },
   divider: {
     height: 1,
-    backgroundColor: '#1E293B',
+    backgroundColor: '#282E38',
     marginVertical: 10,
   },
   auditItem: {

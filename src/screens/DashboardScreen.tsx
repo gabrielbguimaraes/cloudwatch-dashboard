@@ -16,21 +16,29 @@ import {
   TextInput,
   ActivityIndicator,
   Vibration,
+  LayoutAnimation,
+  UIManager,
 } from 'react-native';
 import { Camera } from 'react-native-camera-kit';
-import { colors } from '../theme';
+import { colors, getProviderTheme } from '../theme';
 import { useCloud } from '../context/CloudContext';
 import { useAuth } from '../context/AuthContext';
 import type { CloudResource, CloudProvider } from '../types';
 import { detectNearestDatacenter } from '../services/locationService';
+
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
 
 export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   const {
     filteredResources,
     pinnedResources,
     selectedProvider,
+    activeProvider,
     connectedProviders,
     setProviderFilter,
+    setActiveProvider,
     addConnectedProvider,
     isProviderConnected,
     kpis,
@@ -43,6 +51,12 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
     isResourcePinned,
     isLoading,
     lastUpdated,
+    restartInstance,
+    deleteInstance,
+    editInstance,
+    injectChaosCpuOverload,
+    crashPrimaryInstance,
+    restoreInfrastructure,
   } = useCloud();
 
   const { logout, loginWithQrCodePayload } = useAuth();
@@ -53,6 +67,9 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
   const [targetProviderToConnect, setTargetProviderToConnect] = useState<CloudProvider | null>(null);
   const [isProcessingQr, setIsProcessingQr] = useState<boolean>(false);
 
+  // Estado do Modal Chaos Monkey (Injetor de Incidentes ao Vivo)
+  const [isChaosModalVisible, setIsChaosModalVisible] = useState<boolean>(false);
+
   // Estados do Modal Interativo de Provisionamento Personalizado (Tarefa A)
   const [isProvisionModalVisible, setIsProvisionModalVisible] = useState<boolean>(false);
   const [serverName, setServerName] = useState<string>('');
@@ -60,6 +77,74 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
   const [selectedOcpu, setSelectedOcpu] = useState<number>(2);
   const [selectedMemory, setSelectedMemory] = useState<number>(8);
   const [isProvisioning, setIsProvisioning] = useState<boolean>(false);
+
+  // Estados de Edição Rápida da Instância
+  const [editingResource, setEditingResource] = useState<CloudResource | null>(null);
+  const [editName, setEditName] = useState<string>('');
+
+  const handleRestartCard = (id: string) => {
+    Vibration.vibrate(30);
+    restartInstance(id);
+  };
+
+  const handleOpenEditCard = (resource: CloudResource) => {
+    setEditingResource(resource);
+    setEditName(resource.name);
+  };
+
+  const handleSaveEditCard = () => {
+    if (!editingResource) return;
+    if (!editName.trim()) {
+      Alert.alert('Nome Inválido', 'O nome da máquina não pode ficar em branco.');
+      return;
+    }
+    editInstance(editingResource.id, editName.trim());
+    setEditingResource(null);
+    Alert.alert('Instância Atualizada', 'O nome do servidor foi atualizado com sucesso.');
+  };
+
+  const handleDeleteCard = (id: string) => {
+    Alert.alert(
+      'Encerrar Servidor',
+      'Tem certeza que deseja terminar esta instância?',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Encerrar',
+          style: 'destructive',
+          onPress: () => deleteInstance(id),
+        },
+      ]
+    );
+  };
+
+  // Handlers do Chaos Monkey (Injetor de Incidentes)
+  const handleChaosCpuOverload = () => {
+    const res = injectChaosCpuOverload();
+    setIsChaosModalVisible(false);
+    Alert.alert(
+      '🔥 Incidente: Sobrecarga de CPU (98%)',
+      `Carga de 98% injetada em ${res.instanceName || 'servidor'}.\nStatus alterado para CRITICAL, vibração háptica disparada e SLA recalculado.`
+    );
+  };
+
+  const handleChaosCrashPrimary = () => {
+    const res = crashPrimaryInstance();
+    setIsChaosModalVisible(false);
+    Alert.alert(
+      '🛑 Incidente: Host Derrubado',
+      `${res.instanceName || 'Instância Principal'} colocada em estado STOPPED (CPU 0%).\nNovo incidente registrado nos logs de auditoria.`
+    );
+  };
+
+  const handleChaosRestore = () => {
+    const res = restoreInfrastructure();
+    setIsChaosModalVisible(false);
+    Alert.alert(
+      '🟢 Infraestrutura Restaurada',
+      `${res.restoredCount} nós retornaram para HEALTHY com métricas normalizadas.\nAnomalias zeradas e SLA estabilizado em 99.98%.`
+    );
+  };
 
   // Estados de Pull-to-Refresh e Filtro de Busca Instantâneo (Tarefa B)
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
@@ -112,7 +197,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
 
   const handleResourcePress = (resource: CloudResource) => {
     setSelectedResource(resource);
-    navigation.navigate('MetricsDetail', { resourceId: resource.id });
+    navigation.navigate('MetricsDetail', { resourceId: resource.id, selectedInstanceId: resource.id });
   };
 
   const handleLogout = () => {
@@ -160,9 +245,10 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
 
   /**
    * Lógica de Provedor Ativo vs. Outras Nuvens no Dashboard:
-   * Se clicar em nuvem não conectada, solicita escaneamento de QR Code
+   * Dispara LayoutAnimation suave e solicita QR Code se nuvem não estiver conectada
    */
   const handleSelectProvider = (prov: CloudProvider | 'ALL') => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     if (prov === 'ALL') {
       setProviderFilter('ALL');
       return;
@@ -250,15 +336,43 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
     }
   };
 
-  const getStatusColor = (status: CloudResource['status']) => {
-    if (status === 'CRITICAL') return colors.status.danger;
-    if (status === 'WARNING') return colors.status.warning;
-    return colors.status.healthy;
+  // Semáforo Sóbrio (Padrão Google Cloud Monitoring)
+  const getSemaphoreStyle = (status: CloudResource['status']) => {
+    if (status === 'CRITICAL' || status === 'OFFLINE') {
+      return {
+        text: '#F28B82',
+        bg: '#2D1515',
+        border: '#4D1F1F',
+        label: 'CRITICAL',
+      };
+    }
+    if (status === 'WARNING') {
+      return {
+        text: '#FDD663',
+        bg: '#2E230B',
+        border: '#4D3A12',
+        label: 'WARNING',
+      };
+    }
+    if (status === 'REBOOTING') {
+      return {
+        text: '#38BDF8',
+        bg: '#0C1B33',
+        border: '#38BDF8',
+        label: 'REBOOTING',
+      };
+    }
+    return {
+      text: '#81C995',
+      bg: '#132B1D',
+      border: '#1E462E',
+      label: 'HEALTHY',
+    };
   };
 
   const STANDARD_BADGE_STYLE = {
-    bg: '#1E293B',
-    border: '#334155',
+    bg: '#181C22',
+    border: '#282E38',
     text: '#94A3B8',
   };
 
@@ -270,11 +384,12 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
   };
 
   const getProviderBadge = (provider: CloudProvider) => {
+    const theme = getProviderTheme(provider);
     return {
       name: PROVIDER_DISPLAY_NAMES[provider] || String(provider),
-      bg: STANDARD_BADGE_STYLE.bg,
-      text: STANDARD_BADGE_STYLE.text,
-      border: STANDARD_BADGE_STYLE.border,
+      bg: theme.primaryBg || STANDARD_BADGE_STYLE.bg,
+      text: theme.accentColor || STANDARD_BADGE_STYLE.text,
+      border: theme.borderColor || STANDARD_BADGE_STYLE.border,
     };
   };
 
@@ -282,7 +397,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
    * Renderizador reutilizável de Card de Recurso com Semáforo e Botão de Fixar
    */
   const renderResourceCard = (res: CloudResource, isPinnedSection = false) => {
-    const statusColor = getStatusColor(res.status);
+    const sem = getSemaphoreStyle(res.status);
     const badge = getProviderBadge(res.provider);
     const isPinned = isResourcePinned(res.id);
 
@@ -293,8 +408,8 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
         onPress={() => handleResourcePress(res)}
         activeOpacity={0.7}
       >
-        {/* Tarja Lateral do Semáforo Rigoroso */}
-        <View style={[styles.semaphoreStripe, { backgroundColor: statusColor }]} />
+        {/* Tarja Lateral do Semáforo Sóbrio */}
+        <View style={[styles.semaphoreStripe, { backgroundColor: sem.text }]} />
 
         <View style={styles.cardContent}>
           <View style={styles.cardHeader}>
@@ -317,7 +432,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
               </Text>
             </View>
 
-            {/* Ações do Card: Indicador de Saúde e Botão de Fixar */}
+            {/* Ações do Card: Indicador de Saúde Sóbrio e Botão de Fixar */}
             <View style={styles.cardHeaderRight}>
               <TouchableOpacity
                 style={styles.pinBtn}
@@ -329,7 +444,21 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
                 </Text>
               </TouchableOpacity>
 
-              <View style={[styles.statusIndicator, { backgroundColor: statusColor }]} />
+              <View
+                style={[
+                  styles.statusBadgeM3,
+                  { backgroundColor: sem.bg, borderColor: sem.border },
+                ]}
+              >
+                {res.status === 'REBOOTING' ? (
+                  <ActivityIndicator size="small" color="#38BDF8" style={{ marginRight: 4 }} />
+                ) : (
+                  <View style={[styles.statusDotM3, { backgroundColor: sem.text }]} />
+                )}
+                <Text style={[styles.statusBadgeTextM3, { color: sem.text }]}>
+                  {sem.label}
+                </Text>
+              </View>
             </View>
           </View>
 
@@ -339,15 +468,16 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
               <View
                 style={[
                   styles.metricPill,
-                  res.status === 'CRITICAL' && styles.metricPillDanger,
-                  res.status === 'WARNING' && styles.metricPillWarning,
+                  {
+                    backgroundColor: sem.bg,
+                    borderColor: sem.border,
+                  },
                 ]}
               >
                 <Text
                   style={[
                     styles.metricPillText,
-                    res.status === 'CRITICAL' && styles.metricPillTextDanger,
-                    res.status === 'WARNING' && styles.metricPillTextWarning,
+                    { color: sem.text },
                   ]}
                 >
                   CPU: {res.metricsSummary.cpuPercent}%
@@ -384,6 +514,52 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
             <View style={styles.metricPill}>
               <Text style={styles.metricPillText}>{res.region}</Text>
             </View>
+          </View>
+
+          {/* Barra de Ações Rápidas de Ciclo de Vida */}
+          <View style={styles.cardActionsRow}>
+            <TouchableOpacity
+              style={[
+                styles.cardActionBtn,
+                res.status === 'REBOOTING' && styles.cardActionBtnDisabled,
+              ]}
+              onPress={() => {
+                if (res.status === 'REBOOTING') return;
+                handleRestartCard(res.id);
+              }}
+              disabled={res.status === 'REBOOTING'}
+              activeOpacity={0.7}
+            >
+              {res.status === 'REBOOTING' ? (
+                <>
+                  <ActivityIndicator size="small" color="#38BDF8" style={{ marginRight: 4 }} />
+                  <Text style={styles.cardActionTextRebooting}>Reiniciando...</Text>
+                </>
+              ) : (
+                <>
+                  <Text style={styles.cardActionIcon}>🔄</Text>
+                  <Text style={styles.cardActionText}>Reiniciar</Text>
+                </>
+              )}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.cardActionBtn}
+              onPress={() => handleOpenEditCard(res)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.cardActionIcon}>✏️</Text>
+              <Text style={styles.cardActionText}>Editar</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.cardActionBtn, styles.cardActionBtnDelete]}
+              onPress={() => handleDeleteCard(res.id)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.cardActionIcon}>🗑️</Text>
+              <Text style={[styles.cardActionText, styles.cardActionTextDelete]}>Excluir</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </TouchableOpacity>
@@ -427,6 +603,15 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
             </View>
 
             <View style={styles.topActionsRow}>
+              <TouchableOpacity
+                style={styles.chaosMonkeyBtn}
+                onPress={() => setIsChaosModalVisible(true)}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.chaosMonkeyIcon}>⚡</Text>
+                <Text style={styles.chaosMonkeyText}>Simular Incidente</Text>
+              </TouchableOpacity>
+
               <TouchableOpacity
                 style={styles.refreshBtn}
                 onPress={() => {
@@ -477,72 +662,67 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
           </TouchableOpacity>
         </View>
 
-        {/* Filtro por Provedor com Suporte a Conexão Dinâmica */}
-        <View style={styles.filterSection}>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.filterScroll}
-          >
+        {/* 4.1 Dock de Plataformas no Dashboard: [OCI], [AWS], [GCP] */}
+        <View style={styles.dockSection}>
+          <Text style={styles.dockSectionLabel}>PLATAFORMAS CONECTADAS</Text>
+          <View style={styles.dockContainer}>
+            {(['OCI', 'AWS', 'GCP'] as CloudProvider[]).map((prov) => {
+              const isSelected = selectedProvider === prov;
+              const isConnected = isProviderConnected(prov);
+              const theme = getProviderTheme(prov);
+
+              return (
+                <TouchableOpacity
+                  key={prov}
+                  style={[
+                    styles.dockChip,
+                    isSelected && {
+                      backgroundColor: theme.primaryBg,
+                      borderColor: theme.primaryColor,
+                    },
+                  ]}
+                  onPress={() => handleSelectProvider(prov)}
+                  activeOpacity={0.7}
+                >
+                  <View
+                    style={[
+                      styles.dockDot,
+                      { backgroundColor: theme.primaryColor },
+                      !isConnected && { opacity: 0.4 },
+                    ]}
+                  />
+                  <Text
+                    style={[
+                      styles.dockChipText,
+                      isSelected && { color: '#FFFFFF', fontWeight: '800' },
+                    ]}
+                  >
+                    {prov}
+                  </Text>
+                  {!isConnected && <Text style={styles.dockLockIcon}>🔒</Text>}
+                </TouchableOpacity>
+              );
+            })}
+
             <TouchableOpacity
-              style={[styles.filterPill, selectedProvider === 'ALL' && styles.filterPillActive]}
+              style={[
+                styles.dockChip,
+                styles.dockChipAll,
+                selectedProvider === 'ALL' && styles.dockChipAllActive,
+              ]}
               onPress={() => handleSelectProvider('ALL')}
+              activeOpacity={0.7}
             >
               <Text
                 style={[
-                  styles.filterPillText,
-                  selectedProvider === 'ALL' && styles.filterPillTextActive,
+                  styles.dockChipText,
+                  selectedProvider === 'ALL' && { color: '#FFFFFF', fontWeight: '800' },
                 ]}
               >
-                Todos ({kpis.total})
+                TODOS ({kpis.total})
               </Text>
             </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.filterPill, selectedProvider === 'OCI' && styles.filterPillOciActive]}
-              onPress={() => handleSelectProvider('OCI')}
-            >
-              <View style={[styles.filterDot, { backgroundColor: '#EF4444' }]} />
-              <Text
-                style={[
-                  styles.filterPillText,
-                  selectedProvider === 'OCI' && styles.filterPillTextActive,
-                ]}
-              >
-                Oracle OCI {!isProviderConnected('OCI') ? '🔒' : ''}
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.filterPill, selectedProvider === 'AWS' && styles.filterPillAwsActive]}
-              onPress={() => handleSelectProvider('AWS')}
-            >
-              <View style={[styles.filterDot, { backgroundColor: '#F59E0B' }]} />
-              <Text
-                style={[
-                  styles.filterPillText,
-                  selectedProvider === 'AWS' && styles.filterPillTextActive,
-                ]}
-              >
-                AWS {!isProviderConnected('AWS') ? '🔒' : ''}
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.filterPill, selectedProvider === 'GCP' && styles.filterPillGcpActive]}
-              onPress={() => handleSelectProvider('GCP')}
-            >
-              <View style={[styles.filterDot, { backgroundColor: '#3B82F6' }]} />
-              <Text
-                style={[
-                  styles.filterPillText,
-                  selectedProvider === 'GCP' && styles.filterPillTextActive,
-                ]}
-              >
-                GCP {!isProviderConnected('GCP') ? '🔒' : ''}
-              </Text>
-            </TouchableOpacity>
-          </ScrollView>
+          </View>
         </View>
 
         {/* KPIs de Topo */}
@@ -567,6 +747,60 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
               {kpis.critical}
             </Text>
             <Text style={styles.kpiSub}>Atenção</Text>
+          </View>
+        </View>
+
+        {/* Feature B: Radar de Latência Regional por GPS */}
+        <View style={styles.latencyRadarCard}>
+          <View style={styles.latencyRadarHeader}>
+            <View style={styles.latencyRadarTitleRow}>
+              <Text style={styles.latencyRadarIcon}>📡</Text>
+              <View>
+                <Text style={styles.latencyRadarTitle}>Radar de Latência Global</Text>
+                <Text style={styles.latencyRadarSubtitle}>Sincronizado via GPS ({gpsBadge})</Text>
+              </View>
+            </View>
+            <View style={styles.optimalRoutingBadge}>
+              <Text style={styles.optimalRoutingBadgeText}>✓ Roteamento Ótimo Definido para sa-saopaulo-1</Text>
+            </View>
+          </View>
+
+          <View style={styles.latencyLinesContainer}>
+            {/* Linha 1: São Paulo */}
+            <View style={styles.latencyLineItem}>
+              <View style={styles.latencyLineLeft}>
+                <View style={[styles.latencyLineDot, { backgroundColor: '#81C995' }]} />
+                <Text style={styles.latencyCityName}>São Paulo (sa-saopaulo-1):</Text>
+              </View>
+              <View style={styles.latencyLineRight}>
+                <Text style={[styles.latencyMs, { color: '#81C995' }]}>~18ms</Text>
+                <Text style={styles.latencyContext}>(Datacenter Regional Mais Próximo)</Text>
+              </View>
+            </View>
+
+            {/* Linha 2: N. Virginia */}
+            <View style={styles.latencyLineItem}>
+              <View style={styles.latencyLineLeft}>
+                <View style={[styles.latencyLineDot, { backgroundColor: '#FDD663' }]} />
+                <Text style={styles.latencyCityName}>N. Virginia (us-east-1):</Text>
+              </View>
+              <View style={styles.latencyLineRight}>
+                <Text style={[styles.latencyMs, { color: '#FDD663' }]}>~124ms</Text>
+                <Text style={styles.latencyContext}>(Conexão Transcontinental)</Text>
+              </View>
+            </View>
+
+            {/* Linha 3: Frankfurt */}
+            <View style={styles.latencyLineItem}>
+              <View style={styles.latencyLineLeft}>
+                <View style={[styles.latencyLineDot, { backgroundColor: '#F28B82' }]} />
+                <Text style={styles.latencyCityName}>Frankfurt (eu-central-1):</Text>
+              </View>
+              <View style={styles.latencyLineRight}>
+                <Text style={[styles.latencyMs, { color: '#F28B82' }]}>~215ms</Text>
+                <Text style={styles.latencyContext}>(Conexão Europa)</Text>
+              </View>
+            </View>
           </View>
         </View>
 
@@ -887,6 +1121,139 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
           </View>
         </SafeAreaView>
       </Modal>
+
+      {/* Modal Simples de Edição de Nome da Instância */}
+      <Modal
+        visible={!!editingResource}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setEditingResource(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.editModalCard}>
+            <View style={styles.editModalHeader}>
+              <Text style={styles.editModalTitle}>✏️ Editar Instância</Text>
+              <TouchableOpacity
+                onPress={() => setEditingResource(null)}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <Text style={styles.modalCloseText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.formGroup}>
+              <Text style={styles.formLabel}>NOME DO SERVIDOR</Text>
+              <TextInput
+                style={styles.formInput}
+                value={editName}
+                onChangeText={setEditName}
+                placeholder="Nome da instância"
+                placeholderTextColor="#64748B"
+                autoCapitalize="none"
+              />
+            </View>
+
+            <View style={styles.editModalActionsRow}>
+              <TouchableOpacity
+                style={styles.cancelModalBtn}
+                onPress={() => setEditingResource(null)}
+              >
+                <Text style={styles.cancelModalBtnText}>Cancelar</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.saveModalBtn} onPress={handleSaveEditCard}>
+                <Text style={styles.saveModalBtnText}>Salvar Alterações</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Modal Chaos Monkey (Injetor de Incidentes ao Vivo) */}
+      <Modal
+        visible={isChaosModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setIsChaosModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.chaosModalCard}>
+            <View style={styles.chaosModalHeader}>
+              <View style={styles.chaosModalTitleRow}>
+                <Text style={styles.chaosModalIcon}>⚡</Text>
+                <View>
+                  <Text style={styles.chaosModalTitle}>Chaos Monkey</Text>
+                  <Text style={styles.chaosModalSubtitle}>Injetor de Incidentes em Tempo Real</Text>
+                </View>
+              </View>
+              <TouchableOpacity
+                onPress={() => setIsChaosModalVisible(false)}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <Text style={styles.modalCloseText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.chaosModalDesc}>
+              Demonstre a reatividade imediata da telemetria e o failover multi-cloud para a banca avaliadora com um toque:
+            </Text>
+
+            <View style={styles.chaosActionsList}>
+              {/* Gatilho 1 */}
+              <TouchableOpacity
+                style={[styles.chaosActionCard, styles.chaosActionOverload]}
+                onPress={handleChaosCpuOverload}
+                activeOpacity={0.8}
+              >
+                <View style={styles.chaosActionHeader}>
+                  <Text style={styles.chaosActionIcon}>🔥</Text>
+                  <Text style={styles.chaosActionTitle}>Injetar Sobrecarga de CPU (98%)</Text>
+                </View>
+                <Text style={styles.chaosActionDesc}>
+                  Altera a primeira instância saudável para uso de CPU em 98%, muda seu status para CRITICAL, decrementa o SLA e dispara vibração háptica dupla.
+                </Text>
+              </TouchableOpacity>
+
+              {/* Gatilho 2 */}
+              <TouchableOpacity
+                style={[styles.chaosActionCard, styles.chaosActionCrash]}
+                onPress={handleChaosCrashPrimary}
+                activeOpacity={0.8}
+              >
+                <View style={styles.chaosActionHeader}>
+                  <Text style={styles.chaosActionIcon}>🛑</Text>
+                  <Text style={styles.chaosActionTitle}>Derrubar Instância Principal</Text>
+                </View>
+                <Text style={styles.chaosActionDesc}>
+                  Altera o status para STOPPED (CPU 0%), incrementa o contador de incidentes e adiciona log de auditoria.
+                </Text>
+              </TouchableOpacity>
+
+              {/* Gatilho 3 */}
+              <TouchableOpacity
+                style={[styles.chaosActionCard, styles.chaosActionRestore]}
+                onPress={handleChaosRestore}
+                activeOpacity={0.8}
+              >
+                <View style={styles.chaosActionHeader}>
+                  <Text style={styles.chaosActionIcon}>🟢</Text>
+                  <Text style={styles.chaosActionTitle}>Restaurar Infraestrutura</Text>
+                </View>
+                <Text style={styles.chaosActionDesc}>
+                  Normaliza todos os nós para HEALTHY com métricas equilibradas e zera as anomalias.
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            <TouchableOpacity
+              style={styles.chaosCloseBtn}
+              onPress={() => setIsChaosModalVisible(false)}
+            >
+              <Text style={styles.chaosCloseBtnText}>Fechar Painel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 };
@@ -900,14 +1267,14 @@ const styles = StyleSheet.create({
     paddingBottom: 95,
   },
   headerCurved: {
-    backgroundColor: '#091122',
+    backgroundColor: '#1F242C',
     paddingHorizontal: 20,
     paddingTop: 12,
-    paddingBottom: 20,
-    borderBottomLeftRadius: 30,
-    borderBottomRightRadius: 30,
+    paddingBottom: 22,
+    borderBottomLeftRadius: 36,
+    borderBottomRightRadius: 36,
     borderBottomWidth: 1,
-    borderBottomColor: '#172554',
+    borderBottomColor: '#282E38',
   },
   headerTopRow: {
     flexDirection: 'row',
@@ -918,12 +1285,12 @@ const styles = StyleSheet.create({
   regionBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#0066FF20',
+    backgroundColor: '#38BDF820',
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: 20,
     borderWidth: 1,
-    borderColor: '#0066FF40',
+    borderColor: '#38BDF840',
     gap: 6,
   },
   activePulseDot: {
@@ -936,7 +1303,7 @@ const styles = StyleSheet.create({
     color: colors.neonCyan,
     fontSize: 10,
     fontWeight: '700',
-    fontFamily: 'monospace',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   logoutBtn: {
     paddingHorizontal: 8,
@@ -956,7 +1323,7 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontSize: 10,
     fontWeight: '700',
-    fontFamily: 'monospace',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   uptimeValRow: {
     flexDirection: 'row',
@@ -973,7 +1340,7 @@ const styles = StyleSheet.create({
     color: colors.status.healthy,
     fontSize: 12,
     fontWeight: '700',
-    fontFamily: 'monospace',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   uptimeSub: {
     color: colors.textMuted,
@@ -984,33 +1351,53 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
   },
-  refreshBtn: {
-    backgroundColor: '#0066FF25',
+  chaosMonkeyBtn: {
+    backgroundColor: '#7F1D1D25',
     borderWidth: 1,
-    borderColor: '#0066FF50',
+    borderColor: '#EF444460',
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chaosMonkeyIcon: {
+    fontSize: 14,
+  },
+  chaosMonkeyText: {
+    color: '#F87171',
+    fontSize: 8,
+    fontWeight: '900',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginTop: 2,
+  },
+  refreshBtn: {
+    backgroundColor: '#38BDF825',
+    borderWidth: 1,
+    borderColor: '#38BDF850',
     paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 14,
+    paddingVertical: 7,
+    borderRadius: 12,
     alignItems: 'center',
   },
   refreshIcon: {
-    fontSize: 16,
+    fontSize: 14,
   },
   refreshText: {
     color: colors.neonCyan,
     fontSize: 8,
     fontWeight: '900',
-    fontFamily: 'monospace',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     marginTop: 2,
   },
   timeRangeSelector: {
     flexDirection: 'row',
-    backgroundColor: '#0C152B',
+    backgroundColor: '#12161D',
     borderRadius: 12,
     padding: 3,
     marginTop: 16,
     borderWidth: 1,
-    borderColor: '#1E293B',
+    borderColor: '#282E38',
   },
   timeRangeBtn: {
     flex: 1,
@@ -1019,12 +1406,13 @@ const styles = StyleSheet.create({
     borderRadius: 8,
   },
   timeRangeBtnActive: {
-    backgroundColor: colors.neonBlue,
+    backgroundColor: colors.accentBlue,
   },
   timeRangeText: {
     color: colors.textMuted,
     fontSize: 10,
     fontWeight: '700',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   timeRangeTextActive: {
     color: '#FFFFFF',
@@ -1034,8 +1422,8 @@ const styles = StyleSheet.create({
     marginTop: 14,
   },
   provisionBtn: {
-    backgroundColor: '#1E293B',
-    borderWidth: 1.5,
+    backgroundColor: '#181C22',
+    borderWidth: 1,
     borderColor: '#38BDF8',
     borderRadius: 14,
     paddingVertical: 12,
@@ -1053,6 +1441,56 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '800',
   },
+  dockSection: {
+    marginTop: 14,
+    paddingHorizontal: 16,
+  },
+  dockSectionLabel: {
+    color: '#64748B',
+    fontSize: 9,
+    fontWeight: '800',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    letterSpacing: 0.5,
+    marginBottom: 8,
+  },
+  dockContainer: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  dockChip: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 6,
+    backgroundColor: '#181C22',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#282E38',
+    gap: 5,
+  },
+  dockDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  dockChipText: {
+    color: '#94A3B8',
+    fontSize: 10,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  dockLockIcon: {
+    fontSize: 9,
+  },
+  dockChipAll: {
+    flex: 1.2,
+  },
+  dockChipAllActive: {
+    backgroundColor: '#2563EB25',
+    borderColor: '#2563EB',
+  },
   filterSection: {
     marginTop: 14,
   },
@@ -1064,9 +1502,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 20,
-    backgroundColor: '#0D1527',
+    backgroundColor: '#181C22',
     borderWidth: 1,
-    borderColor: '#1E293B',
+    borderColor: '#282E38',
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
@@ -1108,9 +1546,9 @@ const styles = StyleSheet.create({
   },
   kpiCard: {
     flex: 1,
-    backgroundColor: colors.surfaceCard,
+    backgroundColor: '#181C22',
     borderWidth: 1,
-    borderColor: colors.surfaceBorder,
+    borderColor: '#282E38',
     borderRadius: 16,
     padding: 10,
     alignItems: 'center',
@@ -1119,7 +1557,7 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontSize: 9,
     fontWeight: '700',
-    fontFamily: 'monospace',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   kpiValue: {
     color: '#FFFFFF',
@@ -1130,6 +1568,211 @@ const styles = StyleSheet.create({
   kpiSub: {
     color: colors.textMuted,
     fontSize: 8,
+  },
+  latencyRadarCard: {
+    backgroundColor: '#181C22',
+    borderWidth: 1,
+    borderColor: '#282E38',
+    borderRadius: 16,
+    marginHorizontal: 16,
+    marginTop: 14,
+    padding: 14,
+  },
+  latencyRadarHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  latencyRadarTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  latencyRadarIcon: {
+    fontSize: 18,
+  },
+  latencyRadarTitle: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  latencyRadarSubtitle: {
+    color: '#64748B',
+    fontSize: 9,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  optimalRoutingBadge: {
+    backgroundColor: '#132B1D',
+    borderWidth: 1,
+    borderColor: '#1E462E',
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  optimalRoutingBadgeText: {
+    color: '#81C995',
+    fontSize: 9,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  latencyLinesContainer: {
+    gap: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#282E38',
+    paddingTop: 10,
+  },
+  latencyLineItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 3,
+  },
+  latencyLineLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  latencyLineDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  latencyCityName: {
+    color: '#E2E8F0',
+    fontSize: 11,
+    fontWeight: '600',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  latencyLineRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  latencyMs: {
+    fontSize: 11,
+    fontWeight: '800',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  latencyContext: {
+    color: '#64748B',
+    fontSize: 9,
+  },
+  statusBadgeM3: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 12,
+    borderWidth: 1,
+    gap: 4,
+  },
+  statusDotM3: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+  },
+  statusBadgeTextM3: {
+    fontSize: 9,
+    fontWeight: '800',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  chaosModalCard: {
+    width: '100%',
+    maxWidth: 420,
+    backgroundColor: '#181C22',
+    borderRadius: 18,
+    borderWidth: 1.5,
+    borderColor: '#282E38',
+    padding: 18,
+  },
+  chaosModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+    paddingBottom: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#282E38',
+  },
+  chaosModalTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  chaosModalIcon: {
+    fontSize: 20,
+  },
+  chaosModalTitle: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  chaosModalSubtitle: {
+    color: '#94A3B8',
+    fontSize: 10,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  chaosModalDesc: {
+    color: '#94A3B8',
+    fontSize: 11,
+    lineHeight: 16,
+    marginBottom: 14,
+  },
+  chaosActionsList: {
+    gap: 10,
+    marginBottom: 16,
+  },
+  chaosActionCard: {
+    backgroundColor: '#12161D',
+    borderRadius: 12,
+    borderWidth: 1,
+    padding: 12,
+  },
+  chaosActionOverload: {
+    borderColor: '#F28B8260',
+    backgroundColor: '#2D151540',
+  },
+  chaosActionCrash: {
+    borderColor: '#EF444460',
+    backgroundColor: '#450A0A40',
+  },
+  chaosActionRestore: {
+    borderColor: '#81C99560',
+    backgroundColor: '#132B1D40',
+  },
+  chaosActionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 4,
+  },
+  chaosActionIcon: {
+    fontSize: 16,
+  },
+  chaosActionTitle: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  chaosActionDesc: {
+    color: '#94A3B8',
+    fontSize: 10,
+    lineHeight: 14,
+  },
+  chaosCloseBtn: {
+    paddingVertical: 11,
+    borderRadius: 10,
+    backgroundColor: '#282E38',
+    alignItems: 'center',
+  },
+  chaosCloseBtnText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '700',
   },
   pinnedSection: {
     marginTop: 18,
@@ -1646,5 +2289,116 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 12,
     fontWeight: '800',
+  },
+  cardActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 8,
+    marginTop: 10,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#1E293B',
+  },
+  cardActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#0F172A',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    gap: 4,
+  },
+  cardActionBtnDisabled: {
+    opacity: 0.6,
+  },
+  cardActionBtnDelete: {
+    borderColor: '#7F1D1D',
+    backgroundColor: '#450A0A33',
+  },
+  cardActionIcon: {
+    fontSize: 11,
+  },
+  cardActionText: {
+    color: '#94A3B8',
+    fontSize: 10,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+  cardActionTextRebooting: {
+    color: '#38BDF8',
+    fontSize: 10,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+  cardActionTextDelete: {
+    color: '#F87171',
+  },
+  rebootingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#0C1B33',
+    borderColor: '#38BDF8',
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  rebootingBadgeText: {
+    color: '#38BDF8',
+    fontSize: 9,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+  editModalCard: {
+    width: '100%',
+    maxWidth: 400,
+    backgroundColor: '#0F172A',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+    padding: 18,
+  },
+  editModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  editModalTitle: {
+    color: '#F8FAFC',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  editModalActionsRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 10,
+    marginTop: 18,
+  },
+  cancelModalBtn: {
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  cancelModalBtnText: {
+    color: '#94A3B8',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  saveModalBtn: {
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+    borderRadius: 8,
+    backgroundColor: '#0284C7',
+  },
+  saveModalBtnText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
   },
 });

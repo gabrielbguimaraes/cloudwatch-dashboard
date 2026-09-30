@@ -4,6 +4,7 @@ import React, { createContext, useContext, useState, useEffect, ReactNode } from
 import type { UserSession, CloudProvider } from '../types';
 import * as Keychain from 'react-native-keychain';
 import EncryptedStorage from 'react-native-encrypted-storage';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export interface OciStoredCredentials {
   provider: 'OCI';
@@ -294,6 +295,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     try {
       await Keychain.resetGenericPassword({ service: KEYCHAIN_SERVICE });
       await EncryptedStorage.removeItem(STORAGE_KEY_CREDENTIALS);
+      await AsyncStorage.removeItem('@cloudwatch_resources');
+      await AsyncStorage.removeItem('@cloudwatch:pinned_resources');
       setHasStoredCredentials(false);
       setStoredCredentials(null);
     } catch (err) {
@@ -310,6 +313,12 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   const logout = () => {
+    AsyncStorage.removeItem('@cloudwatch_resources').catch((err) =>
+      console.warn('Erro ao remover recursos no logout:', err)
+    );
+    AsyncStorage.removeItem('@cloudwatch:pinned_resources').catch((err) =>
+      console.warn('Erro ao remover pins no logout:', err)
+    );
     setSession(null);
   };
 

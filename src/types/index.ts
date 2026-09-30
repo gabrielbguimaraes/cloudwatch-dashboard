@@ -16,7 +16,7 @@ export type CloudServiceType =
   | 'GCP_RUN';
 
 /** Status do Semáforo Visual de Saúde */
-export type HealthStatus = 'HEALTHY' | 'WARNING' | 'CRITICAL' | 'OFFLINE';
+export type HealthStatus = 'HEALTHY' | 'WARNING' | 'CRITICAL' | 'OFFLINE' | 'REBOOTING';
 
 /** Ciclo de Vida Nativo dos Recursos */
 export type LifecycleState =
@@ -155,6 +155,8 @@ export interface CloudResource {
   lastHealthCheck: string;
   isPinned?: boolean;
   metadata?: OciComputeMetadata | OciDatabaseMetadata | Record<string, any>;
+  cpuUsage?: number;
+  lastUpdated?: string;
 }
 
 /** Ponto de Série Temporal de Métricas para Gráficos */
