@@ -58,12 +58,8 @@ export const SerialConsoleModal: React.FC<SerialConsoleModalProps> = ({
   // Prompt completo para o historico no buffer do terminal
   const promptUser = `${promptPrefix}@${instanceName}:~$`;
 
-  // Hostname compacto para a barra de input (evita estourar a tela em mobile)
-  const shortHost =
-    instanceName.length > 12
-      ? `${instanceName.slice(0, 10)}..`
-      : instanceName;
-  const inputPrompt = `${promptPrefix}@${shortHost}:~$`;
+  // Prompt enxuto para a linha de input (garante total espaco para digitacao e o botao Executar)
+  const inputPrompt = `${promptPrefix}$`;
 
   // Inicializacao do buffer do console com banner de boot limpo
   useEffect(() => {
@@ -585,31 +581,34 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    maxWidth: 120,
     flexShrink: 0,
   },
   textInput: {
     flex: 1,
-    minWidth: 60,
+    minWidth: 80,
     color: '#81C995',
     fontSize: 11,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    paddingVertical: 4,
-    paddingHorizontal: 4,
+    paddingVertical: 5,
+    paddingHorizontal: 8,
+    backgroundColor: '#0A0D12',
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#1E242C',
   },
   executeBtn: {
-    backgroundColor: '#20242C',
+    backgroundColor: '#1A365D',
     paddingHorizontal: 12,
     height: 32,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#3C4043',
+    borderColor: '#3182CE',
     alignItems: 'center',
     justifyContent: 'center',
     flexShrink: 0,
   },
   executeBtnText: {
-    color: '#E8EAED',
+    color: '#EBF8FF',
     fontSize: 11,
     fontWeight: '700',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',

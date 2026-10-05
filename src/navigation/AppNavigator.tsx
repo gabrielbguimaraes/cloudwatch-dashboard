@@ -12,9 +12,7 @@ import { MetricsDetailScreen } from '../screens/MetricsDetailScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
 import { NEUTRAL_THEME, CLOUD_PALETTES } from '../theme/tokens';
 import { useAuth } from '../context/AuthContext';
-import { VectorAssetRenderer } from '../components/common/VectorAssetRenderer';
 import { DashboardIcon } from '../components/common/AppIcons';
-import SettingsSvg from '../assets/images/red-setting-line-icon-svg-by-Vexels.svg';
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -67,12 +65,9 @@ const MainTabs: React.FC = () => {
           tabBarLabel: 'GOVERNANCA',
           tabBarIcon: ({ focused, color }) => (
             <View style={[styles.tabIconBadge, focused && { borderColor: color, backgroundColor: '#20242C' }]}>
-              <VectorAssetRenderer
-                label="GOV"
-                size={18}
-                renderSvg={() => (
-                  <SettingsSvg width={18} height={18} fill={focused ? '#DE2529' : color} />
-                )}
+              <Image
+                source={require('../assets/images/settings-4-512.png')}
+                style={{ width: 18, height: 18, tintColor: color, resizeMode: 'contain' }}
               />
             </View>
           ),
