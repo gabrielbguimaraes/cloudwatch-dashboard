@@ -8,9 +8,11 @@ import {
   Alert,
   TextInput,
   Platform,
+  Image,
 } from 'react-native';
 import type { CloudResource } from '../types';
 import { NEUTRAL_THEME } from '../theme/tokens';
+import { VectorAssetRenderer } from './common/VectorAssetRenderer';
 
 interface InstanceActionSheetProps {
   visible: boolean;
@@ -148,7 +150,12 @@ export const InstanceActionSheet: React.FC<InstanceActionSheetProps> = ({
                 activeOpacity={0.7}
               >
                 <View style={styles.actionIconPlaceholder}>
-                  <Text style={styles.actionLetter}>R</Text>
+                  <VectorAssetRenderer
+                    label="R"
+                    size={18}
+                    source={require('../assets/images/power-512.png')}
+                    tintColor="#8AB4F8"
+                  />
                 </View>
                 <View style={styles.actionTextContainer}>
                   <Text style={styles.actionTitle}>Reiniciar Instancia</Text>

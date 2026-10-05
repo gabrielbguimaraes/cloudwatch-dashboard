@@ -217,16 +217,25 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
               </View>
             </View>
 
-            <View style={styles.headerRightActions}>
+            <View style={styles.actionGroup}>
               <TouchableOpacity
                 style={styles.chaosBtn}
                 onPress={() => setIsChaosModalVisible(true)}
+                activeOpacity={0.7}
               >
-                <Text style={styles.chaosBtnText}>INCIDENTES</Text>
+                <Text style={styles.chaosBtnText} numberOfLines={1}>
+                  Incidentes
+                </Text>
               </TouchableOpacity>
 
-              <TouchableOpacity style={styles.pdfBtn} onPress={handleExportPdf}>
-                <Text style={styles.pdfBtnText}>RELATORIO PDF</Text>
+              <TouchableOpacity
+                style={styles.pdfBtn}
+                onPress={handleExportPdf}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.pdfBtnText} numberOfLines={1}>
+                  Relatorio PDF
+                </Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -606,37 +615,47 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     fontWeight: '700',
   },
-  headerRightActions: {
+  actionGroup: {
     flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
     gap: 8,
   },
   chaosBtn: {
-    backgroundColor: '#282E38',
+    height: 36,
+    paddingHorizontal: 12,
+    paddingVertical: 0,
+    borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#3C4043',
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-    borderRadius: 6,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+    backgroundColor: '#20242C',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   chaosBtnText: {
     color: '#F28B82',
-    fontSize: 9,
-    fontWeight: '800',
+    fontSize: 12,
+    fontWeight: '600',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    textAlign: 'center',
   },
   pdfBtn: {
-    backgroundColor: '#20242C',
+    height: 36,
+    paddingHorizontal: 12,
+    paddingVertical: 0,
+    borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#3C4043',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 6,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+    backgroundColor: '#20242C',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   pdfBtnText: {
     color: '#E8EAED',
-    fontSize: 9,
-    fontWeight: '800',
+    fontSize: 12,
+    fontWeight: '600',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    textAlign: 'center',
   },
   kpiContainer: {
     flexDirection: 'row',

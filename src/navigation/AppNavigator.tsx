@@ -2,7 +2,7 @@ import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { Text, View, StyleSheet, Platform } from 'react-native';
+import { Text, View, StyleSheet, Platform, Image } from 'react-native';
 
 import { SplashScreen } from '../screens/SplashScreen';
 import { RegisterScreen } from '../screens/RegisterScreen';
@@ -12,6 +12,7 @@ import { MetricsDetailScreen } from '../screens/MetricsDetailScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
 import { NEUTRAL_THEME, CLOUD_PALETTES } from '../theme/tokens';
 import { useAuth } from '../context/AuthContext';
+import { VectorAssetRenderer } from '../components/common/VectorAssetRenderer';
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -49,7 +50,10 @@ const MainTabs: React.FC = () => {
           tabBarLabel: 'METRICAS',
           tabBarIcon: ({ focused, color }) => (
             <View style={[styles.tabIconBadge, focused && { borderColor: color, backgroundColor: '#20242C' }]}>
-              <Text style={[styles.tabIconText, { color }]}>MTR</Text>
+              <Image
+                source={require('../assets/images/analytics-2-512.png')}
+                style={{ width: 18, height: 18, tintColor: color, resizeMode: 'contain' }}
+              />
             </View>
           ),
         }}
@@ -61,7 +65,12 @@ const MainTabs: React.FC = () => {
           tabBarLabel: 'GOVERNANCA',
           tabBarIcon: ({ focused, color }) => (
             <View style={[styles.tabIconBadge, focused && { borderColor: color, backgroundColor: '#20242C' }]}>
-              <Text style={[styles.tabIconText, { color }]}>GOV</Text>
+              <VectorAssetRenderer
+                label="GOV"
+                size={18}
+                source={require('../assets/images/red-setting-line-icon-svg-by-Vexels.svg')}
+                tintColor={focused ? '#DE2529' : color}
+              />
             </View>
           ),
         }}

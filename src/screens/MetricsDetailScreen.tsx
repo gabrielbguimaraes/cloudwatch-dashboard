@@ -21,6 +21,7 @@ import {
   generateSimulatedLogs,
 } from '../services/simulationService';
 import { Print, sharePdfAsync } from '../services/pdfService';
+import { SerialConsoleModal } from '../components/SerialConsoleModal';
 import type { CloudResource } from '../types';
 
 export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = ({
@@ -540,67 +541,15 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
         </View>
       </ScrollView>
 
-      {/* Modal: Console Serial Linux Emulado */}
-      <Modal
+      {/* Terminal Linux Interativo (Console Serial de VM) */}
+      <SerialConsoleModal
         visible={isSerialConsoleOpen}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setIsSerialConsoleOpen(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.serialConsoleCard}>
-            <View style={styles.serialConsoleHeader}>
-              <Text style={styles.serialConsoleTitle}>Console Serial Linux (ttyS0)</Text>
-              <TouchableOpacity
-                onPress={() => setIsSerialConsoleOpen(false)}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              >
-                <Text style={styles.modalCloseText}>FECHAR</Text>
-              </TouchableOpacity>
-            </View>
-
-            <View style={styles.serialTerminalScreen}>
-              <ScrollView
-                style={styles.serialConsoleBody}
-                contentContainerStyle={styles.serialConsoleContent}
-                showsVerticalScrollIndicator={false}
-              >
-                <Text style={styles.serialConsoleLine}>
-                  <Text style={styles.serialConsoleGreen}>[ 0.000000] </Text>
-                  <Text style={styles.serialConsoleWhite}>Linux version 6.5.0-oracle-aarch64 (root@builder)</Text>
-                </Text>
-                <Text style={styles.serialConsoleLine}>
-                  <Text style={styles.serialConsoleGreen}>[ 1.204910] </Text>
-                  <Text style={styles.serialConsoleWhite}>systemd[1]: Reached target Network (Pre).</Text>
-                </Text>
-                <Text style={styles.serialConsoleLine}>
-                  <Text style={styles.serialConsoleGreen}>[ 2.100412] </Text>
-                  <Text style={styles.serialConsoleWhite}>oci-agent[782]: Telemetry heartbeat acknowledged (sa-saopaulo-1).</Text>
-                </Text>
-                <Text style={styles.serialConsoleLine}>
-                  <Text style={styles.serialConsoleGreen}>[ 3.409112] </Text>
-                  <Text style={styles.serialConsoleWhite}>nginx[1042]: Listening on port 443 with TLS active.</Text>
-                </Text>
-                <Text style={styles.serialConsoleLine}>
-                  <Text style={styles.serialConsoleGreen}>[ 12.890123] </Text>
-                  <Text style={styles.serialConsoleWhite}>cloudwatch-probe: CPU utilization monitored via socket probe.</Text>
-                </Text>
-                <Text style={styles.serialConsolePromptRow}>
-                  <Text style={styles.serialConsolePromptUser}>ubuntu@server-node:~$ </Text>
-                  <Text style={styles.serialConsoleCursor}>_</Text>
-                </Text>
-              </ScrollView>
-            </View>
-
-            <TouchableOpacity
-              style={styles.serialConsoleCloseBtn}
-              onPress={() => setIsSerialConsoleOpen(false)}
-            >
-              <Text style={styles.serialConsoleCloseBtnText}>Fechar Console</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
+        onClose={() => setIsSerialConsoleOpen(false)}
+        instance={activeInstance}
+        onRestartInstance={(id) => {
+          restartInstance(id);
+        }}
+      />
 
       {/* Modal: Edicao de Nome e Shape da Instancia (Sem Emojis) */}
       <Modal
