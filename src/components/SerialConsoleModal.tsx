@@ -47,13 +47,23 @@ export const SerialConsoleModal: React.FC<SerialConsoleModalProps> = ({
       ? 't3.medium'
       : 'e2-standard-4');
 
-  // Prompt Dinamico conforme especificacao
-  const promptUser =
+  // Prefixo de usuario por provedor de nuvem
+  const promptPrefix =
     provider === 'AWS'
-      ? `ec2-user@${instanceName}:~$`
+      ? 'ec2-user'
       : provider === 'GCP'
-      ? `sa_admin@${instanceName}:~$`
-      : `opc@${instanceName}:~$`;
+      ? 'sa_admin'
+      : 'opc';
+
+  // Prompt completo para o historico no buffer do terminal
+  const promptUser = `${promptPrefix}@${instanceName}:~$`;
+
+  // Hostname compacto para a barra de input (evita estourar a tela em mobile)
+  const shortHost =
+    instanceName.length > 12
+      ? `${instanceName.slice(0, 10)}..`
+      : instanceName;
+  const inputPrompt = `${promptPrefix}@${shortHost}:~$`;
 
   // Inicializacao do buffer do console com banner de boot limpo
   useEffect(() => {
@@ -62,7 +72,7 @@ export const SerialConsoleModal: React.FC<SerialConsoleModalProps> = ({
         {
           id: 'b-1',
           type: 'system',
-          text: `Linux version 6.5.0-oracle-aarch64 (root@builder) #1 SMP PREEMPT GNU/Linux`,
+          text: `Linux version 6.5.0-${provider.toLowerCase()}-aarch64 (root@builder) #1 SMP PREEMPT GNU/Linux`,
         },
         {
           id: 'b-2',
@@ -72,7 +82,7 @@ export const SerialConsoleModal: React.FC<SerialConsoleModalProps> = ({
         {
           id: 'b-3',
           type: 'system',
-          text: `cloudwatch-probe: Attached to ${instanceName} [${provider}]. Digite 'help' para ajuda.`,
+          text: `cloudwatch-probe: Conectado a ${instanceName} [${provider}].\nDica: Toque nos comandos rapidos abaixo ou digite 'help' e toque em Executar.`,
         },
       ]);
       setCommandInput('');
@@ -90,8 +100,9 @@ export const SerialConsoleModal: React.FC<SerialConsoleModalProps> = ({
   }, [lines, visible]);
 
   const executeCommand = (cmdText: string) => {
-    const trimmed = cmdText.trim();
-    if (!trimmed) return;
+    // Se o usuario pressionar Executar sem digitar nada, executa 'help' para fornecer feedback imediato
+    const effectiveCmd = cmdText.trim() || 'help';
+    const trimmed = effectiveCmd;
 
     const promptEntry: TerminalLine = {
       id: `p-${Date.now()}`,
@@ -101,7 +112,7 @@ export const SerialConsoleModal: React.FC<SerialConsoleModalProps> = ({
 
     const lower = trimmed.toLowerCase();
 
-    // 10. clear
+    // Comando clear
     if (lower === 'clear') {
       setLines([]);
       setCommandInput('');
@@ -140,19 +151,19 @@ export const SerialConsoleModal: React.FC<SerialConsoleModalProps> = ({
       newLines.push({
         id: `out-${Date.now()}-1`,
         type: 'output',
-        text: `Lista comandos: help, uname -a, uptime, df -h, free -m, top -n 1, ip a, clear, reboot, systemctl status`,
+        text: `Comandos disponiveis:\n- help: exibe esta lista de ajuda\n- uptime: tempo de atividade e load average\n- free -m: consumo de memoria RAM e Swap\n- top -n 1: processos ativos e utilizacao de CPU\n- ip a: interfaces de rede e enderecos IP\n- df -h: utilizacao do sistema de arquivos / disco\n- uname -a: versao do kernel Linux e arquitetura\n- ps: processos em execucao na VM\n- ping: teste de latencia de rede ICMP\n- systemctl status: status dos daemons de telemetria\n- reboot: reinicializacao remota da maquina\n- clear: limpa o buffer do terminal`,
       });
     } else if (lower === 'uname -a') {
       newLines.push({
         id: `out-${Date.now()}-1`,
         type: 'output',
-        text: `Linux ${instanceName} 6.5.0-oracle-aarch64 #1 SMP PREEMPT GNU/Linux`,
+        text: `Linux ${instanceName} 6.5.0-${provider.toLowerCase()}-aarch64 #1 SMP PREEMPT GNU/Linux`,
       });
     } else if (lower === 'uptime') {
       newLines.push({
         id: `out-${Date.now()}-1`,
         type: 'output',
-        text: `18:42:10 up 14 days, 3:22, 1 user, load average: 0.18, 0.22, 0.15`,
+        text: `22:16:10 up 14 days, 3:22, 1 user, load average: 0.18, 0.22, 0.15`,
       });
     } else if (lower === 'free -m' || lower === 'free') {
       const formattedTable = [
@@ -179,14 +190,14 @@ export const SerialConsoleModal: React.FC<SerialConsoleModalProps> = ({
       });
     } else if (lower === 'top -n 1' || lower === 'top') {
       const topOutput = [
-        `top - 18:42:15 up 14 days,  3:22,  1 user,  load average: 0.18, 0.22, 0.15`,
+        `top - 22:16:15 up 14 days,  3:22,  1 user,  load average: 0.18, 0.22, 0.15`,
         `Tasks: 112 total,   1 running, 111 sleeping,   0 stopped,   0 zombie`,
         `%Cpu(s):  ${cpuPercent.toFixed(1)} us,  1.2 sy,  0.0 ni, ${(Math.max(0, 100 - cpuPercent - 1.2)).toFixed(1)} id,  0.1 wa,  0.0 hi`,
         `MiB Mem :  ${totalMb}.0 total,   ${freeMb}.0 free,   ${usedMb}.0 used,   2140.0 buff/cache`,
         ``,
         `  PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND`,
         ` 1042 root      20   0  312450  45210  12400 S  ${cpuPercent.toFixed(1)}   ${memPercent.toFixed(1)}   4:12.30 cloudwatch-mon`,
-        `  782 opc       20   0  145890  22100   8400 S   0.8   1.8   1:05.12 oci-agent`,
+        `  782 ${promptPrefix}       20   0  145890  22100   8400 S   0.8   1.8   1:05.12 ${provider.toLowerCase()}-agent`,
         `    1 root      20   0  168420  11420   8120 S   0.0   0.9   0:14.88 systemd`,
       ].join('\n');
       newLines.push({
@@ -194,7 +205,7 @@ export const SerialConsoleModal: React.FC<SerialConsoleModalProps> = ({
         type: 'output',
         text: topOutput,
       });
-    } else if (lower === 'ip a' || lower === 'ip addr') {
+    } else if (lower === 'ip a' || lower === 'ip addr' || lower === 'ifconfig') {
       const ipOutput = [
         '1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000',
         '    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00',
@@ -212,6 +223,56 @@ export const SerialConsoleModal: React.FC<SerialConsoleModalProps> = ({
         type: 'output',
         text: ipOutput,
       });
+    } else if (lower === 'ps' || lower === 'ps aux' || lower === 'ps -ef') {
+      const psOutput = [
+        'USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND',
+        'root         1  0.0  0.9 168420 11420 ?        Ss   Sep24   0:14 /sbin/init',
+        `root      1042  ${(cpuPercent / 10).toFixed(1)}  ${(memPercent / 10).toFixed(1)} 312450 45210 ?        Sl   Sep24   4:12 cloudwatch-mon`,
+        `${promptPrefix}   782  0.8  1.8 145890 22100 ?        S    Sep24   1:05 ${provider.toLowerCase()}-agent`,
+        `${promptPrefix}  3104  0.0  0.4  14210  4120 pts/0    R+   22:16   0:00 ps aux`,
+      ].join('\n');
+      newLines.push({
+        id: `out-${Date.now()}-1`,
+        type: 'output',
+        text: psOutput,
+      });
+    } else if (lower.startsWith('ping')) {
+      const pingOutput = [
+        'PING 8.8.8.8 (8.8.8.8) 56(84) bytes of data.',
+        '64 bytes from 8.8.8.8: icmp_seq=1 ttl=118 time=12.4 ms',
+        '64 bytes from 8.8.8.8: icmp_seq=2 ttl=118 time=11.9 ms',
+        '--- 8.8.8.8 ping statistics ---',
+        '2 packets transmitted, 2 received, 0% packet loss, time 1002ms',
+      ].join('\n');
+      newLines.push({
+        id: `out-${Date.now()}-1`,
+        type: 'output',
+        text: pingOutput,
+      });
+    } else if (lower === 'whoami') {
+      newLines.push({
+        id: `out-${Date.now()}-1`,
+        type: 'output',
+        text: promptPrefix,
+      });
+    } else if (lower === 'date') {
+      newLines.push({
+        id: `out-${Date.now()}-1`,
+        type: 'output',
+        text: new Date().toUTCString(),
+      });
+    } else if (lower === 'pwd') {
+      newLines.push({
+        id: `out-${Date.now()}-1`,
+        type: 'output',
+        text: `/home/${promptPrefix}`,
+      });
+    } else if (lower === 'ls' || lower === 'ls -la' || lower === 'll') {
+      newLines.push({
+        id: `out-${Date.now()}-1`,
+        type: 'output',
+        text: `total 32\ndrwxr-xr-x 4 ${promptPrefix} ${promptPrefix} 4096 Oct  4 22:00 .\ndrwxr-xr-x 3 root root 4096 Sep 24 10:00 ..\n-rw-r--r-- 1 ${promptPrefix} ${promptPrefix}  220 Sep 24 10:00 .bash_logout\n-rw-r--r-- 1 ${promptPrefix} ${promptPrefix} 3771 Sep 24 10:00 .bashrc\n-rw-r--r-- 1 ${promptPrefix} ${promptPrefix} 1024 Oct  4 21:30 cloudwatch-telemetry.json\nsrwxr-xr-x 1 ${promptPrefix} ${promptPrefix}    0 Oct  4 21:00 telemetry.sock`,
+      });
     } else if (
       lower.startsWith('systemctl status') ||
       lower === 'systemctl status cloudwatch-agent'
@@ -219,7 +280,7 @@ export const SerialConsoleModal: React.FC<SerialConsoleModalProps> = ({
       newLines.push({
         id: `out-${Date.now()}-1`,
         type: 'output',
-        text: `Active: active (running) since Tue 2024-09-24; Telemetry sync interval: 10s;\nStatus: HEALTHY`,
+        text: `● cloudwatch-agent.service - CloudWatch Monitoring Daemon\n     Loaded: loaded (/etc/systemd/system/cloudwatch-agent.service; enabled)\n     Active: active (running) since Tue 2024-09-24 18:00:00 UTC\n     Main PID: 1042 (cloudwatch-mon)\n     Status: "HEALTHY (metrics interval: 10s)"`,
       });
     } else if (lower === 'reboot') {
       newLines.push({
@@ -240,7 +301,7 @@ export const SerialConsoleModal: React.FC<SerialConsoleModalProps> = ({
       newLines.push({
         id: `out-${Date.now()}-1`,
         type: 'error',
-        text: `bash: ${trimmed}: command not found.\nDigite 'help' para comandos suportados.`,
+        text: `bash: ${trimmed}: command not found.\nDigite 'help' ou toque nos comandos rapidos abaixo.`,
       });
     }
 
@@ -264,7 +325,7 @@ export const SerialConsoleModal: React.FC<SerialConsoleModalProps> = ({
           <View style={styles.terminalHeader}>
             <View style={styles.terminalTitleGroup}>
               <View style={styles.terminalDot} />
-              <Text style={styles.terminalTitle} numberOfLines={1}>
+              <Text style={styles.terminalTitle} numberOfLines={1} ellipsizeMode="tail">
                 Console Serial ({instanceName} - {shape})
               </Text>
             </View>
@@ -272,8 +333,9 @@ export const SerialConsoleModal: React.FC<SerialConsoleModalProps> = ({
               style={styles.closeBtn}
               onPress={onClose}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              activeOpacity={0.7}
             >
-              <Text style={styles.closeBtnText}>Fechar Terminal</Text>
+              <Text style={styles.closeBtnText}>Fechar</Text>
             </TouchableOpacity>
           </View>
 
@@ -283,6 +345,7 @@ export const SerialConsoleModal: React.FC<SerialConsoleModalProps> = ({
             style={styles.terminalOutputBuffer}
             contentContainerStyle={styles.terminalOutputContent}
             showsVerticalScrollIndicator={true}
+            keyboardShouldPersistTaps="handled"
           >
             {lines.map((line) => {
               if (line.type === 'prompt') {
@@ -314,9 +377,50 @@ export const SerialConsoleModal: React.FC<SerialConsoleModalProps> = ({
             })}
           </ScrollView>
 
+          {/* Barra de Comandos Rapidos (Atalhos de 1 Toque) */}
+          <View style={styles.quickCommandsBar}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.quickCommandsContent}
+              keyboardShouldPersistTaps="handled"
+            >
+              {[
+                'help',
+                'uptime',
+                'free -m',
+                'top -n 1',
+                'ip a',
+                'df -h',
+                'uname -a',
+                'ps',
+                'ping',
+                'systemctl status',
+                'reboot',
+                'clear',
+              ].map((cmd) => (
+                <TouchableOpacity
+                  key={cmd}
+                  style={styles.quickCmdChip}
+                  onPress={() => executeCommand(cmd)}
+                  activeOpacity={0.7}
+                  hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
+                >
+                  <Text style={styles.quickCmdText}>{cmd}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+
           {/* Linha de Comando e Prompt Ativo */}
           <View style={styles.inputRow}>
-            <Text style={styles.activePromptText}>{promptUser} </Text>
+            <Text
+              style={styles.activePromptText}
+              numberOfLines={1}
+              ellipsizeMode="middle"
+            >
+              {inputPrompt}{' '}
+            </Text>
             <TextInput
               ref={inputRef}
               style={styles.textInput}
@@ -334,6 +438,7 @@ export const SerialConsoleModal: React.FC<SerialConsoleModalProps> = ({
               style={styles.executeBtn}
               onPress={() => executeCommand(commandInput)}
               activeOpacity={0.7}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
               <Text style={styles.executeBtnText}>Executar</Text>
             </TouchableOpacity>
@@ -349,11 +454,11 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.85)',
     justifyContent: 'center',
-    padding: 12,
+    padding: 10,
   },
   terminalCard: {
     flex: 1,
-    maxHeight: '92%',
+    maxHeight: '94%',
     backgroundColor: '#0A0D12',
     borderWidth: 1,
     borderColor: '#1E242C',
@@ -367,7 +472,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#141820',
     borderBottomWidth: 1,
     borderBottomColor: '#1E242C',
-    paddingHorizontal: 14,
+    paddingHorizontal: 12,
     paddingVertical: 10,
   },
   terminalTitleGroup: {
@@ -375,6 +480,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
     flex: 1,
+    flexShrink: 1,
     marginRight: 8,
   },
   terminalDot: {
@@ -388,6 +494,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    flex: 1,
   },
   closeBtn: {
     backgroundColor: '#20242C',
@@ -396,6 +503,7 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.12)',
+    flexShrink: 0,
   },
   closeBtnText: {
     color: '#E8EAED',
@@ -437,13 +545,38 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     lineHeight: 16,
   },
+  quickCommandsBar: {
+    backgroundColor: '#0D1016',
+    borderTopWidth: 1,
+    borderTopColor: '#1A1E26',
+    paddingVertical: 6,
+  },
+  quickCommandsContent: {
+    paddingHorizontal: 8,
+    gap: 6,
+    alignItems: 'center',
+  },
+  quickCmdChip: {
+    backgroundColor: '#181D26',
+    borderWidth: 1,
+    borderColor: '#2A303D',
+    borderRadius: 5,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  quickCmdText: {
+    color: '#8AB4F8',
+    fontSize: 10,
+    fontWeight: '600',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
   inputRow: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#10141C',
     borderTopWidth: 1,
     borderTopColor: '#1E242C',
-    paddingHorizontal: 10,
+    paddingHorizontal: 8,
     paddingVertical: 8,
     gap: 6,
   },
@@ -452,9 +585,12 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    maxWidth: 120,
+    flexShrink: 0,
   },
   textInput: {
     flex: 1,
+    minWidth: 60,
     color: '#81C995',
     fontSize: 11,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
@@ -463,11 +599,14 @@ const styles = StyleSheet.create({
   },
   executeBtn: {
     backgroundColor: '#20242C',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingHorizontal: 12,
+    height: 32,
     borderRadius: 6,
     borderWidth: 1,
     borderColor: '#3C4043',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
   },
   executeBtnText: {
     color: '#E8EAED',

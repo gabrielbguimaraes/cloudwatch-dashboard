@@ -208,9 +208,11 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
             <View style={styles.headerLeft}>
               <CloudLogo provider={activeProvider} size={32} />
               <View style={styles.headerMeta}>
-                <Text style={styles.providerName}>{activePalette.name}</Text>
+                <Text style={styles.providerName} numberOfLines={1} ellipsizeMode="tail">
+                  {activePalette.name}
+                </Text>
                 <View style={styles.regionBadge}>
-                  <Text style={styles.regionText}>
+                  <Text style={styles.regionText} numberOfLines={1}>
                     {activeAccountConfig?.region || activePalette.defaultRegion}
                   </Text>
                 </View>
@@ -234,7 +236,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
                 activeOpacity={0.7}
               >
                 <Text style={styles.pdfBtnText} numberOfLines={1}>
-                  Relatorio PDF
+                  Relatório PDF
                 </Text>
               </TouchableOpacity>
             </View>
@@ -576,7 +578,7 @@ const styles = StyleSheet.create({
     paddingBottom: 40,
   },
   headerCurved: {
-    paddingHorizontal: 20,
+    paddingHorizontal: 16,
     paddingTop: 16,
     paddingBottom: 24,
     borderBottomLeftRadius: 32,
@@ -587,19 +589,25 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 20,
+    marginBottom: 18,
+    gap: 8,
   },
   headerLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: 8,
+    flex: 1,
+    flexShrink: 1,
+    marginRight: 6,
   },
   headerMeta: {
     gap: 2,
+    flex: 1,
+    flexShrink: 1,
   },
   providerName: {
     color: '#E8EAED',
-    fontSize: 16,
+    fontSize: 13,
     fontWeight: '800',
   },
   regionBadge: {
@@ -619,40 +627,43 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'flex-end',
-    gap: 8,
+    gap: 6,
+    flexShrink: 0,
   },
   chaosBtn: {
-    height: 36,
-    paddingHorizontal: 12,
+    height: 32,
+    paddingHorizontal: 8,
     paddingVertical: 0,
-    borderRadius: 8,
+    borderRadius: 6,
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.12)',
     backgroundColor: '#20242C',
     alignItems: 'center',
     justifyContent: 'center',
+    flexShrink: 0,
   },
   chaosBtnText: {
     color: '#F28B82',
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '600',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     textAlign: 'center',
   },
   pdfBtn: {
-    height: 36,
-    paddingHorizontal: 12,
+    height: 32,
+    paddingHorizontal: 8,
     paddingVertical: 0,
-    borderRadius: 8,
+    borderRadius: 6,
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.12)',
     backgroundColor: '#20242C',
     alignItems: 'center',
     justifyContent: 'center',
+    flexShrink: 0,
   },
   pdfBtnText: {
     color: '#E8EAED',
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '600',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     textAlign: 'center',
