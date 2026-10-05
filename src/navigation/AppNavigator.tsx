@@ -13,6 +13,7 @@ import { SettingsScreen } from '../screens/SettingsScreen';
 import { NEUTRAL_THEME, CLOUD_PALETTES } from '../theme/tokens';
 import { useAuth } from '../context/AuthContext';
 import { VectorAssetRenderer } from '../components/common/VectorAssetRenderer';
+import { DashboardIcon } from '../components/common/AppIcons';
 import SettingsSvg from '../assets/images/red-setting-line-icon-svg-by-Vexels.svg';
 
 const Stack = createNativeStackNavigator();
@@ -39,7 +40,7 @@ const MainTabs: React.FC = () => {
           tabBarLabel: 'PAINEL',
           tabBarIcon: ({ focused, color }) => (
             <View style={[styles.tabIconBadge, focused && { borderColor: color, backgroundColor: '#20242C' }]}>
-              <Text style={[styles.tabIconText, { color }]}>DSH</Text>
+              <DashboardIcon size={18} color={color} focused={focused} />
             </View>
           ),
         }}

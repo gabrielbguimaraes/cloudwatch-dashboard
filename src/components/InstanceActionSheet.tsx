@@ -13,6 +13,7 @@ import {
 import type { CloudResource } from '../types';
 import { NEUTRAL_THEME } from '../theme/tokens';
 import { VectorAssetRenderer } from './common/VectorAssetRenderer';
+import { EditIcon, TrashIcon } from './common/AppIcons';
 
 interface InstanceActionSheetProps {
   visible: boolean;
@@ -171,7 +172,7 @@ export const InstanceActionSheet: React.FC<InstanceActionSheetProps> = ({
                 activeOpacity={0.7}
               >
                 <View style={styles.actionIconPlaceholder}>
-                  <Text style={styles.actionLetter}>E</Text>
+                  <EditIcon size={18} color="#FDD663" />
                 </View>
                 <View style={styles.actionTextContainer}>
                   <Text style={styles.actionTitle}>Editar Especificacoes</Text>
@@ -187,7 +188,7 @@ export const InstanceActionSheet: React.FC<InstanceActionSheetProps> = ({
                 activeOpacity={0.7}
               >
                 <View style={[styles.actionIconPlaceholder, styles.dangerIconBox]}>
-                  <Text style={[styles.actionLetter, styles.dangerText]}>X</Text>
+                  <TrashIcon size={18} color="#F28B82" />
                 </View>
                 <View style={styles.actionTextContainer}>
                   <Text style={[styles.actionTitle, styles.dangerText]}>
