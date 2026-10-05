@@ -13,6 +13,7 @@ import { SettingsScreen } from '../screens/SettingsScreen';
 import { NEUTRAL_THEME, CLOUD_PALETTES } from '../theme/tokens';
 import { useAuth } from '../context/AuthContext';
 import { VectorAssetRenderer } from '../components/common/VectorAssetRenderer';
+import SettingsSvg from '../assets/images/red-setting-line-icon-svg-by-Vexels.svg';
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -68,8 +69,9 @@ const MainTabs: React.FC = () => {
               <VectorAssetRenderer
                 label="GOV"
                 size={18}
-                source={require('../assets/images/red-setting-line-icon-svg-by-Vexels.svg')}
-                tintColor={focused ? '#DE2529' : color}
+                renderSvg={() => (
+                  <SettingsSvg width={18} height={18} fill={focused ? '#DE2529' : color} />
+                )}
               />
             </View>
           ),

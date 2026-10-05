@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { Component, ReactNode } from 'react';
 import {
   View,
   Text,
@@ -11,12 +11,44 @@ import {
   TextStyle,
 } from 'react-native';
 
+interface ErrorBoundaryProps {
+  fallback: ReactNode;
+  children: ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+}
+
+class SafeAssetErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: any) {
+    console.warn('VectorAssetRenderer render error:', error);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback;
+    }
+    return this.props.children;
+  }
+}
+
 export interface VectorAssetRendererProps {
   label: string;
   size?: number;
   width?: number;
   height?: number;
   source?: ImageSourcePropType;
+  renderSvg?: () => ReactNode;
   containerStyle?: StyleProp<ViewStyle>;
   textStyle?: StyleProp<TextStyle>;
   tintColor?: string;
@@ -28,55 +60,78 @@ export const VectorAssetRenderer: React.FC<VectorAssetRendererProps> = ({
   width,
   height,
   source,
+  renderSvg,
   containerStyle,
   textStyle,
   tintColor,
 }) => {
-  const [hasError, setHasError] = useState(false);
   const finalWidth = width || size;
   const finalHeight = height || size;
 
-  if (hasError || !source) {
-    return (
-      <View
-        style={[
-          styles.safeBox,
-          {
-            width: finalWidth,
-            height: finalHeight,
-            borderRadius: Math.min(finalWidth, finalHeight) / 4,
-          },
-          containerStyle,
-        ]}
-      >
-        <Text
-          style={[
-            styles.safeText,
-            { fontSize: Math.max(8, Math.min(finalWidth, finalHeight) * 0.3) },
-            textStyle,
-          ]}
-          numberOfLines={1}
-        >
-          {label}
-        </Text>
-      </View>
-    );
-  }
-
-  return (
-    <Image
-      source={source}
+  const fallback = (
+    <View
       style={[
+        styles.safeBox,
         {
           width: finalWidth,
           height: finalHeight,
-          resizeMode: 'contain',
+          borderRadius: Math.min(finalWidth, finalHeight) / 4,
         },
-        tintColor ? { tintColor } : undefined,
+        containerStyle,
       ]}
-      onError={() => setHasError(true)}
-    />
+    >
+      <Text
+        style={[
+          styles.safeText,
+          { fontSize: Math.max(8, Math.min(finalWidth, finalHeight) * 0.3) },
+          textStyle,
+        ]}
+        numberOfLines={1}
+      >
+        {label}
+      </Text>
+    </View>
   );
+
+  if (renderSvg) {
+    return (
+      <SafeAssetErrorBoundary fallback={fallback}>
+        <View
+          style={[
+            {
+              width: finalWidth,
+              height: finalHeight,
+              alignItems: 'center',
+              justifyContent: 'center',
+            },
+            containerStyle,
+          ]}
+        >
+          {renderSvg()}
+        </View>
+      </SafeAssetErrorBoundary>
+    );
+  }
+
+  if (source) {
+    return (
+      <SafeAssetErrorBoundary fallback={fallback}>
+        <Image
+          source={source}
+          style={[
+            {
+              width: finalWidth,
+              height: finalHeight,
+              resizeMode: 'contain',
+            },
+            tintColor ? { tintColor } : undefined,
+          ]}
+        />
+      </SafeAssetErrorBoundary>
+    );
+  }
+
+  return fallback;
 };
 
 const styles = StyleSheet.create({
