@@ -30,10 +30,32 @@ export const RegisterScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
   const [activeConfigModal, setActiveConfigModal] = useState<SupportedCloud | null>(null);
 
   // Campos OCI
-  const [ociTenancy, setOciTenancy] = useState('ocid1.tenancy.oc1..aaaaaaaab1234567890');
-  const [ociUser, setOciUser] = useState('ocid1.user.oc1..aaaaaaaax74n9b2k3l4m');
-  const [ociFingerprint, setOciFingerprint] = useState('0e:ed:6e:d2:98:cf:84:1e:7d:b7:16:37:ef:8c:e1:59');
+  const [ociTenancy, setOciTenancy] = useState('');
+  const [ociUser, setOciUser] = useState('');
+  const [ociFingerprint, setOciFingerprint] = useState('');
   const [ociRegion, setOciRegion] = useState('sa-saopaulo-1');
+
+  const handlePasteQuickConfig = () => {
+    if (!activeConfigModal) return;
+    if (activeConfigModal === 'OCI') {
+      setOciTenancy('ocid1.tenancy.oc1..aaaaaaaab1234567890');
+      setOciUser('ocid1.user.oc1..aaaaaaaax74n9b2k3l4m');
+      setOciFingerprint('0e:ed:6e:d2:98:cf:84:1e:7d:b7:16:37:ef:8c:e1:59');
+      setOciRegion('sa-saopaulo-1');
+      Alert.alert('Configuração Aplicada', 'Perfil OCI de homologação preenchido com sucesso.');
+    } else if (activeConfigModal === 'AWS') {
+      setAwsKeyId('AKIAIOSFODNN7EXAMPLE');
+      setAwsSecretKey('wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY');
+      setAwsRegion('us-east-1');
+      Alert.alert('Configuração Aplicada', 'Perfil AWS de homologação preenchido com sucesso.');
+    } else {
+      setGcpProjectId('cloudwatch-prd-421');
+      setGcpClientEmail('sa-cloudwatch@cloudwatch-prd-421.iam.gserviceaccount.com');
+      setGcpPrivateKey('-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASC...');
+      setGcpZone('southamerica-east1-a');
+      Alert.alert('Configuração Aplicada', 'Perfil GCP de homologação preenchido com sucesso.');
+    }
+  };
 
   // Campos AWS
   const [awsKeyId, setAwsKeyId] = useState('');
@@ -367,6 +389,13 @@ export const RegisterScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
             </View>
 
             <ScrollView contentContainerStyle={styles.modalScroll}>
+              <TouchableOpacity
+                style={styles.quickPasteBtn}
+                onPress={handlePasteQuickConfig}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.quickPasteBtnText}>Colar JSON de Configuração Rápida</Text>
+              </TouchableOpacity>
               {activeConfigModal === 'OCI' && (
                 <>
                   <View style={styles.formGroup}>
@@ -707,6 +736,20 @@ const styles = StyleSheet.create({
   },
   modalScroll: {
     padding: 16,
+  },
+  quickPasteBtn: {
+    backgroundColor: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: 'center',
+    marginBottom: 14,
+  },
+  quickPasteBtnText: {
+    color: '#38BDF8',
+    fontSize: 12,
+    fontWeight: '700',
   },
   modalSaveBtn: {
     backgroundColor: '#132B1D',

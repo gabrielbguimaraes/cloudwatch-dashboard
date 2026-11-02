@@ -1,4 +1,10 @@
-import React, { useState, useMemo } from 'react';
+/**
+ * DashboardScreen - Console Executivo de Monitoramento Multi-Cloud
+ * Progressive Disclosure Nivel 1 (Cabecalho Executivo) & Nivel 2 (Cards Minimalistas)
+ * Zero emojis, zero jargões internos de engenharia, estetica Google Cloud / MD3.
+ */
+
+import React, { useState } from 'react';
 import {
   View,
   Text,
@@ -17,6 +23,7 @@ import { useCloud } from '../context/CloudContext';
 import { useAuth } from '../context/AuthContext';
 import { CloudLogo } from '../components/common/CloudLogo';
 import { InstanceActionSheet } from '../components/InstanceActionSheet';
+import { SerialConsoleModal } from '../components/SerialConsoleModal';
 import { Toast } from '../components/common/Toast';
 import { CLOUD_PALETTES, NEUTRAL_THEME } from '../theme/tokens';
 import { Print, sharePdfAsync } from '../services/pdfService';
@@ -26,7 +33,6 @@ import type { SupportedCloud } from '../types/auth';
 export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   const {
     filteredResources,
-    pinnedResources,
     kpis,
     refreshMetrics,
     restartInstance,
@@ -37,6 +43,8 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
     injectChaosCpuOverload,
     crashPrimaryInstance,
     restoreInfrastructure,
+    telemetrySource,
+    isLiveCloud,
   } = useCloud();
 
   const { activeProvider, cloudAccounts, switchActiveProvider, linkCloudProvider } = useAuth();
@@ -46,22 +54,26 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
   const [selectedInstanceForAction, setSelectedInstanceForAction] = useState<CloudResource | null>(null);
   const [isActionSheetVisible, setIsActionSheetVisible] = useState(false);
 
-  // Modal para vincular nuvem diretamente do Dock
+  // Terminal Serial Linux Emulado
+  const [terminalInstance, setTerminalInstance] = useState<CloudResource | null>(null);
+  const [isTerminalModalVisible, setIsTerminalModalVisible] = useState(false);
+
+  // Modal para conectar conta de nuvem diretamente do Dock
   const [quickLinkModalProvider, setQuickLinkModalProvider] = useState<SupportedCloud | null>(null);
   const [quickInputKey, setQuickInputKey] = useState('');
   const [quickInputSecret, setQuickInputSecret] = useState('');
 
-  // Modal do Chaos Monkey corporativo (sem emojis)
-  const [isChaosModalVisible, setIsChaosModalVisible] = useState(false);
+  // Modal Executivo de Simulacao de Carga e Resiliencia
+  const [isStressModalVisible, setIsStressModalVisible] = useState(false);
 
   const activePalette = CLOUD_PALETTES[activeProvider] || CLOUD_PALETTES.OCI;
   const activeAccountConfig = cloudAccounts[activeProvider];
 
   const handleRefresh = async () => {
     setRefreshing(true);
-    refreshMetrics();
+    await refreshMetrics();
     setRefreshing(false);
-    setToastMessage('Metricas de telemetria sincronizadas');
+    setToastMessage('Telemetria sincronizada com o provedor');
   };
 
   const handleExportPdf = async () => {
@@ -72,7 +84,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
         return;
       }
 
-      setToastMessage('Gerando relatorio executivo PDF...');
+      setToastMessage('Gerando relatorio executivo em PDF...');
       const html = Print.generateExecutiveReportHtml(target);
       const pdfResult = await Print.printToFileAsync({
         html,
@@ -100,13 +112,29 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
       if (switched) {
         setToastMessage(`Console alternado para ${cloud}`);
       } else {
-        setToastMessage(`Autorizacao para ${cloud} cancelada`);
+        setToastMessage(`Autorizacao para ${cloud} pendente`);
       }
     } else {
-      // Abre modal para cadastrar credenciais na hora
       setQuickLinkModalProvider(cloud);
       setQuickInputKey('');
       setQuickInputSecret('');
+    }
+  };
+
+  const handlePasteQuickConfig = () => {
+    if (!quickLinkModalProvider) return;
+    if (quickLinkModalProvider === 'OCI') {
+      setQuickInputKey('ocid1.tenancy.oc1..aaaaaaaab1234567890');
+      setQuickInputSecret('0e:ed:6e:d2:98:cf:84:1e:7d:b7:16:37:ef:8c:e1:59');
+      setToastMessage('Perfil OCI de homologação aplicado');
+    } else if (quickLinkModalProvider === 'AWS') {
+      setQuickInputKey('AKIAIOSFODNN7EXAMPLE');
+      setQuickInputSecret('wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY');
+      setToastMessage('Perfil AWS de homologação aplicado');
+    } else {
+      setQuickInputKey('cloudwatch-prd-421');
+      setQuickInputSecret('sa-cloudwatch@cloudwatch-prd-421.iam.gserviceaccount.com');
+      setToastMessage('Perfil GCP de homologação aplicado');
     }
   };
 
@@ -136,7 +164,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
           onPress: async () => {
             await linkCloudProvider(provider, creds, false);
             await switchActiveProvider(provider);
-            setToastMessage(`Conta ${provider} vinculada com sucesso`);
+            setToastMessage(`Conta ${provider} conectada com sucesso`);
           },
         },
         {
@@ -144,7 +172,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
           onPress: async () => {
             await linkCloudProvider(provider, creds, true);
             await switchActiveProvider(provider);
-            setToastMessage(`Conta ${provider} vinculada com biometria ativa`);
+            setToastMessage(`Conta ${provider} conectada com biometria ativa`);
           },
         },
       ]
@@ -157,6 +185,10 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
   };
 
   const handleCardPress = (resource: CloudResource) => {
+    handleOpenActionSheet(resource);
+  };
+
+  const handleNavigateToMetrics = (resource: CloudResource) => {
     setSelectedResource(resource);
     navigation.navigate('MetricsDetail', {
       resourceId: resource.id,
@@ -164,22 +196,37 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
     });
   };
 
-  // Helper para cor do ponto de semaforo de 8x8 sem emojis
+  const handleOpenTerminalFromSheet = (instance: CloudResource) => {
+    setTerminalInstance(instance);
+    setIsTerminalModalVisible(true);
+  };
+
   const getStatusDotColor = (status: string) => {
     switch (status) {
       case 'RUNNING':
       case 'HEALTHY':
-        return NEUTRAL_THEME.statusRunning.text; // #81C995
+        return '#22C55E'; // Verde solido
       case 'REBOOTING':
       case 'WARNING':
       case 'DEGRADED':
-        return NEUTRAL_THEME.statusDegraded.text; // #FDD663
+        return '#F59E0B'; // Ambar solido
       case 'STOPPED':
       case 'CRITICAL':
       default:
-        return NEUTRAL_THEME.statusStopped.text; // #F28B82
+        return '#EF4444'; // Vermelho solido
     }
   };
+
+  // Frase diagnostica executiva do Nivel 1
+  let diagnosticMessage = 'Todos os sistemas operacionais';
+  let diagnosticColor = '#22C55E';
+  if (kpis.critical > 0) {
+    diagnosticMessage = 'Incidente crítico em andamento';
+    diagnosticColor = '#EF4444';
+  } else if (kpis.warning > 0) {
+    diagnosticMessage = 'Atenção: sobrecarga moderada detectada';
+    diagnosticColor = '#F59E0B';
+  }
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -194,10 +241,10 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
           />
         }
       >
-        {/* Cabecalho Dinamico MD3 */}
+        {/* Nivel 1: Cabecalho Executivo Simplificado MD3 */}
         <View
           style={[
-            styles.headerCurved,
+            styles.executiveHeader,
             {
               backgroundColor: activePalette.surfaceHeader,
               borderBottomColor: activePalette.borderFocus,
@@ -206,14 +253,21 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
         >
           <View style={styles.headerTopRow}>
             <View style={styles.headerLeft}>
-              <CloudLogo provider={activeProvider} size={32} />
+              <CloudLogo provider={activeProvider} size={30} />
               <View style={styles.headerMeta}>
-                <Text style={styles.providerName} numberOfLines={1} ellipsizeMode="tail">
+                <Text style={styles.providerName} numberOfLines={1}>
                   {activePalette.name}
                 </Text>
-                <View style={styles.regionBadge}>
-                  <Text style={styles.regionText} numberOfLines={1}>
-                    {activeAccountConfig?.region || activePalette.defaultRegion}
+                {/* Badge discreto de conexao */}
+                <View style={styles.connectionBadge}>
+                  <View
+                    style={[
+                      styles.connectionDot,
+                      { backgroundColor: isLiveCloud ? '#22C55E' : '#38BDF8' },
+                    ]}
+                  />
+                  <Text style={styles.connectionText} numberOfLines={1}>
+                    Conectado à {activeProvider} ({activeAccountConfig?.region || activePalette.defaultRegion})
                   </Text>
                 </View>
               </View>
@@ -221,12 +275,12 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
 
             <View style={styles.actionGroup}>
               <TouchableOpacity
-                style={styles.chaosBtn}
-                onPress={() => setIsChaosModalVisible(true)}
+                style={styles.stressBtn}
+                onPress={() => setIsStressModalVisible(true)}
                 activeOpacity={0.7}
               >
-                <Text style={styles.chaosBtnText} numberOfLines={1}>
-                  Incidentes
+                <Text style={styles.stressBtnText} numberOfLines={1}>
+                  Simular Carga
                 </Text>
               </TouchableOpacity>
 
@@ -242,30 +296,37 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
             </View>
           </View>
 
-          {/* SLA e KPIs de Saude */}
-          <View style={styles.kpiContainer}>
-            <View style={styles.kpiBox}>
-              <Text style={styles.kpiBoxLabel}>DISPONIBILIDADE SLA</Text>
-              <Text style={[styles.kpiBoxValue, { color: activePalette.badgeText }]}>
-                {kpis.uptimeSla}%
-              </Text>
+          {/* Resumo de Saude Limpo: SLA + Frase Diagnostica Executiva */}
+          <View style={styles.healthSummaryCard}>
+            <View style={styles.healthSummaryMain}>
+              <Text style={styles.healthSlaValue}>{kpis.uptimeSla}% SLA</Text>
+              <View style={styles.diagnosticRow}>
+                <View style={[styles.diagnosticDot, { backgroundColor: diagnosticColor }]} />
+                <Text style={[styles.diagnosticText, { color: diagnosticColor }]}>
+                  {diagnosticMessage}
+                </Text>
+              </View>
             </View>
-            <View style={styles.kpiBox}>
-              <Text style={styles.kpiBoxLabel}>ATIVAS / TOTAL</Text>
-              <Text style={styles.kpiBoxValue}>
-                {kpis.healthy} / {kpis.total}
-              </Text>
-            </View>
-            <View style={styles.kpiBox}>
-              <Text style={styles.kpiBoxLabel}>ANOMALIAS</Text>
-              <Text
-                style={[
-                  styles.kpiBoxValue,
-                  kpis.critical > 0 && { color: NEUTRAL_THEME.statusStopped.text },
-                ]}
-              >
-                {kpis.critical + kpis.warning}
-              </Text>
+
+            <View style={styles.healthCounters}>
+              <View style={styles.healthCounterItem}>
+                <Text style={styles.healthCounterNum}>
+                  {kpis.healthy}/{kpis.total}
+                </Text>
+                <Text style={styles.healthCounterLabel}>OPERACIONAIS</Text>
+              </View>
+              <View style={styles.healthCounterItem}>
+                <Text
+                  style={[
+                    styles.healthCounterNum,
+                    (kpis.critical + kpis.warning) > 0 && { color: '#F59E0B' },
+                    kpis.critical > 0 && { color: '#EF4444' },
+                  ]}
+                >
+                  {kpis.critical + kpis.warning}
+                </Text>
+                <Text style={styles.healthCounterLabel}>ALERTAS</Text>
+              </View>
             </View>
           </View>
         </View>
@@ -327,13 +388,13 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
           </TouchableOpacity>
         </View>
 
-        {/* Lista de Recursos Corporativos */}
+        {/* Nivel 2: Lista de Cards de Servidor Minimalistas (4 Elementos Essenciais) */}
         <View style={styles.resourceSection}>
           <View style={styles.sectionHeaderRow}>
             <Text style={styles.sectionTitle}>
-              INSTANCIAS CONECTADAS ({filteredResources.length})
+              SERVIDORES MONITORADOS ({filteredResources.length})
             </Text>
-            <Text style={styles.sectionSub}>Atualizacao automatica</Text>
+            <Text style={styles.sectionSub}>Atualização Contínua</Text>
           </View>
 
           {filteredResources.length === 0 ? (
@@ -352,63 +413,52 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
             filteredResources.map((resource) => {
               const cpuPercent = resource.metricsSummary?.cpuPercent ?? 0;
               const dotColor = getStatusDotColor(resource.status);
-              const shapeText =
-                (resource.metadata as any)?.shape ||
-                resource.tags?.Shape ||
-                (resource.provider === 'OCI' ? 'VM.Standard.A1.Flex' : 't3.medium');
-              const privateIp = (resource.metadata as any)?.privateIp || '10.0.0.4';
 
               return (
                 <TouchableOpacity
                   key={resource.id}
-                  style={styles.resourceCard}
+                  style={styles.minimalCard}
                   onPress={() => handleCardPress(resource)}
                   activeOpacity={0.7}
                 >
+                  {/* Elemento 1, 2 e 4: Ponto Semaforico + Nome/Logo + Botao Opcoes */}
                   <View style={styles.cardHeaderRow}>
                     <View style={styles.cardHeaderLeft}>
-                      {/* Ponto de Semaforo Geometrico 8x8 */}
+                      {/* 1. Ponto Semaforico Solido */}
                       <View style={[styles.statusDot, { backgroundColor: dotColor }]} />
+                      {/* 2. Logo discreto e Nome da Instancia */}
+                      <CloudLogo provider={resource.provider} size={15} />
                       <Text style={styles.cardTitle} numberOfLines={1}>
                         {resource.name}
                       </Text>
                     </View>
 
-                    {/* Botao de Acao Contextual [...] */}
+                    {/* 4. Botao de Opcoes (...) para abrir Bottom Sheet */}
                     <TouchableOpacity
                       style={styles.moreActionBtn}
                       onPress={() => handleOpenActionSheet(resource)}
-                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
                     >
                       <Text style={styles.moreActionText}>...</Text>
                     </TouchableOpacity>
                   </View>
 
-                  <View style={styles.metaRow}>
-                    <Text style={styles.metaMono}>{shapeText}</Text>
-                    <Text style={styles.metaSeparator}>|</Text>
-                    <Text style={styles.metaMono}>{privateIp}</Text>
-                  </View>
-
-                  {/* Barra de Progresso Linear Fina de CPU */}
-                  <View style={styles.cpuProgressContainer}>
-                    <View style={styles.cpuLabelRow}>
-                      <Text style={styles.cpuLabel}>USO DE CPU</Text>
-                      <Text style={[styles.cpuValue, { color: dotColor }]}>
-                        {cpuPercent}%
-                      </Text>
-                    </View>
+                  {/* Elemento 3: Uma Unica Barra de Progresso Horizontal com Valor a Direita */}
+                  <View style={styles.singleProgressBarContainer}>
                     <View style={styles.progressBarTrack}>
                       <View
                         style={[
                           styles.progressBarFill,
                           {
-                            width: `${Math.min(100, Math.max(2, cpuPercent))}%`,
+                            width: `${Math.min(100, Math.max(3, cpuPercent))}%`,
                             backgroundColor: dotColor,
                           },
                         ]}
                       />
                     </View>
+                    <Text style={[styles.cardCpuValue, { color: dotColor }]}>
+                      {cpuPercent}% CPU
+                    </Text>
                   </View>
                 </TouchableOpacity>
               );
@@ -417,7 +467,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
         </View>
       </ScrollView>
 
-      {/* Bottom Sheet Corporativo de Ciclo de Vida */}
+      {/* Bottom Sheet de Detalhes Tecnicos e Ciclo de Vida */}
       <InstanceActionSheet
         visible={isActionSheetVisible}
         instance={selectedInstanceForAction}
@@ -426,9 +476,20 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
         onEdit={(id, newName, shape) => editInstance(id, newName, shape)}
         onDelete={(id) => deleteInstance(id)}
         onShowToast={(msg) => setToastMessage(msg)}
+        onOpenTerminal={(inst) => handleOpenTerminalFromSheet(inst)}
+        onStressTest={() => injectChaosCpuOverload()}
+        onViewMetrics={(inst) => handleNavigateToMetrics(inst)}
       />
 
-      {/* Modal de Vinculacao Rapida de Nuvem */}
+      {/* Console Serial Linux Emulado */}
+      <SerialConsoleModal
+        visible={isTerminalModalVisible}
+        onClose={() => setIsTerminalModalVisible(false)}
+        instance={terminalInstance}
+        onRestartInstance={(id) => restartInstance(id)}
+      />
+
+      {/* Modal de Conectar Conta de Nuvem com Botao de Colar JSON Rapido */}
       <Modal
         visible={quickLinkModalProvider !== null}
         transparent
@@ -438,11 +499,20 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
         <View style={styles.modalOverlay}>
           <View style={styles.quickModalCard}>
             <Text style={styles.quickModalTitle}>
-              Vincular Conta: {quickLinkModalProvider}
+              Conectar Conta: {quickLinkModalProvider}
             </Text>
             <Text style={styles.quickModalSubtitle}>
-              Insira as credenciais para autorizar a governanca nesta nuvem:
+              Insira as credenciais para autorizar a observabilidade nesta nuvem:
             </Text>
+
+            {/* Botao Discreto: Colar JSON de Configuracao Rapida */}
+            <TouchableOpacity
+              style={styles.pasteJsonBtn}
+              onPress={handlePasteQuickConfig}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.pasteJsonBtnText}>Colar JSON de Configuração Rápida</Text>
+            </TouchableOpacity>
 
             <View style={styles.formGroup}>
               <Text style={styles.formLabel}>
@@ -485,77 +555,80 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
               </TouchableOpacity>
 
               <TouchableOpacity style={styles.quickSaveBtn} onPress={handleSaveQuickLink}>
-                <Text style={styles.quickSaveText}>Salvar e Vincular</Text>
+                <Text style={styles.quickSaveText}>Salvar e Conectar</Text>
               </TouchableOpacity>
             </View>
           </View>
         </View>
       </Modal>
 
-      {/* Modal Chaos Monkey Corporativo (Sem Emojis) */}
+      {/* Modal Executivo: Simulacao de Carga e Resiliencia */}
       <Modal
-        visible={isChaosModalVisible}
+        visible={isStressModalVisible}
         transparent
         animationType="fade"
-        onRequestClose={() => setIsChaosModalVisible(false)}
+        onRequestClose={() => setIsStressModalVisible(false)}
       >
         <View style={styles.modalOverlay}>
-          <View style={styles.chaosCard}>
-            <View style={styles.chaosHeader}>
-              <Text style={styles.chaosTitle}>Injetor de Incidentes (Chaos Test)</Text>
-              <TouchableOpacity onPress={() => setIsChaosModalVisible(false)}>
+          <View style={styles.stressModalCard}>
+            <View style={styles.stressModalHeader}>
+              <Text style={styles.stressModalTitle}>Simulação de Carga e Resiliência</Text>
+              <TouchableOpacity onPress={() => setIsStressModalVisible(false)}>
                 <Text style={styles.modalCloseText}>FECHAR</Text>
               </TouchableOpacity>
             </View>
 
-            <Text style={styles.chaosDesc}>
-              Simule variacoes operacionais de contingencia em tempo real na nuvem {activeProvider}:
+            <Text style={styles.stressModalDesc}>
+              Avalie a reação do ecossistema de observabilidade a anomalias e picos de demanda operacional:
             </Text>
 
-            <View style={styles.chaosActionList}>
+            <View style={styles.stressActionList}>
               <TouchableOpacity
-                style={styles.chaosItem}
+                style={styles.stressItem}
                 onPress={() => {
                   injectChaosCpuOverload();
-                  setIsChaosModalVisible(false);
-                  setToastMessage('Sobrecarga de CPU (98%) injetada');
+                  setIsStressModalVisible(false);
+                  setToastMessage('Pico de carga induzido (98% CPU)');
                 }}
+                activeOpacity={0.7}
               >
-                <Text style={styles.chaosItemTitle}>Injetar Sobrecarga de CPU (98%)</Text>
-                <Text style={styles.chaosItemSub}>
-                  Dispara vibracao haptica dupla e transita status para CRITICAL
+                <Text style={styles.stressItemTitle}>Simular Pico de Carga (CPU 98%)</Text>
+                <Text style={styles.stressItemSub}>
+                  Injeta sobrecarga severa no host para aferir violação de limiar crítico de SLA (85%).
                 </Text>
               </TouchableOpacity>
 
               <TouchableOpacity
-                style={[styles.chaosItem, styles.chaosItemCrash]}
+                style={[styles.stressItem, styles.stressItemCrash]}
                 onPress={() => {
                   crashPrimaryInstance();
-                  setIsChaosModalVisible(false);
-                  setToastMessage('Instancia principal desconectada (0% CPU)');
+                  setIsStressModalVisible(false);
+                  setToastMessage('Queda de host induzida (Failover)');
                 }}
+                activeOpacity={0.7}
               >
-                <Text style={[styles.chaosItemTitle, styles.chaosCrashText]}>
-                  Derrubar Instancia Principal (STOPPED)
+                <Text style={[styles.stressItemTitle, styles.stressCrashText]}>
+                  Simular Queda de Host (0% CPU / Failover)
                 </Text>
-                <Text style={styles.chaosItemSub}>
-                  Simula falha grave de host e zera consumo de CPU
+                <Text style={styles.stressItemSub}>
+                  Derruba a máquina primária para avaliar isolamento de falha e acionamento de contingência.
                 </Text>
               </TouchableOpacity>
 
               <TouchableOpacity
-                style={[styles.chaosItem, styles.chaosItemRestore]}
+                style={[styles.stressItem, styles.stressItemRestore]}
                 onPress={() => {
                   restoreInfrastructure();
-                  setIsChaosModalVisible(false);
-                  setToastMessage('Infraestrutura normalizada com 100% de saude');
+                  setIsStressModalVisible(false);
+                  setToastMessage('Infraestrutura restaurada para estado saudável');
                 }}
+                activeOpacity={0.7}
               >
-                <Text style={[styles.chaosItemTitle, styles.chaosRestoreText]}>
-                  Restaurar Infraestrutura (HEALTHY)
+                <Text style={[styles.stressItemTitle, styles.stressRestoreText]}>
+                  Restabelecer Normalidade Operacional
                 </Text>
-                <Text style={styles.chaosItemSub}>
-                  Normaliza todos os nos para operacao estavel
+                <Text style={styles.stressItemSub}>
+                  Normaliza telemetria de CPU e Memória para todos os servidores da conta ativa.
                 </Text>
               </TouchableOpacity>
             </View>
@@ -563,8 +636,9 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
         </View>
       </Modal>
 
-      {/* Toast Feedback */}
-      <Toast message={toastMessage} onDismiss={() => setToastMessage(null)} />
+      {toastMessage && (
+        <Toast message={toastMessage} onDismiss={() => setToastMessage(null)} />
+      )}
     </SafeAreaView>
   );
 };
@@ -577,134 +651,145 @@ const styles = StyleSheet.create({
   container: {
     paddingBottom: 40,
   },
-  headerCurved: {
-    paddingHorizontal: 16,
+  executiveHeader: {
+    paddingHorizontal: 18,
     paddingTop: 16,
-    paddingBottom: 24,
-    borderBottomLeftRadius: 32,
-    borderBottomRightRadius: 32,
+    paddingBottom: 16,
     borderBottomWidth: 1,
   },
   headerTopRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 18,
-    gap: 8,
+    marginBottom: 14,
   },
   headerLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
     flex: 1,
-    flexShrink: 1,
-    marginRight: 6,
+    gap: 10,
   },
   headerMeta: {
-    gap: 2,
     flex: 1,
-    flexShrink: 1,
   },
   providerName: {
     color: '#E8EAED',
-    fontSize: 13,
+    fontSize: 16,
     fontWeight: '800',
   },
-  regionBadge: {
-    alignSelf: 'flex-start',
-    backgroundColor: '#282E38',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
+  connectionBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 3,
+    gap: 6,
   },
-  regionText: {
+  connectionDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  connectionText: {
     color: '#9AA0A6',
-    fontSize: 9,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    fontWeight: '700',
+    fontSize: 11,
+    fontWeight: '500',
   },
   actionGroup: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'flex-end',
-    gap: 6,
-    flexShrink: 0,
-  },
-  chaosBtn: {
-    height: 32,
-    paddingHorizontal: 8,
-    paddingVertical: 0,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.12)',
-    backgroundColor: '#20242C',
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexShrink: 0,
-  },
-  chaosBtnText: {
-    color: '#F28B82',
-    fontSize: 11,
-    fontWeight: '600',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    textAlign: 'center',
-  },
-  pdfBtn: {
-    height: 32,
-    paddingHorizontal: 8,
-    paddingVertical: 0,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.12)',
-    backgroundColor: '#20242C',
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexShrink: 0,
-  },
-  pdfBtnText: {
-    color: '#E8EAED',
-    fontSize: 11,
-    fontWeight: '600',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    textAlign: 'center',
-  },
-  kpiContainer: {
-    flexDirection: 'row',
     gap: 8,
   },
-  kpiBox: {
-    flex: 1,
-    backgroundColor: '#181C22',
-    borderRadius: 10,
-    padding: 10,
+  stressBtn: {
+    backgroundColor: '#262C36',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#282E38',
+    borderColor: '#374151',
   },
-  kpiBoxLabel: {
-    color: '#9AA0A6',
-    fontSize: 8,
+  stressBtnText: {
+    color: '#E8EAED',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  pdfBtn: {
+    backgroundColor: '#1E3A5F',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#3B82F6',
+  },
+  pdfBtnText: {
+    color: '#93C5FD',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  healthSummaryCard: {
+    backgroundColor: '#161A22',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#262D38',
+    padding: 14,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  healthSummaryMain: {
+    flex: 1,
+  },
+  healthSlaValue: {
+    color: '#E8EAED',
+    fontSize: 20,
     fontWeight: '800',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    marginBottom: 4,
+    letterSpacing: 0.5,
   },
-  kpiBoxValue: {
+  diagnosticRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4,
+    gap: 6,
+  },
+  diagnosticDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  diagnosticText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  healthCounters: {
+    flexDirection: 'row',
+    gap: 16,
+  },
+  healthCounterItem: {
+    alignItems: 'center',
+  },
+  healthCounterNum: {
     color: '#E8EAED',
     fontSize: 16,
     fontWeight: '800',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
+  healthCounterLabel: {
+    color: '#9AA0A6',
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+    marginTop: 2,
+  },
   dockWrapper: {
-    paddingHorizontal: 20,
-    marginTop: -12,
-    marginBottom: 12,
+    paddingHorizontal: 18,
+    marginTop: 14,
+    marginBottom: 6,
   },
   dockContainer: {
     flexDirection: 'row',
-    backgroundColor: '#181C22',
+    backgroundColor: '#16191F',
     borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#282E38',
     padding: 4,
+    borderWidth: 1,
+    borderColor: '#262C36',
     gap: 6,
   },
   dockChip: {
@@ -712,60 +797,55 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 8,
-    paddingHorizontal: 6,
+    paddingVertical: 9,
     borderRadius: 8,
-    borderWidth: 1,
-    borderColor: 'transparent',
     gap: 6,
   },
   dockChipUnconfigured: {
-    borderStyle: 'dashed',
-    borderColor: '#3C4043',
-    opacity: 0.6,
+    opacity: 0.7,
   },
   dockChipText: {
     color: '#9AA0A6',
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '700',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   dockChipTextFaded: {
-    color: '#5F6368',
+    color: '#6B7280',
   },
   unconfiguredBadge: {
-    backgroundColor: '#282E38',
-    borderRadius: 10,
     width: 14,
     height: 14,
+    borderRadius: 7,
+    backgroundColor: '#374151',
     alignItems: 'center',
     justifyContent: 'center',
   },
   unconfiguredBadgeText: {
-    color: '#9AA0A6',
+    color: '#D1D5DB',
     fontSize: 10,
-    fontWeight: '800',
+    fontWeight: '700',
+    lineHeight: 12,
   },
   provisionBar: {
-    paddingHorizontal: 20,
-    marginBottom: 16,
+    paddingHorizontal: 18,
+    marginTop: 10,
   },
   provisionButton: {
-    backgroundColor: '#20242C',
-    borderRadius: 8,
+    backgroundColor: '#1E232B',
+    borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#3C4043',
+    borderColor: '#282E38',
     paddingVertical: 10,
     alignItems: 'center',
   },
   provisionButtonText: {
-    color: '#E8EAED',
-    fontSize: 11,
+    color: '#8AB4F8',
+    fontSize: 12,
     fontWeight: '700',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   resourceSection: {
-    paddingHorizontal: 20,
+    paddingHorizontal: 18,
+    marginTop: 16,
   },
   sectionHeaderRow: {
     flexDirection: 'row',
@@ -775,46 +855,44 @@ const styles = StyleSheet.create({
   },
   sectionTitle: {
     color: '#9AA0A6',
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '800',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    letterSpacing: 0.5,
+    letterSpacing: 0.8,
   },
   sectionSub: {
     color: '#5F6368',
-    fontSize: 9,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: 11,
   },
   emptyContainer: {
-    backgroundColor: '#181C22',
+    backgroundColor: '#16191F',
     borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#282E38',
     padding: 24,
     alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#262C36',
   },
   emptyText: {
     color: '#9AA0A6',
-    fontSize: 12,
+    fontSize: 13,
     textAlign: 'center',
-    marginBottom: 12,
+    marginBottom: 14,
   },
   emptyAddBtn: {
-    backgroundColor: '#282E38',
-    borderRadius: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    backgroundColor: '#8AB4F8',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 8,
   },
   emptyAddBtnText: {
-    color: '#E8EAED',
-    fontSize: 11,
+    color: '#0F1318',
+    fontSize: 12,
     fontWeight: '700',
   },
-  resourceCard: {
-    backgroundColor: '#181C22',
+  minimalCard: {
+    backgroundColor: '#161A22',
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#282E38',
+    borderColor: '#262D38',
     padding: 14,
     marginBottom: 10,
   },
@@ -822,13 +900,13 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 6,
+    marginBottom: 12,
   },
   cardHeaderLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
     flex: 1,
+    gap: 8,
     marginRight: 8,
   },
   statusDot: {
@@ -843,200 +921,194 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   moreActionBtn: {
-    paddingHorizontal: 6,
+    paddingHorizontal: 8,
     paddingVertical: 2,
-    backgroundColor: '#20242C',
     borderRadius: 4,
-    borderWidth: 1,
-    borderColor: '#2D3139',
   },
   moreActionText: {
     color: '#9AA0A6',
-    fontSize: 12,
-    fontWeight: '900',
-    lineHeight: 12,
+    fontSize: 16,
+    fontWeight: '800',
+    letterSpacing: 1,
   },
-  metaRow: {
+  singleProgressBarContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    marginBottom: 12,
-  },
-  metaMono: {
-    color: '#9AA0A6',
-    fontSize: 10,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  metaSeparator: {
-    color: '#3C4043',
-    fontSize: 10,
-  },
-  cpuProgressContainer: {
-    gap: 4,
-  },
-  cpuLabelRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  cpuLabel: {
-    color: '#5F6368',
-    fontSize: 9,
-    fontWeight: '800',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  cpuValue: {
-    fontSize: 10,
-    fontWeight: '800',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    gap: 12,
   },
   progressBarTrack: {
-    height: 4,
-    backgroundColor: '#0F1318',
-    borderRadius: 2,
+    flex: 1,
+    height: 6,
+    backgroundColor: '#262D38',
+    borderRadius: 3,
     overflow: 'hidden',
   },
   progressBarFill: {
     height: '100%',
-    borderRadius: 2,
+    borderRadius: 3,
+  },
+  cardCpuValue: {
+    fontSize: 12,
+    fontWeight: '800',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    minWidth: 64,
+    textAlign: 'right',
   },
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.75)',
     justifyContent: 'center',
+    alignItems: 'center',
     padding: 20,
   },
   quickModalCard: {
     backgroundColor: '#1A1D24',
-    borderRadius: 14,
+    borderRadius: 16,
     borderWidth: 1,
     borderColor: '#2D3139',
-    padding: 18,
+    padding: 20,
+    width: '100%',
+    maxWidth: 400,
   },
   quickModalTitle: {
     color: '#E8EAED',
-    fontSize: 15,
-    fontWeight: '800',
+    fontSize: 16,
+    fontWeight: '700',
   },
   quickModalSubtitle: {
     color: '#9AA0A6',
-    fontSize: 11,
+    fontSize: 12,
     marginTop: 4,
     marginBottom: 14,
+  },
+  pasteJsonBtn: {
+    backgroundColor: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: 'center',
+    marginBottom: 14,
+  },
+  pasteJsonBtnText: {
+    color: '#38BDF8',
+    fontSize: 12,
+    fontWeight: '700',
   },
   formGroup: {
     marginBottom: 12,
   },
   formLabel: {
     color: '#9AA0A6',
-    fontSize: 9,
+    fontSize: 10,
     fontWeight: '700',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    letterSpacing: 0.5,
     marginBottom: 6,
   },
   formInput: {
     backgroundColor: '#0F1318',
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#282E38',
-    color: '#E8EAED',
+    borderColor: '#2D3139',
     paddingHorizontal: 12,
-    paddingVertical: 8,
-    fontSize: 12,
+    paddingVertical: 10,
+    color: '#E8EAED',
+    fontSize: 13,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   quickModalActions: {
     flexDirection: 'row',
+    justifyContent: 'flex-end',
     gap: 10,
-    marginTop: 8,
+    marginTop: 14,
   },
   quickCancelBtn: {
-    flex: 1,
+    paddingHorizontal: 14,
     paddingVertical: 10,
-    backgroundColor: '#282E38',
     borderRadius: 8,
-    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#2D3139',
   },
   quickCancelText: {
     color: '#9AA0A6',
     fontSize: 12,
-    fontWeight: '700',
+    fontWeight: '600',
   },
   quickSaveBtn: {
-    flex: 1.4,
+    backgroundColor: '#8AB4F8',
+    paddingHorizontal: 16,
     paddingVertical: 10,
-    backgroundColor: '#132B1D',
-    borderWidth: 1,
-    borderColor: '#1E462E',
     borderRadius: 8,
-    alignItems: 'center',
   },
   quickSaveText: {
-    color: '#81C995',
+    color: '#0F1318',
     fontSize: 12,
-    fontWeight: '800',
+    fontWeight: '700',
   },
-  chaosCard: {
+  stressModalCard: {
     backgroundColor: '#1A1D24',
-    borderRadius: 14,
+    borderRadius: 16,
     borderWidth: 1,
     borderColor: '#2D3139',
-    padding: 18,
+    padding: 20,
+    width: '100%',
+    maxWidth: 420,
   },
-  chaosHeader: {
+  stressModalHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 10,
+    marginBottom: 8,
   },
-  chaosTitle: {
+  stressModalTitle: {
     color: '#E8EAED',
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: '800',
   },
   modalCloseText: {
     color: '#9AA0A6',
     fontSize: 11,
     fontWeight: '700',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
-  chaosDesc: {
+  stressModalDesc: {
     color: '#9AA0A6',
-    fontSize: 11,
-    marginBottom: 14,
-    lineHeight: 16,
+    fontSize: 12,
+    lineHeight: 18,
+    marginBottom: 16,
   },
-  chaosActionList: {
+  stressActionList: {
     gap: 10,
   },
-  chaosItem: {
+  stressItem: {
     backgroundColor: '#20242C',
-    borderRadius: 8,
+    borderRadius: 10,
     borderWidth: 1,
     borderColor: '#2D3139',
-    padding: 10,
+    padding: 12,
   },
-  chaosItemCrash: {
+  stressItemCrash: {
     borderColor: '#4D1F1F',
+    backgroundColor: '#2D151520',
   },
-  chaosItemRestore: {
-    borderColor: '#1E462E',
+  stressItemRestore: {
+    borderColor: '#1E3A2F',
+    backgroundColor: '#0F291E20',
   },
-  chaosItemTitle: {
+  stressItemTitle: {
     color: '#E8EAED',
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '700',
+    marginBottom: 4,
   },
-  chaosCrashText: {
+  stressCrashText: {
     color: '#F28B82',
   },
-  chaosRestoreText: {
+  stressRestoreText: {
     color: '#81C995',
   },
-  chaosItemSub: {
-    color: '#5F6368',
-    fontSize: 9,
-    marginTop: 2,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  stressItemSub: {
+    color: '#9AA0A6',
+    fontSize: 11,
+    lineHeight: 16,
   },
 });

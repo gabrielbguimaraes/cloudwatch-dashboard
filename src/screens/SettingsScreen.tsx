@@ -70,9 +70,9 @@ export const SettingsScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
     setConnectModalCloud(cloud);
     const existing = cloudAccounts[cloud];
     if (cloud === 'OCI') {
-      setInputField1(existing?.credentials?.tenancyOcid || 'ocid1.tenancy.oc1..aaaaaaaab1234567890');
-      setInputField2(existing?.credentials?.userOcid || 'ocid1.user.oc1..aaaaaaaax74n9b2k3l4m');
-      setInputField3(existing?.credentials?.fingerprint || '0e:ed:6e:d2:98:cf:84:1e:7d:b7:16:37:ef:8c:e1:59');
+      setInputField1(existing?.credentials?.tenancyOcid || '');
+      setInputField2(existing?.credentials?.userOcid || '');
+      setInputField3(existing?.credentials?.fingerprint || '');
       setInputRegion(existing?.region || 'sa-saopaulo-1');
     } else if (cloud === 'AWS') {
       setInputField1(existing?.credentials?.accessKeyId || '');
@@ -84,6 +84,29 @@ export const SettingsScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
       setInputField2(existing?.credentials?.clientEmail || '');
       setInputField3(existing?.credentials?.zone || 'southamerica-east1-a');
       setInputRegion(existing?.region || 'southamerica-east1');
+    }
+  };
+
+  const handlePasteQuickConfig = () => {
+    if (!connectModalCloud) return;
+    if (connectModalCloud === 'OCI') {
+      setInputField1('ocid1.tenancy.oc1..aaaaaaaab1234567890');
+      setInputField2('ocid1.user.oc1..aaaaaaaax74n9b2k3l4m');
+      setInputField3('0e:ed:6e:d2:98:cf:84:1e:7d:b7:16:37:ef:8c:e1:59');
+      setInputRegion('sa-saopaulo-1');
+      setToastMessage('Perfil OCI de homologação aplicado');
+    } else if (connectModalCloud === 'AWS') {
+      setInputField1('AKIAIOSFODNN7EXAMPLE');
+      setInputField2('wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY');
+      setInputField3('');
+      setInputRegion('us-east-1');
+      setToastMessage('Perfil AWS de homologação aplicado');
+    } else {
+      setInputField1('cloudwatch-prd-421');
+      setInputField2('sa-cloudwatch@cloudwatch-prd-421.iam.gserviceaccount.com');
+      setInputField3('southamerica-east1-a');
+      setInputRegion('southamerica-east1');
+      setToastMessage('Perfil GCP de homologação aplicado');
     }
   };
 
@@ -437,6 +460,14 @@ export const SettingsScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
               <Text style={styles.modalDescription}>
                 Insira as credenciais de acesso corporativo. As chaves serao salvas no cofre seguro EncryptedStorage.
               </Text>
+
+              <TouchableOpacity
+                style={styles.pasteJsonBtn}
+                onPress={handlePasteQuickConfig}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.pasteJsonBtnText}>Colar JSON de Configuração Rápida</Text>
+              </TouchableOpacity>
 
               {connectModalCloud === 'OCI' && (
                 <>
@@ -880,6 +911,21 @@ const styles = StyleSheet.create({
     color: '#E8EAED',
     fontSize: 12,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  pasteJsonBtn: {
+    backgroundColor: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: 'center',
+    marginTop: 6,
+    marginBottom: 12,
+  },
+  pasteJsonBtnText: {
+    color: '#38BDF8',
+    fontSize: 12,
+    fontWeight: '700',
   },
   modalButtonsRow: {
     flexDirection: 'row',

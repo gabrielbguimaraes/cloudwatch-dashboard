@@ -10,6 +10,7 @@ const {assetExts, sourceExts} = defaultConfig.resolver;
  * @type {import('metro-config').MetroConfig}
  */
 const config = {
+  maxWorkers: 2,
   transformer: {
     babelTransformerPath: require.resolve('react-native-svg-transformer'),
   },

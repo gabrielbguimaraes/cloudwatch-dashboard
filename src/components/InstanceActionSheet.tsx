@@ -1,3 +1,9 @@
+/**
+ * InstanceActionSheet - Bottom Sheet Corporativo de Detalhes e Ciclo de Vida
+ * Progressive Disclosure Nivel 2: Detalhes tecnicos (OCID, IPs, Shape, OCPUs/RAM)
+ * e acoes operacionais completas de ciclo de vida.
+ */
+
 import React, { useState } from 'react';
 import {
   View,
@@ -8,12 +14,12 @@ import {
   Alert,
   TextInput,
   Platform,
-  Image,
+  ScrollView,
 } from 'react-native';
 import type { CloudResource } from '../types';
-import { NEUTRAL_THEME } from '../theme/tokens';
-import { VectorAssetRenderer } from './common/VectorAssetRenderer';
+import { NEUTRAL_THEME, CLOUD_PALETTES } from '../theme/tokens';
 import { EditIcon, TrashIcon } from './common/AppIcons';
+import { VectorAssetRenderer } from './common/VectorAssetRenderer';
 
 interface InstanceActionSheetProps {
   visible: boolean;
@@ -23,6 +29,9 @@ interface InstanceActionSheetProps {
   onEdit: (id: string, newName: string, shape?: string) => void;
   onDelete: (id: string) => void;
   onShowToast: (msg: string) => void;
+  onOpenTerminal?: (instance: CloudResource) => void;
+  onStressTest?: (id: string) => void;
+  onViewMetrics?: (instance: CloudResource) => void;
 }
 
 export const InstanceActionSheet: React.FC<InstanceActionSheetProps> = ({
@@ -33,20 +42,31 @@ export const InstanceActionSheet: React.FC<InstanceActionSheetProps> = ({
   onEdit,
   onDelete,
   onShowToast,
+  onOpenTerminal,
+  onStressTest,
+  onViewMetrics,
 }) => {
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editName, setEditName] = useState('');
   const [editShape, setEditShape] = useState('');
+  const [editOcpus, setEditOcpus] = useState('4');
+  const [editRam, setEditRam] = useState('24');
 
   if (!instance) return null;
 
+  const metadata = (instance.metadata || {}) as any;
+  const ocid = instance.ocid || instance.arn || instance.id;
+  const privateIp = metadata.privateIp || '10.0.0.128';
+  const publicIp = metadata.publicIp || '167.234.241.171';
+  const shape = metadata.shape || instance.tags?.Shape || (instance.provider === 'OCI' ? 'VM.Standard.A1.Flex' : 't3.xlarge');
+  const ocpus = metadata.ocpuCount || 4;
+  const ramGb = metadata.memoryInGBs || 24;
+
   const handleOpenEdit = () => {
     setEditName(instance.name);
-    setEditShape(
-      (instance.metadata as any)?.shape ||
-        instance.tags?.Shape ||
-        'VM.Standard.A1.Flex'
-    );
+    setEditShape(shape);
+    setEditOcpus(String(ocpus));
+    setEditRam(String(ramGb));
     setIsEditModalOpen(true);
   };
 
@@ -58,13 +78,35 @@ export const InstanceActionSheet: React.FC<InstanceActionSheetProps> = ({
     onEdit(instance.id, editName.trim(), editShape.trim());
     setIsEditModalOpen(false);
     onClose();
-    onShowToast(`Instancia ${editName} atualizada com sucesso`);
+    onShowToast(`Especificacoes da instancia ${editName} atualizadas`);
   };
 
   const handleRestart = () => {
     onClose();
     onRestart(instance.id);
     onShowToast(`Reiniciando instancia ${instance.name}...`);
+  };
+
+  const handleStressTest = () => {
+    onClose();
+    if (onStressTest) {
+      onStressTest(instance.id);
+    }
+    onShowToast(`Pico de carga (98% CPU) simulado em ${instance.name}`);
+  };
+
+  const handleTerminal = () => {
+    onClose();
+    if (onOpenTerminal) {
+      onOpenTerminal(instance);
+    }
+  };
+
+  const handleViewMetrics = () => {
+    onClose();
+    if (onViewMetrics) {
+      onViewMetrics(instance);
+    }
   };
 
   const handleDelete = () => {
@@ -103,6 +145,7 @@ export const InstanceActionSheet: React.FC<InstanceActionSheetProps> = ({
   };
 
   const statusStyle = getStatusStyle(instance.status);
+  const palette = CLOUD_PALETTES[instance.provider] || CLOUD_PALETTES.OCI;
 
   return (
     <>
@@ -117,18 +160,17 @@ export const InstanceActionSheet: React.FC<InstanceActionSheetProps> = ({
           activeOpacity={1}
           onPress={onClose}
         >
-          <View style={styles.sheetContainer}>
-            {/* Grabber visual corporativo */}
+          <View style={styles.sheetContainer} onStartShouldSetResponder={() => true}>
             <View style={styles.grabber} />
 
-            {/* Cabecalho da Maquina */}
+            {/* Cabecalho da Bottom Sheet */}
             <View style={styles.sheetHeader}>
               <View style={styles.headerLeft}>
                 <Text style={styles.instanceName} numberOfLines={1}>
                   {instance.name}
                 </Text>
-                <Text style={styles.instanceIp}>
-                  IP: {(instance.metadata as any)?.privateIp || '10.0.0.4'}
+                <Text style={styles.instanceSub}>
+                  {instance.provider} • {instance.region}
                 </Text>
               </View>
               <View
@@ -143,65 +185,150 @@ export const InstanceActionSheet: React.FC<InstanceActionSheetProps> = ({
               </View>
             </View>
 
-            {/* Opcoes de Acao Operacional (Zero Emojis) */}
-            <View style={styles.actionsList}>
-              <TouchableOpacity
-                style={styles.actionItem}
-                onPress={handleRestart}
-                activeOpacity={0.7}
-              >
-                <View style={styles.actionIconPlaceholder}>
-                  <VectorAssetRenderer
-                    label="R"
-                    size={18}
-                    source={require('../assets/images/power-512.png')}
-                    tintColor="#8AB4F8"
-                  />
-                </View>
-                <View style={styles.actionTextContainer}>
-                  <Text style={styles.actionTitle}>Reiniciar Instancia</Text>
-                  <Text style={styles.actionSubtitle}>
-                    Executa reboot e reestabelece CPU normalizada (~12%)
-                  </Text>
-                </View>
-              </TouchableOpacity>
+            <ScrollView showsVerticalScrollIndicator={false} style={styles.sheetScroll}>
+              {/* Card de Especificacoes Tecnicas (Progressive Disclosure Nivel 2) */}
+              <View style={styles.specsCard}>
+                <Text style={styles.specsCardTitle}>ESPECIFICAÇÕES TÉCNICAS DO HOST</Text>
 
-              <TouchableOpacity
-                style={styles.actionItem}
-                onPress={handleOpenEdit}
-                activeOpacity={0.7}
-              >
-                <View style={styles.actionIconPlaceholder}>
-                  <EditIcon size={18} color="#FDD663" />
-                </View>
-                <View style={styles.actionTextContainer}>
-                  <Text style={styles.actionTitle}>Editar Especificacoes</Text>
-                  <Text style={styles.actionSubtitle}>
-                    Renomear host ou atualizar shape/memoria
+                <View style={styles.specRow}>
+                  <Text style={styles.specKey}>OCID / ID:</Text>
+                  <Text style={styles.specValMono} numberOfLines={1} ellipsizeMode="middle">
+                    {ocid}
                   </Text>
                 </View>
-              </TouchableOpacity>
 
-              <TouchableOpacity
-                style={[styles.actionItem, styles.actionItemDanger]}
-                onPress={handleDelete}
-                activeOpacity={0.7}
-              >
-                <View style={[styles.actionIconPlaceholder, styles.dangerIconBox]}>
-                  <TrashIcon size={18} color="#F28B82" />
+                <View style={styles.specRow}>
+                  <Text style={styles.specKey}>IP Público:</Text>
+                  <Text style={styles.specValMono}>{publicIp}</Text>
                 </View>
-                <View style={styles.actionTextContainer}>
-                  <Text style={[styles.actionTitle, styles.dangerText]}>
-                    Terminar / Excluir Servidor
-                  </Text>
-                  <Text style={styles.actionSubtitle}>
-                    Desprovisiona e remove permanentemente do storage
-                  </Text>
-                </View>
-              </TouchableOpacity>
-            </View>
 
-            {/* Botao Fechar */}
+                <View style={styles.specRow}>
+                  <Text style={styles.specKey}>IP Privado:</Text>
+                  <Text style={styles.specValMono}>{privateIp}</Text>
+                </View>
+
+                <View style={styles.specRow}>
+                  <Text style={styles.specKey}>Shape / VM:</Text>
+                  <Text style={styles.specVal}>{shape}</Text>
+                </View>
+
+                <View style={styles.specRow}>
+                  <Text style={styles.specKey}>Capacidade:</Text>
+                  <Text style={styles.specValHighlight}>
+                    {ocpus} OCPUs (ARM) • {ramGb} GB RAM
+                  </Text>
+                </View>
+              </View>
+
+              {/* Lista de Acoes de Ciclo de Vida */}
+              <Text style={styles.actionsSectionTitle}>AÇÕES DE CICLO DE VIDA</Text>
+              <View style={styles.actionsList}>
+                {/* 1. Reiniciar Servidor */}
+                <TouchableOpacity
+                  style={styles.actionItem}
+                  onPress={handleRestart}
+                  activeOpacity={0.7}
+                >
+                  <View style={[styles.actionIconPlaceholder, { backgroundColor: '#1E3A5F' }]}>
+                    <Text style={[styles.actionLetter, { color: '#8AB4F8' }]}>R</Text>
+                  </View>
+                  <View style={styles.actionTextContainer}>
+                    <Text style={styles.actionTitle}>Reiniciar Servidor</Text>
+                    <Text style={styles.actionSubtitle}>
+                      Executa reboot gracioso e reestabelece CPU normalizada
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+
+                {/* 2. Ajustar Capacidade (OCPUs/RAM) */}
+                <TouchableOpacity
+                  style={styles.actionItem}
+                  onPress={handleOpenEdit}
+                  activeOpacity={0.7}
+                >
+                  <View style={[styles.actionIconPlaceholder, { backgroundColor: '#3A321A' }]}>
+                    <EditIcon size={16} color="#FDD663" />
+                  </View>
+                  <View style={styles.actionTextContainer}>
+                    <Text style={styles.actionTitle}>Ajustar Capacidade (OCPUs/RAM)</Text>
+                    <Text style={styles.actionSubtitle}>
+                      Redimensionar shape flexivel e memória alocada
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+
+                {/* 3. Abrir Console Terminal Linux */}
+                <TouchableOpacity
+                  style={styles.actionItem}
+                  onPress={handleTerminal}
+                  activeOpacity={0.7}
+                >
+                  <View style={[styles.actionIconPlaceholder, { backgroundColor: '#1E293B' }]}>
+                    <Text style={[styles.actionLetter, { color: '#38BDF8' }]}>{'>_'}</Text>
+                  </View>
+                  <View style={styles.actionTextContainer}>
+                    <Text style={styles.actionTitle}>Abrir Console Terminal Linux</Text>
+                    <Text style={styles.actionSubtitle}>
+                      Sessao interativa com shell opc@vnic-sidebrain
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+
+                {/* 4. Simular Pico de Carga (Teste de Estresse) */}
+                <TouchableOpacity
+                  style={styles.actionItem}
+                  onPress={handleStressTest}
+                  activeOpacity={0.7}
+                >
+                  <View style={[styles.actionIconPlaceholder, { backgroundColor: '#3F1F1F' }]}>
+                    <Text style={[styles.actionLetter, { color: '#F87171' }]}>ST</Text>
+                  </View>
+                  <View style={styles.actionTextContainer}>
+                    <Text style={styles.actionTitle}>Simular Pico de Carga (Teste de Estresse)</Text>
+                    <Text style={styles.actionSubtitle}>
+                      Eleva CPU a 98% para testar resiliencia e limites de SLA
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+
+                {/* 5. Ver Metricas e Graficos */}
+                <TouchableOpacity
+                  style={styles.actionItem}
+                  onPress={handleViewMetrics}
+                  activeOpacity={0.7}
+                >
+                  <View style={[styles.actionIconPlaceholder, { backgroundColor: '#133529' }]}>
+                    <Text style={[styles.actionLetter, { color: '#34D399' }]}>MG</Text>
+                  </View>
+                  <View style={styles.actionTextContainer}>
+                    <Text style={styles.actionTitle}>Análise de Métricas & Logs Insights</Text>
+                    <Text style={styles.actionSubtitle}>
+                      Gráficos de tendência, correlação CPU×RAM e logs centralizados
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+
+                {/* 6. Remover Instancia */}
+                <TouchableOpacity
+                  style={[styles.actionItem, styles.actionItemDanger]}
+                  onPress={handleDelete}
+                  activeOpacity={0.7}
+                >
+                  <View style={[styles.actionIconPlaceholder, styles.dangerIconBox]}>
+                    <TrashIcon size={16} color="#F28B82" />
+                  </View>
+                  <View style={styles.actionTextContainer}>
+                    <Text style={[styles.actionTitle, styles.dangerText]}>
+                      Remover Instância
+                    </Text>
+                    <Text style={styles.actionSubtitle}>
+                      Terminacao definitiva e desprovisionamento seguro
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
+
             <TouchableOpacity style={styles.cancelBtn} onPress={onClose}>
               <Text style={styles.cancelBtnText}>Fechar Painel</Text>
             </TouchableOpacity>
@@ -209,7 +336,7 @@ export const InstanceActionSheet: React.FC<InstanceActionSheetProps> = ({
         </TouchableOpacity>
       </Modal>
 
-      {/* Modal Compacto de Edicao de Especificacoes */}
+      {/* Modal de Ajuste de Capacidade */}
       <Modal
         visible={isEditModalOpen}
         transparent
@@ -218,7 +345,8 @@ export const InstanceActionSheet: React.FC<InstanceActionSheetProps> = ({
       >
         <View style={styles.modalCenterOverlay}>
           <View style={styles.editCard}>
-            <Text style={styles.editTitle}>Editar Especificacoes da Instancia</Text>
+            <Text style={styles.editTitle}>Ajustar Capacidade da Instância</Text>
+            <Text style={styles.editSubtitle}>Redimensionamento dinâmico de recursos computacionais</Text>
 
             <View style={styles.formGroup}>
               <Text style={styles.formLabel}>NOME DO NÓ</Text>
@@ -226,13 +354,13 @@ export const InstanceActionSheet: React.FC<InstanceActionSheetProps> = ({
                 style={styles.formInput}
                 value={editName}
                 onChangeText={setEditName}
-                placeholder="Ex: oracle-db-primary"
+                placeholder="Ex: vnic-sidebrain-prd"
                 placeholderTextColor="#5F6368"
               />
             </View>
 
             <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>SHAPE / ARQUITETURA</Text>
+              <Text style={styles.formLabel}>SHAPE DA VM</Text>
               <TextInput
                 style={styles.formInput}
                 value={editShape}
@@ -240,6 +368,31 @@ export const InstanceActionSheet: React.FC<InstanceActionSheetProps> = ({
                 placeholder="Ex: VM.Standard.A1.Flex"
                 placeholderTextColor="#5F6368"
               />
+            </View>
+
+            <View style={styles.formRow}>
+              <View style={[styles.formGroup, { flex: 1, marginRight: 8 }]}>
+                <Text style={styles.formLabel}>OCPUS</Text>
+                <TextInput
+                  style={styles.formInput}
+                  value={editOcpus}
+                  onChangeText={setEditOcpus}
+                  placeholder="4"
+                  placeholderTextColor="#5F6368"
+                  keyboardType="numeric"
+                />
+              </View>
+              <View style={[styles.formGroup, { flex: 1, marginLeft: 8 }]}>
+                <Text style={styles.formLabel}>RAM (GB)</Text>
+                <TextInput
+                  style={styles.formInput}
+                  value={editRam}
+                  onChangeText={setEditRam}
+                  placeholder="24"
+                  placeholderTextColor="#5F6368"
+                  keyboardType="numeric"
+                />
+              </View>
             </View>
 
             <View style={styles.editActions}>
@@ -251,7 +404,7 @@ export const InstanceActionSheet: React.FC<InstanceActionSheetProps> = ({
               </TouchableOpacity>
 
               <TouchableOpacity style={styles.editSaveBtn} onPress={handleSaveEdit}>
-                <Text style={styles.editSaveText}>Salvar Alteracoes</Text>
+                <Text style={styles.editSaveText}>Aplicar Capacidade</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -264,22 +417,23 @@ export const InstanceActionSheet: React.FC<InstanceActionSheetProps> = ({
 const styles = StyleSheet.create({
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.65)',
+    backgroundColor: 'rgba(0, 0, 0, 0.72)',
     justifyContent: 'flex-end',
   },
   sheetContainer: {
-    backgroundColor: '#1A1D24',
+    backgroundColor: '#16191F',
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     borderWidth: 1,
     borderColor: '#2D3139',
     padding: 20,
-    paddingBottom: 32,
+    paddingBottom: Platform.OS === 'ios' ? 36 : 24,
+    maxHeight: '85%',
   },
   grabber: {
-    width: 36,
+    width: 40,
     height: 4,
-    backgroundColor: '#5F6368',
+    backgroundColor: '#4B5563',
     borderRadius: 2,
     alignSelf: 'center',
     marginBottom: 16,
@@ -288,10 +442,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingBottom: 16,
+    paddingBottom: 14,
     borderBottomWidth: 1,
     borderBottomColor: '#282E38',
-    marginBottom: 16,
+    marginBottom: 14,
   },
   headerLeft: {
     flex: 1,
@@ -302,34 +456,83 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
   },
-  instanceIp: {
+  instanceSub: {
     color: '#9AA0A6',
-    fontSize: 11,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: 12,
     marginTop: 2,
   },
   statusBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
     borderRadius: 4,
     borderWidth: 1,
   },
   statusBadgeText: {
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '800',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
+  sheetScroll: {
+    marginBottom: 12,
+  },
+  specsCard: {
+    backgroundColor: '#0F1218',
+    borderRadius: 12,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: '#262C36',
+    marginBottom: 16,
+    gap: 8,
+  },
+  specsCardTitle: {
+    color: '#8AB4F8',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+    marginBottom: 4,
+  },
+  specRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  specKey: {
+    color: '#9AA0A6',
+    fontSize: 12,
+  },
+  specVal: {
+    color: '#E8EAED',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  specValMono: {
+    color: '#E8EAED',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    maxWidth: '65%',
+  },
+  specValHighlight: {
+    color: '#34D399',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  actionsSectionTitle: {
+    color: '#9AA0A6',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+    marginBottom: 10,
+  },
   actionsList: {
     gap: 10,
-    marginBottom: 16,
   },
   actionItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#20242C',
+    backgroundColor: '#1E232B',
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#2D3139',
+    borderColor: '#282E38',
     padding: 12,
     gap: 12,
   },
@@ -338,10 +541,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#2D151520',
   },
   actionIconPlaceholder: {
-    width: 32,
-    height: 32,
-    borderRadius: 6,
-    backgroundColor: '#282E38',
+    width: 34,
+    height: 34,
+    borderRadius: 8,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -349,7 +551,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#4D1F1F',
   },
   actionLetter: {
-    color: '#E8EAED',
     fontSize: 12,
     fontWeight: '800',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
@@ -364,21 +565,24 @@ const styles = StyleSheet.create({
   },
   actionSubtitle: {
     color: '#9AA0A6',
-    fontSize: 10,
+    fontSize: 11,
     marginTop: 2,
   },
   dangerText: {
     color: '#F28B82',
   },
   cancelBtn: {
-    backgroundColor: '#282E38',
-    borderRadius: 8,
+    backgroundColor: '#20242C',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#2D3139',
     paddingVertical: 12,
     alignItems: 'center',
+    marginTop: 4,
   },
   cancelBtnText: {
-    color: '#E8EAED',
-    fontSize: 12,
+    color: '#9AA0A6',
+    fontSize: 13,
     fontWeight: '700',
   },
   modalCenterOverlay: {
@@ -386,73 +590,79 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0, 0, 0, 0.75)',
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 20,
+    padding: 24,
   },
   editCard: {
-    width: '100%',
-    maxWidth: 380,
     backgroundColor: '#1A1D24',
-    borderRadius: 14,
+    borderRadius: 16,
     borderWidth: 1,
     borderColor: '#2D3139',
     padding: 20,
+    width: '100%',
+    maxWidth: 400,
   },
   editTitle: {
     color: '#E8EAED',
-    fontSize: 14,
-    fontWeight: '800',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  editSubtitle: {
+    color: '#9AA0A6',
+    fontSize: 11,
+    marginTop: 2,
     marginBottom: 16,
   },
   formGroup: {
     marginBottom: 12,
   },
+  formRow: {
+    flexDirection: 'row',
+  },
   formLabel: {
     color: '#9AA0A6',
-    fontSize: 9,
+    fontSize: 10,
     fontWeight: '700',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     marginBottom: 6,
+    letterSpacing: 0.5,
   },
   formInput: {
     backgroundColor: '#0F1318',
     borderRadius: 8,
     borderWidth: 1,
     borderColor: '#2D3139',
-    color: '#E8EAED',
     paddingHorizontal: 12,
-    paddingVertical: 8,
-    fontSize: 12,
+    paddingVertical: 10,
+    color: '#E8EAED',
+    fontSize: 13,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   editActions: {
     flexDirection: 'row',
-    gap: 10,
-    marginTop: 10,
+    justifyContent: 'flex-end',
+    gap: 12,
+    marginTop: 16,
   },
   editCancelBtn: {
-    flex: 1,
     paddingVertical: 10,
-    backgroundColor: '#282E38',
+    paddingHorizontal: 16,
     borderRadius: 8,
-    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#2D3139',
   },
   editCancelText: {
     color: '#9AA0A6',
     fontSize: 12,
-    fontWeight: '700',
+    fontWeight: '600',
   },
   editSaveBtn: {
-    flex: 1.4,
+    backgroundColor: '#8AB4F8',
     paddingVertical: 10,
-    backgroundColor: '#132B1D',
-    borderWidth: 1,
-    borderColor: '#1E462E',
+    paddingHorizontal: 18,
     borderRadius: 8,
-    alignItems: 'center',
   },
   editSaveText: {
-    color: '#81C995',
+    color: '#0F1318',
     fontSize: 12,
-    fontWeight: '800',
+    fontWeight: '700',
   },
 });

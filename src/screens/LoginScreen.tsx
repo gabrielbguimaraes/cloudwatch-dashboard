@@ -17,7 +17,7 @@ import { AppImage } from '../components/common/AppImage';
 export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   const { loginMaster, loginWithBiometrics, masterUser } = useAuth();
 
-  const [username, setUsername] = useState(masterUser?.username || 'joao.guimaraes');
+  const [username, setUsername] = useState(masterUser?.username || '');
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isBioLoading, setIsBioLoading] = useState(false);

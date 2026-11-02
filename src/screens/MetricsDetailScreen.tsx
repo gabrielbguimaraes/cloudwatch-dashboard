@@ -1,3 +1,10 @@
+/**
+ * MetricsDetailScreen - Painel de Telemetria Analitica e Logs Insights
+ * Progressive Disclosure Nivel 3: Graficos Vetoriais Suavizados (SVG),
+ * Analise de Correlacao CPU x Memoria, Limiar Critico de SLA (85%)
+ * e Central de Logs com Busca Instantanea e Filtros por Severidade.
+ */
+
 import React, { useState, useMemo, useEffect } from 'react';
 import {
   View,
@@ -6,20 +13,30 @@ import {
   StyleSheet,
   ScrollView,
   SafeAreaView,
+  TextInput,
+  useWindowDimensions,
+  Platform,
   Alert,
   ActivityIndicator,
-  Modal,
-  TextInput,
-  Vibration,
-  Platform,
 } from 'react-native';
+import Svg, {
+  Path,
+  Defs,
+  LinearGradient,
+  Stop,
+  Line,
+  Circle,
+  Text as SvgText,
+} from 'react-native-svg';
 import { useCloud } from '../context/CloudContext';
 import { CloudLogo } from '../components/common/CloudLogo';
 import { CLOUD_PALETTES, NEUTRAL_THEME } from '../theme/tokens';
+import { SLA_CRITICAL_THRESHOLD } from '../config/env';
 import {
-  generateTimeSeriesMetrics,
-  generateSimulatedLogs,
-} from '../services/simulationService';
+  telemetryRepository,
+  StructuredMetricsData,
+  InstanceLogEntry,
+} from '../services/telemetryRepository';
 import { Print, sharePdfAsync } from '../services/pdfService';
 import { SerialConsoleModal } from '../components/SerialConsoleModal';
 import type { CloudResource } from '../types';
@@ -28,25 +45,35 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
   navigation,
   route,
 }) => {
+  const { width: screenWidth } = useWindowDimensions();
   const {
     resources,
     selectedResource,
     setSelectedResource,
-    togglePin,
-    isResourcePinned,
     restartInstance,
     deleteInstance,
     editInstance,
   } = useCloud();
 
-  const [logFilter, setLogFilter] = useState<'ALL' | 'ERROR' | 'WARN'>('ALL');
-  const [isExportingPdf, setIsExportingPdf] = useState(false);
-  const [isEditModalVisible, setIsEditModalVisible] = useState(false);
-  const [isSerialConsoleOpen, setIsSerialConsoleOpen] = useState(false);
-  const [editName, setEditName] = useState('');
-  const [editShape, setEditShape] = useState('');
+  // Estados de Janela Temporal e Correlacao (Sprint 2)
+  const [timeWindow, setTimeWindow] = useState<'1h' | '24h' | '7d'>('24h');
+  const [isCorrelationActive, setIsCorrelationActive] = useState<boolean>(true);
 
-  // Sincronizacao automatica com route.params?.selectedInstanceId
+  // Estados da Central de Logs (Sprint 2)
+  const [logFilter, setLogFilter] = useState<'ALL' | 'INFO' | 'WARN' | 'ERROR'>('ALL');
+  const [logSearchQuery, setLogSearchQuery] = useState<string>('');
+  const [logsData, setLogsData] = useState<InstanceLogEntry[]>([]);
+  const [isLogsLoading, setIsLogsLoading] = useState<boolean>(false);
+
+  // Estados de Metricas Estruturadas
+  const [metricsData, setMetricsData] = useState<StructuredMetricsData | null>(null);
+  const [isMetricsLoading, setIsMetricsLoading] = useState<boolean>(false);
+
+  // Modais de Acao
+  const [isSerialConsoleOpen, setIsSerialConsoleOpen] = useState(false);
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
+
+  // Sincronizacao de recurso selecionado via rotas
   useEffect(() => {
     const targetId = route?.params?.selectedInstanceId || route?.params?.resourceId;
     if (targetId && resources.length > 0) {
@@ -59,7 +86,6 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
     }
   }, [route?.params?.selectedInstanceId, route?.params?.resourceId, resources]);
 
-  // Instancia ativa viva
   const activeInstance: CloudResource | null = useMemo(() => {
     if (!selectedResource) {
       return resources.length > 0 ? resources[0] : null;
@@ -67,64 +93,121 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
     return resources.find((r) => r.id === selectedResource.id) || selectedResource;
   }, [selectedResource, resources]);
 
+  // Carrega Telemetria Estruturada ao mudar instancia ou janela temporal
+  useEffect(() => {
+    if (!activeInstance) return;
+
+    let isMounted = true;
+    const fetchTelemetry = async () => {
+      setIsMetricsLoading(true);
+      const res = await telemetryRepository.getMetrics(
+        activeInstance.id,
+        timeWindow,
+        activeInstance.metricsSummary?.cpuPercent ?? 24,
+        activeInstance.metricsSummary?.memoryPercent ?? 48
+      );
+      if (isMounted) {
+        setMetricsData(res.data);
+        setIsMetricsLoading(false);
+      }
+    };
+
+    fetchTelemetry();
+    return () => {
+      isMounted = false;
+    };
+  }, [activeInstance?.id, timeWindow]);
+
+  // Carrega Logs Operacionais ao mudar instancia, filtro ou busca
+  useEffect(() => {
+    if (!activeInstance) return;
+
+    let isMounted = true;
+    const fetchLogs = async () => {
+      setIsLogsLoading(true);
+      const res = await telemetryRepository.getLogs(
+        activeInstance.id,
+        logFilter,
+        logSearchQuery
+      );
+      if (isMounted) {
+        setLogsData(res.data);
+        setIsLogsLoading(false);
+      }
+    };
+
+    fetchLogs();
+    return () => {
+      isMounted = false;
+    };
+  }, [activeInstance?.id, logFilter, logSearchQuery]);
+
   if (!activeInstance) {
     return (
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.emptyContainer}>
-          <Text style={styles.emptyText}>Nenhum recurso selecionado.</Text>
+          <Text style={styles.emptyText}>Nenhum servidor selecionado.</Text>
           <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
-            <Text style={styles.backBtnText}>Voltar ao Dashboard</Text>
+            <Text style={styles.backBtnText}>Voltar ao Console</Text>
           </TouchableOpacity>
         </View>
       </SafeAreaView>
     );
   }
 
-  const isPinned = isResourcePinned(activeInstance.id);
   const activePalette = CLOUD_PALETTES[activeInstance.provider] || CLOUD_PALETTES.OCI;
+  const cpuSeries = metricsData?.cpuSeries || [];
+  const memorySeries = metricsData?.memorySeries || [];
 
-  // Grafico vetorial de CPU proporcional a carga real
-  const timeSeries = useMemo(() => {
-    const points = generateTimeSeriesMetrics(activeInstance.id);
-    const targetCpu = activeInstance.metricsSummary?.cpuPercent ?? 10;
-    return points.map((pt, idx) => {
-      if (idx === points.length - 1) {
-        return { ...pt, value: targetCpu };
-      }
-      const ratio = targetCpu > 0 ? targetCpu / 85 : 0.05;
-      const ptVal = pt.value ?? 10;
-      const scaledVal = Math.min(
-        100,
-        Math.max(targetCpu > 0 ? 5 : 0, Math.round(ptVal * ratio * 10) / 10)
-      );
-      return { ...pt, value: scaledVal };
+  // ==========================================================================
+  // GERADOR DE CURVAS SUAVIZADAS (CUBIC BEZIER SVG PATH)
+  // ==========================================================================
+  const chartWidth = Math.max(300, screenWidth - 36 - 28);
+  const chartHeight = 170;
+  const padLeft = 20;
+  const padRight = 20;
+  const padTop = 15;
+  const padBottom = 25;
+  const usableWidth = chartWidth - padLeft - padRight;
+  const usableHeight = chartHeight - padTop - padBottom;
+
+  const buildSmoothPath = (series: { timestamp: string; value: number }[]) => {
+    if (!series || series.length === 0) return { linePath: '', areaPath: '', points: [] };
+
+    const pts = series.map((pt, i) => {
+      const x = padLeft + (i / Math.max(1, series.length - 1)) * usableWidth;
+      const clampedVal = Math.min(100, Math.max(0, pt.value));
+      const y = padTop + usableHeight - (clampedVal / 100) * usableHeight;
+      return { x, y, value: pt.value, timestamp: pt.timestamp };
     });
-  }, [activeInstance.id, activeInstance.metricsSummary?.cpuPercent]);
 
-  // Console de auditoria filtrado para a maquina ativa
-  const logs = useMemo(() => {
-    const raw = generateSimulatedLogs(activeInstance.id);
-    if (logFilter === 'ALL') return raw;
-    return raw.filter((l) => l.severity === logFilter);
-  }, [activeInstance.id, logFilter]);
-
-  const getStatusStyle = (status: string) => {
-    switch (status) {
-      case 'RUNNING':
-      case 'HEALTHY':
-        return NEUTRAL_THEME.statusRunning;
-      case 'REBOOTING':
-      case 'WARNING':
-      case 'DEGRADED':
-        return NEUTRAL_THEME.statusDegraded;
-      case 'STOPPED':
-      case 'CRITICAL':
-      default:
-        return NEUTRAL_THEME.statusStopped;
+    if (pts.length === 1) {
+      return {
+        linePath: `M ${pts[0].x} ${pts[0].y}`,
+        areaPath: `M ${pts[0].x} ${chartHeight - padBottom} L ${pts[0].x} ${pts[0].y} L ${pts[0].x} ${chartHeight - padBottom} Z`,
+        points: pts,
+      };
     }
+
+    let linePath = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`;
+    for (let i = 1; i < pts.length; i++) {
+      const prev = pts[i - 1];
+      const curr = pts[i];
+      const cpX = (prev.x + curr.x) / 2;
+      linePath += ` C ${cpX.toFixed(1)} ${prev.y.toFixed(1)}, ${cpX.toFixed(1)} ${curr.y.toFixed(1)}, ${curr.x.toFixed(1)} ${curr.y.toFixed(1)}`;
+    }
+
+    const baselineY = (padTop + usableHeight).toFixed(1);
+    const areaPath = `${linePath} L ${pts[pts.length - 1].x.toFixed(1)} ${baselineY} L ${pts[0].x.toFixed(1)} ${baselineY} Z`;
+
+    return { linePath, areaPath, points: pts };
   };
 
-  const statusStyle = getStatusStyle(activeInstance.status);
+  const cpuPaths = buildSmoothPath(cpuSeries);
+  const memPaths = buildSmoothPath(memorySeries);
+
+  // Posicao vertical do limite critico de 85%
+  const slaThresholdY = padTop + usableHeight - (SLA_CRITICAL_THRESHOLD / 100) * usableHeight;
 
   const handleExportPdf = async () => {
     if (isExportingPdf) return;
@@ -146,84 +229,60 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
 
       await sharePdfAsync(pdfResult.uri, `Relatorio de Telemetria e SLA - ${activeInstance.name}`);
     } catch (error: any) {
-      Alert.alert('Erro ao Exportar PDF', error?.message || 'Falha ao gerar relatorio PDF.');
+      Alert.alert('Erro ao Exportar PDF', error?.message || 'Falha ao gerar relatorio.');
     } finally {
       setIsExportingPdf(false);
     }
   };
 
-  const handlePin = () => {
-    togglePin(activeInstance.id);
-  };
-
-  const handleRestart = () => {
-    if (activeInstance.status === 'REBOOTING') return;
-    Vibration.vibrate(30);
-    restartInstance(activeInstance.id);
-  };
-
-  const handleOpenEdit = () => {
-    setEditName(activeInstance.name);
-    setEditShape(
-      (activeInstance.metadata as any)?.shape ||
-        activeInstance.tags?.Shape ||
-        'VM.Standard.A1.Flex'
-    );
-    setIsEditModalVisible(true);
-  };
-
-  const handleSaveEdit = () => {
-    if (!editName.trim()) {
-      Alert.alert('Nome Invalido', 'O nome da maquina nao pode ficar em branco.');
-      return;
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'RUNNING':
+      case 'HEALTHY':
+        return '#22C55E';
+      case 'REBOOTING':
+      case 'WARNING':
+      case 'DEGRADED':
+        return '#F59E0B';
+      case 'STOPPED':
+      case 'CRITICAL':
+      default:
+        return '#EF4444';
     }
-    editInstance(activeInstance.id, editName.trim(), editShape.trim());
-    setIsEditModalVisible(false);
   };
 
-  const handleDelete = () => {
-    Alert.alert(
-      'Encerrar Servidor',
-      'Tem certeza que deseja terminar esta instancia permanentemente?',
-      [
-        { text: 'Cancelar', style: 'cancel' },
-        {
-          text: 'Encerrar',
-          style: 'destructive',
-          onPress: () => {
-            deleteInstance(activeInstance.id);
-            navigation.goBack();
-          },
-        },
-      ]
-    );
-  };
+  const currentStatusColor = getStatusColor(activeInstance.status);
 
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={styles.container}>
-        {/* Header com Navegacao de Retorno */}
-        <View style={styles.navHeader}>
-          <TouchableOpacity style={styles.navBackBtn} onPress={() => navigation.goBack()}>
-            <Text style={styles.navBackIcon}>{'<'}</Text>
-            <Text style={styles.navBackText}>Voltar</Text>
+        {/* Barra Superior de Navegacao */}
+        <View style={styles.navBar}>
+          <TouchableOpacity
+            style={styles.navBackBtn}
+            onPress={() => navigation.goBack()}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.navBackText}>← Voltar</Text>
           </TouchableOpacity>
 
-          <View
-            style={[
-              styles.statusBadge,
-              { backgroundColor: statusStyle.bg, borderColor: statusStyle.border },
-            ]}
-          >
-            <Text style={[styles.statusBadgeText, { color: statusStyle.text }]}>
-              {activeInstance.status}
-            </Text>
+          <View style={styles.navActionGroup}>
+            <TouchableOpacity
+              style={styles.pdfHeaderBtn}
+              onPress={handleExportPdf}
+              disabled={isExportingPdf}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.pdfHeaderBtnText}>
+                {isExportingPdf ? 'Exportando...' : 'Exportar PDF'}
+              </Text>
+            </TouchableOpacity>
           </View>
         </View>
 
-        {/* Seletor Horizontal de Instancias (Carrossel Picker) */}
+        {/* Nivel 3.1: Seletor de Instancia no Topo */}
         <View style={styles.pickerSection}>
-          <Text style={styles.pickerSectionTitle}>SELETOR DE INSTANCIAS CONECTADAS</Text>
+          <Text style={styles.sectionHeaderTitle}>SELETOR DE SERVIDORES</Text>
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
@@ -232,12 +291,7 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
             {resources.map((inst) => {
               const isSelected = activeInstance.id === inst.id;
               const pTheme = CLOUD_PALETTES[inst.provider] || CLOUD_PALETTES.OCI;
-              const dotColor =
-                inst.status === 'HEALTHY' || inst.lifecycleState === 'RUNNING'
-                  ? NEUTRAL_THEME.statusRunning.text
-                  : inst.status === 'WARNING' || inst.status === 'REBOOTING'
-                    ? NEUTRAL_THEME.statusDegraded.text
-                    : NEUTRAL_THEME.statusStopped.text;
+              const dotCol = getStatusColor(inst.status);
 
               return (
                 <TouchableOpacity
@@ -253,7 +307,8 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
                   onPress={() => setSelectedResource(inst)}
                   activeOpacity={0.7}
                 >
-                  <View style={[styles.instanceChipDot, { backgroundColor: dotColor }]} />
+                  <View style={[styles.instanceChipDot, { backgroundColor: dotCol }]} />
+                  <CloudLogo provider={inst.provider} size={14} />
                   <Text
                     style={[
                       styles.instanceChipName,
@@ -263,12 +318,7 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
                   >
                     {inst.name}
                   </Text>
-                  <Text
-                    style={[
-                      styles.instanceChipCpu,
-                      isSelected && { color: pTheme.primary, fontWeight: '800' },
-                    ]}
-                  >
+                  <Text style={[styles.instanceChipCpu, { color: dotCol }]}>
                     {inst.metricsSummary?.cpuPercent ?? 0}%
                   </Text>
                 </TouchableOpacity>
@@ -277,338 +327,397 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
           </ScrollView>
         </View>
 
-        {/* Metadados e Titulo da Instancia Ativa */}
-        <View style={styles.metaSection}>
-          <View
-            style={[
-              styles.providerPill,
-              {
-                backgroundColor: activePalette.badgeBg,
-                borderColor: activePalette.borderFocus,
-              },
-            ]}
-          >
-            <CloudLogo provider={activeInstance.provider} size={14} />
-            <Text style={[styles.providerPillText, { color: activePalette.badgeText }]}>
-              {activePalette.name}
-            </Text>
+        {/* Cabecalho da Maquina Ativa */}
+        <View style={styles.hostMetaCard}>
+          <View style={styles.hostMetaHeader}>
+            <View style={styles.hostMetaLeft}>
+              <View style={[styles.statusPill, { borderColor: currentStatusColor }]}>
+                <View style={[styles.statusPillDot, { backgroundColor: currentStatusColor }]} />
+                <Text style={[styles.statusPillText, { color: currentStatusColor }]}>
+                  {activeInstance.status}
+                </Text>
+              </View>
+              <Text style={styles.hostTitle}>{activeInstance.name}</Text>
+            </View>
+            <View style={styles.sourceBadge}>
+              <Text style={styles.sourceBadgeText}>
+                {metricsData ? 'TELEMETRIA ATIVA' : 'LOCAL'}
+              </Text>
+            </View>
           </View>
 
-          <Text style={styles.resourceTitle}>{activeInstance.name}</Text>
-          <Text style={styles.resourceOcid} numberOfLines={1}>
+          <Text style={styles.hostOcid} numberOfLines={1} ellipsizeMode="middle">
             {activeInstance.ocid || activeInstance.arn || activeInstance.id}
           </Text>
         </View>
 
-        {/* Grafico Vetorial de Desempenho em Tempo Real */}
+        {/* Nivel 3.2: Card do Grafico Vetorial SVG com Analise de Correlacao */}
         <View style={styles.chartCard}>
-          <View style={styles.chartHeader}>
-            <View style={styles.chartTitleRow}>
-              <View
-                style={[
-                  styles.chartDot,
-                  {
-                    backgroundColor:
-                      (activeInstance.metricsSummary?.cpuPercent ?? 0) > 85
-                        ? NEUTRAL_THEME.statusStopped.text
-                        : activePalette.primary,
-                  },
-                ]}
-              />
-              <Text style={styles.chartTitle}>Uso de CPU em Tempo Real (%)</Text>
-            </View>
-            <Text
-              style={[
-                styles.chartPeak,
-                (activeInstance.metricsSummary?.cpuPercent ?? 0) > 85 && {
-                  color: NEUTRAL_THEME.statusStopped.text,
-                },
-              ]}
-            >
-              Carga Atual: {activeInstance.metricsSummary?.cpuPercent ?? 0}%
-            </Text>
-          </View>
-
-          {/* Canvas de Barras Vetoriais Proporcionais */}
-          <View style={styles.chartCanvas}>
-            <View style={styles.thresholdLine}>
-              <Text style={styles.thresholdLabel}>Limite 80%</Text>
-            </View>
-
-            <View style={styles.barsContainer}>
-              {timeSeries.slice(-16).map((pt, idx) => {
-                const val = pt.value ?? 0;
-                const heightPercent = Math.min(100, Math.max(10, val));
-                const isOverThreshold = val > 80;
-
+          {/* Barra de Controles: Janela Temporal + Toggle de Correlacao */}
+          <View style={styles.chartControlRow}>
+            <View style={styles.timeWindowPills}>
+              {(['1h', '24h', '7d'] as const).map((win) => {
+                const isActive = timeWindow === win;
                 return (
-                  <View key={idx} style={styles.barCol}>
-                    <View
-                      style={[
-                        styles.barFill,
-                        {
-                          height: `${heightPercent}%`,
-                          backgroundColor: isOverThreshold
-                            ? NEUTRAL_THEME.statusStopped.text
-                            : NEUTRAL_THEME.statusRunning.text,
-                        },
-                      ]}
-                    />
-                    {idx % 4 === 0 && (
-                      <Text style={styles.barLabel}>{pt.timestamp}</Text>
-                    )}
-                  </View>
+                  <TouchableOpacity
+                    key={win}
+                    style={[styles.windowPill, isActive && styles.windowPillActive]}
+                    onPress={() => setTimeWindow(win)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[styles.windowPillText, isActive && styles.windowPillTextActive]}>
+                      {win}
+                    </Text>
+                  </TouchableOpacity>
                 );
               })}
             </View>
+
+            {/* Botao de Toggle: Correlacionar CPU x Memoria */}
+            <TouchableOpacity
+              style={[
+                styles.correlationToggleBtn,
+                isCorrelationActive && styles.correlationToggleBtnActive,
+              ]}
+              onPress={() => setIsCorrelationActive(!isCorrelationActive)}
+              activeOpacity={0.8}
+            >
+              <View
+                style={[
+                  styles.toggleIndicator,
+                  isCorrelationActive && styles.toggleIndicatorActive,
+                ]}
+              />
+              <Text
+                style={[
+                  styles.correlationToggleText,
+                  isCorrelationActive && styles.correlationToggleTextActive,
+                ]}
+              >
+                Correlacionar CPU × Memória
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Legenda das Curvas e Limites */}
+          <View style={styles.legendRow}>
+            <View style={styles.legendItem}>
+              <View style={[styles.legendSquare, { backgroundColor: '#38BDF8' }]} />
+              <Text style={styles.legendText}>
+                CPU: {metricsData?.metrics.currentCpu ?? activeInstance.metricsSummary?.cpuPercent ?? 0}%
+              </Text>
+            </View>
+
+            {isCorrelationActive && (
+              <View style={styles.legendItem}>
+                <View style={[styles.legendSquare, { backgroundColor: '#F472B6' }]} />
+                <Text style={styles.legendText}>
+                  Memória: {metricsData?.metrics.currentMemory ?? activeInstance.metricsSummary?.memoryPercent ?? 45}%
+                </Text>
+              </View>
+            )}
+
+            <View style={styles.legendItem}>
+              <View style={[styles.legendLineDashed]} />
+              <Text style={[styles.legendText, { color: '#EF4444' }]}>
+                Limite SLA (85%)
+              </Text>
+            </View>
+          </View>
+
+          {/* Canvas SVG com Curvas Suavizadas */}
+          <View style={styles.svgCanvasWrapper}>
+            {isMetricsLoading && (
+              <View style={styles.chartLoadingOverlay}>
+                <ActivityIndicator size="small" color="#38BDF8" />
+              </View>
+            )}
+
+            <Svg width={chartWidth} height={chartHeight}>
+              <Defs>
+                {/* Gradiente sutil translucido da CPU */}
+                <LinearGradient id="cpuGradient" x1="0" y1="0" x2="0" y2="1">
+                  <Stop offset="0%" stopColor="#38BDF8" stopOpacity={0.35} />
+                  <Stop offset="80%" stopColor="#38BDF8" stopOpacity={0.06} />
+                  <Stop offset="100%" stopColor="#38BDF8" stopOpacity={0.0} />
+                </LinearGradient>
+
+                {/* Gradiente sutil translucido da Memoria */}
+                <LinearGradient id="memGradient" x1="0" y1="0" x2="0" y2="1">
+                  <Stop offset="0%" stopColor="#F472B6" stopOpacity={0.25} />
+                  <Stop offset="100%" stopColor="#F472B6" stopOpacity={0.0} />
+                </LinearGradient>
+              </Defs>
+
+              {/* Linha Tracejada Horizontal em 85% (Limite Critico SLA) */}
+              <Line
+                x1={padLeft}
+                y1={slaThresholdY}
+                x2={chartWidth - padRight}
+                y2={slaThresholdY}
+                stroke="#EF4444"
+                strokeWidth={1.5}
+                strokeDasharray="4 4"
+                strokeOpacity={0.85}
+              />
+              <SvgText
+                x={chartWidth - padRight - 4}
+                y={slaThresholdY - 4}
+                fill="#EF4444"
+                fontSize={9}
+                fontWeight="bold"
+                textAnchor="end"
+              >
+                Limite SLA 85%
+              </SvgText>
+
+              {/* Area e Curva de Memoria (quando Correlacao ativada) */}
+              {isCorrelationActive && memPaths.areaPath ? (
+                <>
+                  <Path d={memPaths.areaPath} fill="url(#memGradient)" />
+                  <Path
+                    d={memPaths.linePath}
+                    fill="none"
+                    stroke="#F472B6"
+                    strokeWidth={2}
+                    strokeLinecap="round"
+                  />
+                </>
+              ) : null}
+
+              {/* Area e Curva Principal de CPU */}
+              {cpuPaths.areaPath ? (
+                <>
+                  <Path d={cpuPaths.areaPath} fill="url(#cpuGradient)" />
+                  <Path
+                    d={cpuPaths.linePath}
+                    fill="none"
+                    stroke="#38BDF8"
+                    strokeWidth={2.4}
+                    strokeLinecap="round"
+                  />
+                  {/* Ponto atual ativo no final da curva */}
+                  {cpuPaths.points.length > 0 && (
+                    <Circle
+                      cx={cpuPaths.points[cpuPaths.points.length - 1].x}
+                      cy={cpuPaths.points[cpuPaths.points.length - 1].y}
+                      r={4.5}
+                      fill="#38BDF8"
+                      stroke="#0F1318"
+                      strokeWidth={2}
+                    />
+                  )}
+                </>
+              ) : null}
+
+              {/* Rotulos Temporais no Rodape do Eixo X */}
+              {cpuPaths.points.map((pt, idx) => {
+                const total = cpuPaths.points.length;
+                const shouldShow =
+                  idx === 0 ||
+                  idx === Math.floor(total / 2) ||
+                  idx === total - 1;
+
+                if (!shouldShow) return null;
+                return (
+                  <SvgText
+                    key={idx}
+                    x={pt.x}
+                    y={chartHeight - 4}
+                    fill="#9AA0A6"
+                    fontSize={9}
+                    textAnchor={idx === 0 ? 'start' : idx === total - 1 ? 'end' : 'middle'}
+                  >
+                    {pt.timestamp}
+                  </SvgText>
+                );
+              })}
+            </Svg>
           </View>
         </View>
 
-        {/* Botao Expansivel: Console Serial Linux Emulado */}
-        <TouchableOpacity
-          style={styles.serialConsoleBtn}
-          onPress={() => setIsSerialConsoleOpen(true)}
-          activeOpacity={0.8}
-        >
-          <Text style={styles.serialConsoleBtnIcon}>{'>_'}</Text>
-          <Text style={styles.serialConsoleBtnText}>Abrir Console Serial da VM</Text>
-        </TouchableOpacity>
-
-        {/* 4 Metricas Chave do Recurso */}
+        {/* 4 Indicadores Chave de Desempenho */}
         <View style={styles.metricsGrid}>
-          <View style={styles.metricCard}>
-            <Text style={styles.metricLabel}>CONSUMO ATUAL</Text>
+          <View style={styles.metricBox}>
+            <Text style={styles.metricBoxLabel}>CONSUMO CPU</Text>
+            <Text style={[styles.metricBoxVal, { color: currentStatusColor }]}>
+              {metricsData?.metrics.currentCpu ?? activeInstance.metricsSummary?.cpuPercent ?? 0}%
+            </Text>
+            <Text style={styles.metricBoxSub}>
+              Média: {metricsData?.metrics.avgCpu ?? 22}%
+            </Text>
+          </View>
+
+          <View style={styles.metricBox}>
+            <Text style={styles.metricBoxLabel}>MEMÓRIA RAM</Text>
+            <Text style={[styles.metricBoxVal, { color: '#F472B6' }]}>
+              {metricsData?.metrics.currentMemory ?? activeInstance.metricsSummary?.memoryPercent ?? 45}%
+            </Text>
+            <Text style={styles.metricBoxSub}>
+              Pico: {metricsData?.metrics.maxMemory ?? 52}%
+            </Text>
+          </View>
+
+          <View style={styles.metricBox}>
+            <Text style={styles.metricBoxLabel}>LATÊNCIA I/O</Text>
+            <Text style={styles.metricBoxVal}>
+              {metricsData?.metrics.currentLatency ?? 3.4} ms
+            </Text>
+            <Text style={styles.metricBoxSub}>Sub-milissegundo</Text>
+          </View>
+
+          <View style={styles.metricBox}>
+            <Text style={styles.metricBoxLabel}>DISPONIBILIDADE</Text>
             <Text
               style={[
-                styles.metricValue,
-                (activeInstance.metricsSummary?.cpuPercent ?? 0) > 85
-                  ? { color: NEUTRAL_THEME.statusStopped.text }
-                  : { color: NEUTRAL_THEME.statusRunning.text },
-              ]}
-            >
-              {activeInstance.metricsSummary?.cpuPercent ?? 0}% CPU
-            </Text>
-          </View>
-
-          <View style={styles.metricCard}>
-            <Text style={styles.metricLabel}>MEMORIA ALOCADA</Text>
-            <Text style={styles.metricValue}>
-              {activeInstance.metricsSummary?.memoryPercent || 48}% RAM
-            </Text>
-          </View>
-
-          <View style={styles.metricCard}>
-            <Text style={styles.metricLabel}>LATENCIA DE I/O</Text>
-            <Text style={styles.metricValue}>
-              {activeInstance.metricsSummary?.latencyMs || 4.2} ms
-            </Text>
-          </View>
-
-          <View style={styles.metricCard}>
-            <Text style={styles.metricLabel}>SLA DE DISPONIBILIDADE</Text>
-            <Text
-              style={[
-                styles.metricValue,
+                styles.metricBoxVal,
                 activeInstance.availabilitySla < 99.5
-                  ? { color: NEUTRAL_THEME.statusDegraded.text }
-                  : { color: NEUTRAL_THEME.statusRunning.text },
+                  ? { color: '#F59E0B' }
+                  : { color: '#22C55E' },
               ]}
             >
               {activeInstance.availabilitySla}%
             </Text>
+            <Text style={styles.metricBoxSub}>SLA Mensal</Text>
           </View>
         </View>
 
-        {/* Console de Auditoria e Logs Filtrado para a Maquina Ativa */}
+        {/* Botao de Abertura do Terminal Linux */}
+        <TouchableOpacity
+          style={styles.terminalButton}
+          onPress={() => setIsSerialConsoleOpen(true)}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.terminalButtonIcon}>{'>_'}</Text>
+          <Text style={styles.terminalButtonText}>Abrir Console Terminal Linux (SSH)</Text>
+        </TouchableOpacity>
+
+        {/* Nivel 3.3: Central de Logs (Logs Insights — Requisito Sprint 2) */}
         <View style={styles.logsSection}>
-          <View style={styles.logsHeader}>
-            <Text style={styles.logsTitle}>CONSOLE DE AUDITORIA & LOGS</Text>
-            <View style={styles.logFilters}>
-              <TouchableOpacity onPress={() => setLogFilter('ALL')}>
-                <Text
-                  style={[
-                    styles.filterTag,
-                    logFilter === 'ALL' && styles.filterTagActive,
-                  ]}
-                >
-                  TODOS
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity onPress={() => setLogFilter('ERROR')}>
-                <Text
-                  style={[
-                    styles.filterTag,
-                    logFilter === 'ERROR' && styles.filterTagActive,
-                  ]}
-                >
-                  ERROR
-                </Text>
-              </TouchableOpacity>
+          <View style={styles.logsHeaderRow}>
+            <View>
+              <Text style={styles.logsTitle}>LOGS INSIGHTS (CENTRALIZADO)</Text>
+              <Text style={styles.logsSub}>
+                {logsData.length} eventos operacionais registrados
+              </Text>
+            </View>
+
+            {/* Pilulas de Filtro Rapido de Severidade */}
+            <View style={styles.severityPills}>
+              {(['ALL', 'INFO', 'WARN', 'ERROR'] as const).map((sev) => {
+                const isSevActive = logFilter === sev;
+                return (
+                  <TouchableOpacity
+                    key={sev}
+                    style={[
+                      styles.sevPill,
+                      isSevActive && styles.sevPillActive,
+                      isSevActive && sev === 'ERROR' && styles.sevPillActiveError,
+                      isSevActive && sev === 'WARN' && styles.sevPillActiveWarn,
+                    ]}
+                    onPress={() => setLogFilter(sev)}
+                    activeOpacity={0.7}
+                  >
+                    <Text
+                      style={[
+                        styles.sevPillText,
+                        isSevActive && styles.sevPillTextActive,
+                      ]}
+                    >
+                      {sev === 'ALL' ? 'Todos' : sev}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
             </View>
           </View>
 
+          {/* Campo de Busca Rapida por Texto */}
+          <View style={styles.searchBar}>
+            <Text style={styles.searchIcon}>🔍</Text>
+            <TextInput
+              style={styles.searchInput}
+              value={logSearchQuery}
+              onChangeText={setLogSearchQuery}
+              placeholder="Buscar em mensagens, serviços ou IDs..."
+              placeholderTextColor="#5F6368"
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            {logSearchQuery.length > 0 && (
+              <TouchableOpacity onPress={() => setLogSearchQuery('')}>
+                <Text style={styles.clearSearchText}>✕</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {/* Lista de Registros de Log com Fonte Monoespacada */}
           <View style={styles.logsTerminal}>
-            {logs.length === 0 ? (
-              <Text style={styles.emptyLogsText}>Nenhum registro de log encontrado.</Text>
+            {isLogsLoading ? (
+              <View style={styles.logsLoadingBox}>
+                <ActivityIndicator size="small" color="#8AB4F8" />
+                <Text style={styles.logsLoadingText}>Filtrando logs em tempo real...</Text>
+              </View>
+            ) : logsData.length === 0 ? (
+              <View style={styles.emptyLogsBox}>
+                <Text style={styles.emptyLogsText}>
+                  Nenhum log encontrado para os critérios selecionados.
+                </Text>
+              </View>
             ) : (
-              logs.map((log) => (
-                <View key={log.id} style={styles.logRow}>
-                  <Text
-                    style={[
-                      styles.logSeverity,
-                      log.severity === 'ERROR' && { color: NEUTRAL_THEME.statusStopped.text },
-                      log.severity === 'WARN' && { color: NEUTRAL_THEME.statusDegraded.text },
-                    ]}
-                  >
-                    [{log.severity}]
-                  </Text>
-                  <Text style={styles.logTime}>{log.timestamp}</Text>
-                  <Text style={styles.logMsg} numberOfLines={2}>
-                    {log.message}
-                  </Text>
-                </View>
-              ))
+              logsData.map((log) => {
+                const isError = log.severity === 'ERROR';
+                const isWarn = log.severity === 'WARN';
+
+                const badgeBg = isError ? '#3F1F1F' : isWarn ? '#3A3018' : '#1E3A5F';
+                const badgeTextCol = isError ? '#FCA5A5' : isWarn ? '#FDD663' : '#93C5FD';
+                const badgeBorder = isError ? '#EF4444' : isWarn ? '#F59E0B' : '#3B82F6';
+
+                return (
+                  <View key={log.id} style={styles.logItem}>
+                    <View style={styles.logMetaRow}>
+                      <View
+                        style={[
+                          styles.logBadge,
+                          { backgroundColor: badgeBg, borderColor: badgeBorder },
+                        ]}
+                      >
+                        <Text style={[styles.logBadgeText, { color: badgeTextCol }]}>
+                          {log.severity}
+                        </Text>
+                      </View>
+
+                      <Text style={styles.logSource}>[{log.source}]</Text>
+
+                      <Text style={styles.logTimestamp}>
+                        {log.timeShort || log.timestamp.split('T')[1]?.substr(0, 8) || log.timestamp}
+                      </Text>
+                    </View>
+
+                    <Text
+                      style={[
+                        styles.logMessage,
+                        isError && styles.logMessageError,
+                        isWarn && styles.logMessageWarn,
+                      ]}
+                    >
+                      {log.message}
+                    </Text>
+                  </View>
+                );
+              })
             )}
           </View>
-        </View>
-
-        {/* Controles de Ciclo de Vida (Sem Emojis) */}
-        <View style={styles.lifecycleCard}>
-          <Text style={styles.lifecycleTitle}>CONTROLES DE CICLO DE VIDA</Text>
-          <View style={styles.lifecycleButtonsRow}>
-            <TouchableOpacity
-              style={[
-                styles.lifecycleBtn,
-                styles.lifecycleBtnRestart,
-                activeInstance.status === 'REBOOTING' && styles.lifecycleBtnDisabled,
-              ]}
-              onPress={handleRestart}
-              disabled={activeInstance.status === 'REBOOTING'}
-              activeOpacity={0.7}
-            >
-              {activeInstance.status === 'REBOOTING' ? (
-                <ActivityIndicator size="small" color="#38BDF8" />
-              ) : (
-                <Text style={styles.lifecycleBtnRestartText}>Reiniciar</Text>
-              )}
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.lifecycleBtn, styles.lifecycleBtnEdit]}
-              onPress={handleOpenEdit}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.lifecycleBtnEditText}>Editar</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.lifecycleBtn, styles.lifecycleBtnDelete]}
-              onPress={handleDelete}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.lifecycleBtnDeleteText}>Excluir</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* Acoes: PDF & Pin (Sem Emojis) */}
-        <View style={styles.actionsRow}>
-          <TouchableOpacity
-            style={[styles.actionBtnPdf, isExportingPdf && { opacity: 0.7 }]}
-            onPress={handleExportPdf}
-            disabled={isExportingPdf}
-          >
-            {isExportingPdf ? (
-              <ActivityIndicator size="small" color="#81C995" />
-            ) : (
-              <Text style={styles.actionBtnPdfText}>Exportar Relatorio PDF</Text>
-            )}
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.actionBtnPin, isPinned && styles.actionBtnPinActive]}
-            onPress={handlePin}
-          >
-            <Text
-              style={[
-                styles.actionBtnPinText,
-                isPinned && styles.actionBtnPinTextActive,
-              ]}
-            >
-              {isPinned ? 'Fixado no Topo' : 'Fixar no Topo'}
-            </Text>
-          </TouchableOpacity>
         </View>
       </ScrollView>
 
-      {/* Terminal Linux Interativo (Console Serial de VM) */}
+      {/* Console Serial Linux Emulado */}
       <SerialConsoleModal
         visible={isSerialConsoleOpen}
         onClose={() => setIsSerialConsoleOpen(false)}
         instance={activeInstance}
-        onRestartInstance={(id) => {
-          restartInstance(id);
-        }}
+        onRestartInstance={(id) => restartInstance(id)}
       />
-
-      {/* Modal: Edicao de Nome e Shape da Instancia (Sem Emojis) */}
-      <Modal
-        visible={isEditModalVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setIsEditModalVisible(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.editModalCard}>
-            <View style={styles.editModalHeader}>
-              <Text style={styles.editModalTitle}>Editar Instancia</Text>
-              <TouchableOpacity
-                onPress={() => setIsEditModalVisible(false)}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              >
-                <Text style={styles.modalCloseText}>FECHAR</Text>
-              </TouchableOpacity>
-            </View>
-
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>NOME DO SERVIDOR</Text>
-              <TextInput
-                style={styles.formInput}
-                value={editName}
-                onChangeText={setEditName}
-                placeholder="Nome da instancia"
-                placeholderTextColor="#5F6368"
-                autoCapitalize="none"
-              />
-            </View>
-
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>ARQUITETURA / SHAPE</Text>
-              <TextInput
-                style={styles.formInput}
-                value={editShape}
-                onChangeText={setEditShape}
-                placeholder="Shape (ex: VM.Standard.A1.Flex)"
-                placeholderTextColor="#5F6368"
-                autoCapitalize="none"
-              />
-            </View>
-
-            <View style={styles.modalActionsRow}>
-              <TouchableOpacity
-                style={styles.cancelModalBtn}
-                onPress={() => setIsEditModalVisible(false)}
-              >
-                <Text style={styles.cancelModalBtnText}>Cancelar</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity style={styles.saveModalBtn} onPress={handleSaveEdit}>
-                <Text style={styles.saveModalBtnText}>Salvar Alteracoes</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
     </SafeAreaView>
   );
 };
@@ -619,93 +728,67 @@ const styles = StyleSheet.create({
     backgroundColor: '#0F1318',
   },
   container: {
-    padding: 16,
+    padding: 18,
     paddingBottom: 40,
   },
-  emptyContainer: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 20,
-  },
-  emptyText: {
-    color: '#9AA0A6',
-    fontSize: 14,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  backBtn: {
-    marginTop: 12,
-    backgroundColor: '#1E242C',
-    borderWidth: 1,
-    borderColor: '#282E38',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 8,
-  },
-  backBtnText: {
-    color: '#E8EAED',
-    fontWeight: '700',
-  },
-  navHeader: {
+  navBar: {
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
-    paddingBottom: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#282E38',
+    alignItems: 'center',
+    marginBottom: 16,
   },
   navBackBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  navBackIcon: {
-    color: '#81C995',
-    fontSize: 14,
-    fontWeight: '700',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    backgroundColor: '#1E232B',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#282E38',
   },
   navBackText: {
-    color: '#9AA0A6',
+    color: '#8AB4F8',
     fontSize: 12,
-    fontWeight: '600',
+    fontWeight: '700',
   },
-  statusBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 4,
+  navActionGroup: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  pdfHeaderBtn: {
+    backgroundColor: '#1E3A5F',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 8,
     borderWidth: 1,
+    borderColor: '#3B82F6',
   },
-  statusBadgeText: {
-    fontSize: 9,
-    fontWeight: '800',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  pdfHeaderBtnText: {
+    color: '#93C5FD',
+    fontSize: 12,
+    fontWeight: '700',
   },
   pickerSection: {
-    marginTop: 14,
-    marginBottom: 4,
+    marginBottom: 14,
   },
-  pickerSectionTitle: {
+  sectionHeaderTitle: {
     color: '#9AA0A6',
-    fontSize: 9,
+    fontSize: 10,
     fontWeight: '800',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    letterSpacing: 0.5,
+    letterSpacing: 0.8,
     marginBottom: 8,
   },
   pickerScroll: {
     gap: 8,
-    paddingRight: 10,
   },
   instanceChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#181C22',
+    backgroundColor: '#16191F',
     borderWidth: 1,
-    borderColor: '#282E38',
+    borderColor: '#262C36',
     borderRadius: 8,
+    paddingVertical: 7,
     paddingHorizontal: 10,
-    paddingVertical: 6,
     gap: 6,
   },
   instanceChipDot: {
@@ -715,507 +798,421 @@ const styles = StyleSheet.create({
   },
   instanceChipName: {
     color: '#9AA0A6',
-    fontSize: 11,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: 12,
+    fontWeight: '600',
     maxWidth: 130,
   },
   instanceChipCpu: {
-    color: '#5F6368',
-    fontSize: 10,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  metaSection: {
-    marginTop: 12,
-  },
-  providerPill: {
-    alignSelf: 'flex-start',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 4,
-    borderWidth: 1,
-    marginBottom: 6,
-  },
-  providerPillText: {
-    fontSize: 9,
+    fontSize: 11,
     fontWeight: '800',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
-  resourceTitle: {
-    color: '#E8EAED',
-    fontSize: 18,
-    fontWeight: '800',
-  },
-  resourceOcid: {
-    color: '#5F6368',
-    fontSize: 10,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    marginTop: 2,
-  },
-  chartCard: {
-    backgroundColor: '#181C22',
+  hostMetaCard: {
+    backgroundColor: '#161A22',
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#282E38',
-    borderRadius: 14,
+    borderColor: '#262D38',
     padding: 14,
-    marginTop: 14,
+    marginBottom: 14,
   },
-  chartHeader: {
+  hostMetaHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 14,
+    marginBottom: 6,
   },
-  chartTitleRow: {
+  hostMetaLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 8,
+    flex: 1,
   },
-  chartDot: {
+  statusPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
+    borderWidth: 1,
+    gap: 5,
+  },
+  statusPillDot: {
     width: 6,
     height: 6,
     borderRadius: 3,
   },
-  chartTitle: {
-    color: '#E8EAED',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  chartPeak: {
-    color: '#81C995',
-    fontSize: 11,
+  statusPillText: {
+    fontSize: 10,
     fontWeight: '800',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
-  chartCanvas: {
-    height: 120,
-    position: 'relative',
-    justifyContent: 'flex-end',
-  },
-  thresholdLine: {
-    position: 'absolute',
-    top: 24,
-    left: 0,
-    right: 0,
-    borderTopWidth: 1,
-    borderTopColor: '#EF444460',
-    borderStyle: 'dashed',
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-  },
-  thresholdLabel: {
-    color: '#F28B82',
-    fontSize: 8,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    marginTop: -10,
-  },
-  barsContainer: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    height: '100%',
-    gap: 4,
-  },
-  barCol: {
+  hostTitle: {
+    color: '#E8EAED',
+    fontSize: 15,
+    fontWeight: '800',
     flex: 1,
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-    height: '100%',
   },
-  barFill: {
-    width: '100%',
-    borderRadius: 2,
-    minHeight: 6,
-    opacity: 0.9,
-  },
-  barLabel: {
-    color: '#5F6368',
-    fontSize: 7,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    marginTop: 4,
-  },
-  serialConsoleBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#05080C',
+  sourceBadge: {
+    backgroundColor: '#1E293B',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
     borderWidth: 1,
-    borderColor: '#1E242C',
-    borderRadius: 8,
-    paddingVertical: 10,
-    marginTop: 10,
+    borderColor: '#334155',
+  },
+  sourceBadgeText: {
+    color: '#38BDF8',
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  hostOcid: {
+    color: '#9AA0A6',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  chartCard: {
+    backgroundColor: '#161A22',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#262D38',
+    padding: 14,
+    marginBottom: 14,
+  },
+  chartControlRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
     gap: 8,
   },
-  serialConsoleBtnIcon: {
-    color: '#81C995',
-    fontSize: 12,
-    fontWeight: '900',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  timeWindowPills: {
+    flexDirection: 'row',
+    backgroundColor: '#0F1218',
+    borderRadius: 8,
+    padding: 2,
+    borderWidth: 1,
+    borderColor: '#262C36',
   },
-  serialConsoleBtnText: {
-    color: '#E8EAED',
+  windowPill: {
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+  },
+  windowPillActive: {
+    backgroundColor: '#262D38',
+  },
+  windowPillText: {
+    color: '#9AA0A6',
     fontSize: 11,
     fontWeight: '700',
+  },
+  windowPillTextActive: {
+    color: '#E8EAED',
+  },
+  correlationToggleBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1E232B',
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderWidth: 1,
+    borderColor: '#282E38',
+    gap: 6,
+  },
+  correlationToggleBtnActive: {
+    borderColor: '#F472B6',
+    backgroundColor: '#2D1627',
+  },
+  toggleIndicator: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#5F6368',
+  },
+  toggleIndicatorActive: {
+    backgroundColor: '#F472B6',
+  },
+  correlationToggleText: {
+    color: '#9AA0A6',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  correlationToggleTextActive: {
+    color: '#F9A8D4',
+    fontWeight: '700',
+  },
+  legendRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-start',
+    gap: 14,
+    marginBottom: 10,
+  },
+  legendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  legendSquare: {
+    width: 8,
+    height: 8,
+    borderRadius: 2,
+  },
+  legendLineDashed: {
+    width: 12,
+    height: 2,
+    backgroundColor: '#EF4444',
+  },
+  legendText: {
+    color: '#9AA0A6',
+    fontSize: 10,
+    fontWeight: '600',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  svgCanvasWrapper: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  chartLoadingOverlay: {
+    position: 'absolute',
+    zIndex: 10,
+    alignSelf: 'center',
   },
   metricsGrid: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
     gap: 8,
-    marginTop: 14,
+    marginBottom: 14,
   },
-  metricCard: {
+  metricBox: {
     flex: 1,
-    minWidth: '47%',
-    backgroundColor: '#181C22',
-    borderWidth: 1,
-    borderColor: '#282E38',
+    backgroundColor: '#161A22',
     borderRadius: 10,
     padding: 10,
-  },
-  metricLabel: {
-    color: '#9AA0A6',
-    fontSize: 8,
-    fontWeight: '800',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  metricValue: {
-    color: '#E8EAED',
-    fontSize: 13,
-    fontWeight: '800',
-    marginTop: 2,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  logsSection: {
-    marginTop: 16,
-  },
-  logsHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  logsTitle: {
-    color: '#9AA0A6',
-    fontSize: 10,
-    fontWeight: '700',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  logFilters: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  filterTag: {
-    color: '#5F6368',
-    fontSize: 9,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  filterTagActive: {
-    color: '#81C995',
-    fontWeight: '800',
-  },
-  logsTerminal: {
-    backgroundColor: '#05080C',
     borderWidth: 1,
-    borderColor: '#1E242C',
-    borderRadius: 10,
-    padding: 10,
-    gap: 8,
+    borderColor: '#262D38',
   },
-  emptyLogsText: {
-    color: '#5F6368',
-    fontSize: 10,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    fontStyle: 'italic',
-  },
-  logRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-  },
-  logSeverity: {
-    color: '#81C995',
-    fontSize: 9,
-    fontWeight: '800',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  logTime: {
-    color: '#5F6368',
-    fontSize: 9,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  logMsg: {
-    color: '#E8EAED',
-    fontSize: 9,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    flex: 1,
-  },
-  actionsRow: {
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 14,
-  },
-  actionBtnPdf: {
-    flex: 1,
-    backgroundColor: '#132B1D',
-    borderWidth: 1,
-    borderColor: '#1E462E',
-    borderRadius: 8,
-    paddingVertical: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  actionBtnPdfText: {
-    color: '#81C995',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  actionBtnPin: {
-    flex: 1,
-    backgroundColor: '#181C22',
-    borderWidth: 1,
-    borderColor: '#282E38',
-    borderRadius: 8,
-    paddingVertical: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  actionBtnPinText: {
-    color: '#E8EAED',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  actionBtnPinActive: {
-    backgroundColor: '#20242C',
-    borderColor: '#81C995',
-  },
-  actionBtnPinTextActive: {
-    color: '#81C995',
-  },
-  lifecycleCard: {
-    marginTop: 16,
-    backgroundColor: '#181C22',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#282E38',
-    padding: 12,
-  },
-  lifecycleTitle: {
+  metricBoxLabel: {
     color: '#9AA0A6',
     fontSize: 9,
-    fontWeight: '800',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    marginBottom: 10,
+    fontWeight: '700',
     letterSpacing: 0.5,
   },
-  lifecycleButtonsRow: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  lifecycleBtn: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 10,
-    borderRadius: 6,
-    borderWidth: 1,
-  },
-  lifecycleBtnRestart: {
-    backgroundColor: '#0B2538',
-    borderColor: '#164E63',
-  },
-  lifecycleBtnEdit: {
-    backgroundColor: '#20242C',
-    borderColor: '#3C4043',
-  },
-  lifecycleBtnDelete: {
-    backgroundColor: '#2D1515',
-    borderColor: '#4D1F1F',
-  },
-  lifecycleBtnDisabled: {
-    opacity: 0.7,
-  },
-  lifecycleBtnRestartText: {
-    color: '#38BDF8',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  lifecycleBtnEditText: {
-    color: '#9AA0A6',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  lifecycleBtnDeleteText: {
-    color: '#F28B82',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.75)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
-  },
-  editModalCard: {
-    width: '100%',
-    maxWidth: 400,
-    backgroundColor: '#1A1D24',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#2D3139',
-    padding: 18,
-  },
-  editModalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 14,
-    paddingBottom: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#282E38',
-  },
-  editModalTitle: {
+  metricBoxVal: {
     color: '#E8EAED',
     fontSize: 14,
     fontWeight: '800',
-  },
-  modalCloseText: {
-    color: '#9AA0A6',
-    fontSize: 11,
-    fontWeight: '700',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginTop: 4,
   },
-  formGroup: {
-    marginBottom: 12,
-  },
-  formLabel: {
-    color: '#9AA0A6',
+  metricBoxSub: {
+    color: '#5F6368',
     fontSize: 9,
-    fontWeight: '700',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    marginBottom: 6,
+    marginTop: 2,
   },
-  formInput: {
-    backgroundColor: '#0F1318',
-    borderRadius: 8,
+  terminalButton: {
+    backgroundColor: '#1A1D24',
+    borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#282E38',
-    color: '#E8EAED',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    fontSize: 12,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  modalActionsRow: {
+    borderColor: '#2D3139',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
     flexDirection: 'row',
-    gap: 10,
-    marginTop: 8,
-  },
-  cancelModalBtn: {
-    flex: 1,
-    paddingVertical: 10,
-    borderRadius: 8,
-    backgroundColor: '#282E38',
     alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginBottom: 16,
   },
-  cancelModalBtnText: {
-    color: '#9AA0A6',
-    fontWeight: '700',
-    fontSize: 12,
-  },
-  saveModalBtn: {
-    flex: 1.4,
-    paddingVertical: 10,
-    borderRadius: 8,
-    backgroundColor: '#132B1D',
-    borderWidth: 1,
-    borderColor: '#1E462E',
-    alignItems: 'center',
-  },
-  saveModalBtnText: {
-    color: '#81C995',
+  terminalButtonIcon: {
+    color: '#38BDF8',
+    fontSize: 14,
     fontWeight: '800',
-    fontSize: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
-  serialConsoleCard: {
-    width: '100%',
-    maxWidth: 420,
-    backgroundColor: '#05080C',
+  terminalButtonText: {
+    color: '#E8EAED',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  logsSection: {
+    backgroundColor: '#161A22',
     borderRadius: 14,
-    borderWidth: 1.5,
-    borderColor: '#1E242C',
-    padding: 16,
+    borderWidth: 1,
+    borderColor: '#262D38',
+    padding: 14,
   },
-  serialConsoleHeader: {
+  logsHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 12,
-    paddingBottom: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1E242C',
   },
-  serialConsoleTitle: {
+  logsTitle: {
     color: '#E8EAED',
     fontSize: 12,
     fontWeight: '800',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    letterSpacing: 0.6,
   },
-  serialTerminalScreen: {
-    backgroundColor: '#05080C',
+  logsSub: {
+    color: '#9AA0A6',
+    fontSize: 10,
+    marginTop: 2,
+  },
+  severityPills: {
+    flexDirection: 'row',
+    gap: 4,
+  },
+  sevPill: {
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 6,
+    backgroundColor: '#1E232B',
+    borderWidth: 1,
+    borderColor: '#282E38',
+  },
+  sevPillActive: {
+    backgroundColor: '#1E3A5F',
+    borderColor: '#3B82F6',
+  },
+  sevPillActiveError: {
+    backgroundColor: '#3F1F1F',
+    borderColor: '#EF4444',
+  },
+  sevPillActiveWarn: {
+    backgroundColor: '#3A3018',
+    borderColor: '#F59E0B',
+  },
+  sevPillText: {
+    color: '#9AA0A6',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  sevPillTextActive: {
+    color: '#E8EAED',
+  },
+  searchBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#0F1218',
     borderRadius: 8,
-    padding: 10,
-    minHeight: 160,
-  },
-  serialConsoleBody: {
-    maxHeight: 220,
-  },
-  serialConsoleContent: {
+    borderWidth: 1,
+    borderColor: '#262C36',
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    marginBottom: 12,
     gap: 6,
   },
-  serialConsoleLine: {
-    fontSize: 10,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    lineHeight: 16,
+  searchIcon: {
+    fontSize: 12,
   },
-  serialConsoleGreen: {
-    color: '#81C995',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  serialConsoleWhite: {
+  searchInput: {
+    flex: 1,
     color: '#E8EAED',
+    fontSize: 12,
+    padding: 0,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
-  serialConsolePromptRow: {
-    marginTop: 8,
+  clearSearchText: {
+    color: '#9AA0A6',
+    fontSize: 12,
+    paddingHorizontal: 4,
   },
-  serialConsolePromptUser: {
-    color: '#81C995',
-    fontSize: 10,
+  logsTerminal: {
+    backgroundColor: '#0F1218',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#262C36',
+    padding: 10,
+    gap: 8,
+  },
+  logsLoadingBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 16,
+    gap: 8,
+  },
+  logsLoadingText: {
+    color: '#9AA0A6',
+    fontSize: 11,
+  },
+  emptyLogsBox: {
+    padding: 16,
+    alignItems: 'center',
+  },
+  emptyLogsText: {
+    color: '#9AA0A6',
+    fontSize: 11,
+  },
+  logItem: {
+    borderBottomWidth: 1,
+    borderBottomColor: '#1A1E26',
+    paddingBottom: 8,
+  },
+  logMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 4,
+  },
+  logBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    borderWidth: 1,
+  },
+  logBadgeText: {
+    fontSize: 9,
     fontWeight: '800',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
-  serialConsoleCursor: {
-    color: '#FFFFFF',
-    fontSize: 11,
-    fontWeight: '900',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  serialConsoleCloseBtn: {
-    marginTop: 14,
-    backgroundColor: '#20242C',
-    borderWidth: 1,
-    borderColor: '#2D3139',
-    borderRadius: 8,
-    paddingVertical: 10,
-    alignItems: 'center',
-  },
-  serialConsoleCloseBtnText: {
-    color: '#E8EAED',
-    fontSize: 11,
+  logSource: {
+    color: '#8AB4F8',
+    fontSize: 10,
     fontWeight: '700',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  logTimestamp: {
+    color: '#5F6368',
+    fontSize: 10,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginLeft: 'auto',
+  },
+  logMessage: {
+    color: '#E8EAED',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 16,
+  },
+  logMessageError: {
+    color: '#FCA5A5',
+  },
+  logMessageWarn: {
+    color: '#FDE68A',
+  },
+  emptyContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  emptyText: {
+    color: '#9AA0A6',
+    fontSize: 14,
+    marginBottom: 16,
+  },
+  backBtn: {
+    backgroundColor: '#8AB4F8',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+  },
+  backBtnText: {
+    color: '#0F1318',
+    fontSize: 12,
+    fontWeight: '700',
   },
 });

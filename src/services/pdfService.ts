@@ -283,7 +283,7 @@ export const generateExecutiveReportHtml = (
   <div class="section-title">Parecer Técnico da Infraestrutura</div>
   <div class="technical-opinion">
     • A instância monitorada opera de acordo com os parâmetros estabelecidos de conformidade corporativa.<br />
-    • A telemetria foi aferida e validada pelo motor dual-engine do CloudWatch Dashboard (Sprint 1).<br />
+    • A telemetria foi aferida e validada pelo repositório de observabilidade do CloudWatch Dashboard (Sprint 2).<br />
     • Este relatório possui validade de auditoria executiva para comprovação de SLA de serviços em nuvem.
   </div>
 

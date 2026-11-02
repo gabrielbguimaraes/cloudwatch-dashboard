@@ -13,6 +13,7 @@ import type {
 } from '../types/auth';
 import type { UserSession, CloudProvider } from '../types';
 import { apiService } from '../services/api';
+import { BIOMETRIC_REAUTH_WINDOW_MS } from '../config/env';
 
 interface AuthContextData {
   masterUser: MasterProfile | null;
@@ -65,12 +66,9 @@ const DEFAULT_ACCOUNTS: Record<SupportedCloud, CloudCredentialConfig> = {
     provider: 'OCI',
     isConfigured: true,
     biometricsEnabled: false,
-    accountIdentifier: 'ocid1.tenancy.oc1..aaaaaaaab1234567890',
+    accountIdentifier: 'Tenancy OCI (sa-saopaulo-1)',
     region: 'sa-saopaulo-1',
     credentials: {
-      tenancyOcid: 'ocid1.tenancy.oc1..aaaaaaaab1234567890',
-      userOcid: 'ocid1.user.oc1..aaaaaaaax74n9b2k3l4m',
-      fingerprint: '0e:ed:6e:d2:98:cf:84:1e:7d:b7:16:37:ef:8c:e1:59',
       region: 'sa-saopaulo-1',
     },
     lastSyncedAt: new Date().toISOString(),
@@ -97,6 +95,11 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const [masterUser, setMasterUser] = useState<MasterProfile | null>(null);
   const [cloudAccounts, setCloudAccounts] = useState<Record<SupportedCloud, CloudCredentialConfig>>(DEFAULT_ACCOUNTS);
   const [activeProvider, setActiveProvider] = useState<SupportedCloud>('OCI');
+  const [unlockedClouds, setUnlockedClouds] = useState<Record<SupportedCloud, number>>({
+    OCI: Date.now(),
+    AWS: 0,
+    GCP: 0,
+  });
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
@@ -350,7 +353,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   /**
-   * Comuta o provedor ativo com Step-Up Biometric Authentication nao-bloqueante
+   * Comuta o provedor ativo com Step-Up Biometric Authentication inteligente
+   * Reducao de Friccao: nao exige biometria a cada troca se desbloqueado nos ultimos 15 minutos
    */
   const switchActiveProvider = async (provider: SupportedCloud): Promise<boolean> => {
     const targetConfig = cloudAccounts[provider];
@@ -362,21 +366,34 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       return true;
     }
 
-    if (targetConfig.biometricsEnabled) {
+    const lastUnlocked = unlockedClouds[provider] || 0;
+    const isWithinSessionWindow = Date.now() - lastUnlocked < BIOMETRIC_REAUTH_WINDOW_MS;
+
+    if (targetConfig.biometricsEnabled && !isWithinSessionWindow) {
       try {
-        const credentials = await Keychain.getGenericPassword({
-          service: KEYCHAIN_SERVICE,
-          authenticationPrompt: {
-            title: `Acesso a Nuvem: ${provider}`,
-            subtitle: 'Validacao biometrica de seguranca',
-            description: `Toque no sensor digital para desbloquear o console ${provider}`,
-            cancel: 'Cancelar',
-          },
-        });
+        let credentials: any = null;
+        try {
+          credentials = await Keychain.getGenericPassword({
+            service: KEYCHAIN_SERVICE,
+            authenticationPrompt: {
+              title: `Acesso a Nuvem: ${provider}`,
+              subtitle: 'Validacao biometrica de seguranca',
+              description: `Toque no sensor digital para desbloquear o console ${provider}`,
+              cancel: 'Cancelar',
+            },
+          });
+        } catch (kcErr) {
+          console.warn('[Keychain] Sensor biometrico inacessivel ou erro de hardware:', kcErr);
+          // Permite fallback sem travar o aplicativo
+          return false;
+        }
 
         if (!credentials || !credentials.username) {
           return false;
         }
+
+        // Registra o desbloqueio para a janela de 15 minutos
+        setUnlockedClouds((prev) => ({ ...prev, [provider]: Date.now() }));
       } catch (err) {
         console.warn('Autenticacao biometrica step-up cancelada ou indisponivel:', err);
         return false;

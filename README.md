@@ -49,30 +49,20 @@ A solução adota o padrão **Dual-Engine Multi-Cloud**, desacoplando a autentic
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## 📋 Product Backlog
+## 📋 Product Backlog & Tabela Atualizada de Sprints
 
-O backlog unificado agrupa as necessidades corporativas de monitoramento móvel em 5 épicos estratégicos, priorizados para entrega incremental de valor:
-
-| ID | Épico | História de Usuário / Requisito Funcional | Prioridade | Estimativa | Sprint Alocada |
-| :---: | :--- | :--- | :---: | :---: | :---: |
-| **US01** | Acesso & Segurança | Acesso seguro ao aplicativo por biometria nativa vinculada a cofre digital | Alta | 8 pts | Sprint 1 |
-| **US02** | Acesso & Segurança | Importação instantânea de credenciais corporativas via leitura óptica de QR Code | Alta | 8 pts | Sprint 1 |
-| **US03** | Acesso & Segurança | Identificação contextual da região de datacenter mais próxima via localização do dispositivo | Média | 5 pts | Sprint 1 |
-| **US04** | Governança | Validação automática da estrutura e conformidade dos identificadores de nuvem | Alta | 5 pts | Sprint 1 |
-| **US05** | Painel Operacional | Semáforo visual de integridade para classificação rápida de incidentes e servidores saudáveis | Alta | 5 pts | Sprint 1 |
-| **US06** | Operação em Tempo Real | Provisionamento interativo de servidores com recálculo instantâneo de métricas operacionais | Alta | 5 pts | Sprint 1 |
-| **US07** | Experiência de Uso | Fixação de servidores prioritários no topo da tela para monitoramento contínuo | Média | 3 pts | Sprint 1 |
-| **US08** | Auditoria & Gestão | Geração e compartilhamento de relatório executivo da infraestrutura em arquivo PDF | Média | 5 pts | Sprint 1 |
-| **US09** | Conexão Direta Nuvem | Comunicação autenticada e segura com os serviços de telemetria da nuvem principal (OCI) | Alta | 13 pts | Sprint 2 |
-| **US10** | Conexão Direta Nuvem | Listagem e sincronização em tempo real das máquinas ativas na conta corporativa | Alta | 8 pts | Sprint 2 |
-| **US11** | Conexão Direta Nuvem | Leitura direta do consumo de processamento e memória de instâncias em produção | Alta | 8 pts | Sprint 2 |
-| **US12** | Análise Histórica | Visualização de curvas de tendência e picos de uso por períodos customizados (1h, 24h, 7d) | Média | 8 pts | Sprint 2 |
-| **US13** | Governança | Alternância rápida entre diferentes ambientes corporativos e regiões geográficas | Média | 5 pts | Sprint 2 |
-| **US14** | Integração Multi-Cloud | Monitoramento unificado de servidores da Amazon Web Services (AWS) no mesmo painel | Alta | 8 pts | Sprint 3 |
-| **US15** | Integração Multi-Cloud | Monitoramento unificado de serviços do Google Cloud Platform (GCP) no mesmo painel | Alta | 8 pts | Sprint 3 |
-| **US16** | Comandos Operacionais | Execução remota de ações de ciclo de vida (iniciar, pausar e reiniciar servidores) | Alta | 8 pts | Sprint 3 |
-| **US17** | Alertas & Notificações | Avisos imediatos no dispositivo em caso de sobrecarga de capacidade ou indisponibilidade | Média | 5 pts | Sprint 3 |
-| **US18** | Auditoria & Gestão | Exportação consolidada de relatórios de cumprimento de SLA entre diferentes provedores | Baixa | 3 pts | Sprint 3 |
+| ID | Sprint | História de Usuário (Orientada a Valor) | Área de Atuação | Pontos | Status |
+| :---: | :---: | :--- | :--- | :---: | :---: |
+| **US09** | Sprint 2 | Sincronização de contas e credenciais em banco de dados em nuvem com criptografia de ponta a ponta | Governança & Persistência BFF | 8 pts | Em Execução |
+| **US10** | Sprint 2 | Listagem em tempo real das máquinas virtuais ativas diretamente da conta Oracle Cloud (OCI) | Integração Real OCI Compute | 8 pts | Em Execução |
+| **US11** | Sprint 2 | Extração real de séries temporais de processamento (CPU) e memória de servidores em produção | Telemetria Real OCI Monitoring | 13 pts | Em Execução |
+| **US12** | Sprint 2 | Gráficos de tendência suavizados por janela de tempo (1h, 24h, 7d) com Análise de Correlação sobreposta | Visualização Analítica | 8 pts | Em Execução |
+| **US13** | Sprint 2 | Central de Logs (Logs Insights) com busca instantânea e filtros rápidos por severidade (INFO, WARN, ERROR) | Observabilidade & Logs | 5 pts | Em Execução |
+| **US14** | Sprint 3 | Monitoramento unificado de instâncias da Amazon Web Services (AWS) e Google Cloud (GCP) | Ecossistema Multi-Cloud | 8 pts | Backlog |
+| **US15** | Sprint 3 | Mapa de Topologia Visual exibindo as conexões e dependências entre rede, servidores e bancos de dados | Arquitetura & Dependências | 8 pts | Backlog |
+| **US16** | Sprint 3 | Execução remota de comandos de ciclo de vida (iniciar, reiniciar e parar instâncias) | Controle Operacional | 8 pts | Backlog |
+| **US17** | Sprint 3 | Configuração de Regras de Alerta customizáveis por limite de uso com histórico retroativo de incidentes | Gestão de Incidentes | 5 pts | Backlog |
+| **US18** | Sprint 3 | Notificações em segundo plano e exportação consolidada de auditoria de SLA multi-cloud | Alertas & Relatórios | 5 pts | Backlog |
 
 ---
 
@@ -105,17 +95,17 @@ O backlog unificado agrupa as necessidades corporativas de monitoramento móvel 
 > **🏆 MVP 2:** Painel conectado diretamente aos serviços oficiais de monitoramento da nuvem em produção, substituindo simulações locais pela extração real de métricas de processamento e armazenamento de servidores ativos, exibindo curvas de tendência em gráficos interativos por período selecionável.
 
 * **Esforço Total:** 42 Story Points
-* **Status:** Pending
+* **Status:** Em Execução
 
 #### Sprint Backlog 2
 
 | ID | História de Usuário | Área de Atuação | Complexidade | Status |
 | :--- | :--- | :--- | :---: | :---: |
-| **US09** | Comunicação autenticada e segura com os serviços de telemetria da nuvem principal (OCI) | Conectividade Criptográfica | 13 pts | Backlog |
-| **US10** | Listagem e sincronização em tempo real das máquinas ativas na conta corporativa | Sincronização de Infraestrutura | 8 pts | Backlog |
-| **US11** | Leitura direta do consumo de processamento e memória de instâncias em produção | Coleta Contínua de Telemetria | 8 pts | Backlog |
-| **US12** | Visualização de curvas de tendência e picos de uso por períodos customizados (1h, 24h, 7d) | Gráficos Analíticos de Tendência | 8 pts | Backlog |
-| **US13** | Alternância rápida entre diferentes ambientes corporativos e regiões geográficas | Governança Multi-Ambiente | 5 pts | Backlog |
+| **US09** | Sincronização de contas e credenciais em banco de dados em nuvem com criptografia de ponta a ponta | Governança & Persistência BFF | 8 pts | Em Execução |
+| **US10** | Listagem em tempo real das máquinas virtuais ativas diretamente da conta Oracle Cloud (OCI) | Integração Real OCI Compute | 8 pts | Em Execução |
+| **US11** | Extração real de séries temporais de processamento (CPU) e memória de servidores em produção | Telemetria Real OCI Monitoring | 13 pts | Em Execução |
+| **US12** | Gráficos de tendência suavizados por janela de tempo (1h, 24h, 7d) com Análise de Correlação sobreposta | Visualização Analítica | 8 pts | Em Execução |
+| **US13** | Central de Logs (Logs Insights) com busca instantânea e filtros rápidos por severidade (INFO, WARN, ERROR) | Observabilidade & Logs | 5 pts | Em Execução |
 
 ---
 

@@ -19,6 +19,7 @@ import {
 } from '../services/simulationService';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from './AuthContext';
+import { telemetryRepository, TelemetrySource } from '../services/telemetryRepository';
 
 const STORAGE_KEY_PINNED = '@cloudwatch:pinned_resources';
 const STORAGE_KEY_RESOURCES = '@cloudwatch_resources';
@@ -53,6 +54,8 @@ interface CloudContextData {
   };
   isLoading: boolean;
   lastUpdated: string;
+  telemetrySource: TelemetrySource;
+  isLiveCloud: boolean;
   setProviderFilter: (provider: CloudProvider | 'ALL') => void;
   setActiveProvider: (provider: CloudProvider) => void;
   addConnectedProvider: (provider: CloudProvider) => void;
@@ -60,7 +63,7 @@ interface CloudContextData {
   setTimeRange: (range: '1h' | '6h' | '24h' | '7d' | '30d') => void;
   setSimulationMode: (enabled: boolean) => void;
   setSelectedResource: (resource: CloudResource | null) => void;
-  refreshMetrics: () => void;
+  refreshMetrics: () => Promise<void>;
   provisionInstance: (options?: CustomProvisionOptions | CloudProvider) => CloudResource;
   togglePin: (resourceId: string) => void;
   isResourcePinned: (resourceId: string) => boolean;
@@ -70,6 +73,9 @@ interface CloudContextData {
   injectChaosCpuOverload: () => { success: boolean; instanceName?: string };
   crashPrimaryInstance: () => { success: boolean; instanceName?: string };
   restoreInfrastructure: () => { success: boolean; restoredCount: number };
+  simulateLoadSpike: () => { success: boolean; instanceName?: string };
+  simulateHostOutage: () => { success: boolean; instanceName?: string };
+  restoreNormalHealth: () => { success: boolean; restoredCount: number };
 }
 
 const defaultAccount: CloudAccount = {
@@ -77,14 +83,7 @@ const defaultAccount: CloudAccount = {
   name: 'Oracle Cloud Production (Tenancy Principal)',
   provider: 'OCI',
   defaultRegion: 'sa-saopaulo-1',
-  isSimulationMode: true,
-  ociConfig: {
-    tenancyOcid: 'ocid1.tenancy.oc1..aaaaaaaab1234567890',
-    userOcid: 'ocid1.user.oc1..aaaaaaaax74n9b2k3l4m',
-    fingerprint: '20:3b:97:13:55:01:bc:ef:90:12:44:88:aa:bb:cc:dd',
-    region: 'sa-saopaulo-1',
-    compartmentOcid: 'ocid1.compartment.oc1..production-workloads',
-  },
+  isSimulationMode: false,
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
 };
@@ -104,30 +103,41 @@ export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ chil
   const [activeIncidents, setActiveIncidents] = useState<AlertIncident[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [lastUpdated, setLastUpdated] = useState<string>(new Date().toLocaleTimeString());
+  const [telemetrySource, setTelemetrySource] = useState<TelemetrySource>('LIVE_CLOUD');
 
   const activeProvider = authActiveProvider || 'OCI';
 
-  // Sincroniza recursos salvos no AsyncStorage ou carrega padrao
+  // Sincroniza recursos via TelemetryRepository (BFF OCI -> Cache Local -> Simulacao)
   useEffect(() => {
     const initializeData = async () => {
       try {
-        const stored = await AsyncStorage.getItem(STORAGE_KEY_RESOURCES);
-        if (stored) {
-          const parsed = JSON.parse(stored);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            setResources(parsed);
-            setSelectedResource(parsed[0]);
+        setIsLoading(true);
+        const repoRes = await telemetryRepository.getInstances(activeProvider);
+        setTelemetrySource(repoRes.source);
+
+        if (repoRes.data && repoRes.data.length > 0) {
+          setResources(repoRes.data);
+          setSelectedResource(repoRes.data[0]);
+          saveResourcesToDisk(repoRes.data);
+        } else {
+          const stored = await AsyncStorage.getItem(STORAGE_KEY_RESOURCES);
+          if (stored) {
+            const parsed = JSON.parse(stored);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              setResources(parsed);
+              setSelectedResource(parsed[0]);
+            } else {
+              const initial = generateSimulatedResources();
+              setResources(initial);
+              setSelectedResource(initial[0]);
+              saveResourcesToDisk(initial);
+            }
           } else {
             const initial = generateSimulatedResources();
             setResources(initial);
             setSelectedResource(initial[0]);
-            await AsyncStorage.setItem(STORAGE_KEY_RESOURCES, JSON.stringify(initial));
+            saveResourcesToDisk(initial);
           }
-        } else {
-          const initial = generateSimulatedResources();
-          setResources(initial);
-          setSelectedResource(initial[0]);
-          await AsyncStorage.setItem(STORAGE_KEY_RESOURCES, JSON.stringify(initial));
         }
 
         const storedPinned = await AsyncStorage.getItem(STORAGE_KEY_PINNED);
@@ -147,7 +157,7 @@ export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ chil
     };
 
     initializeData();
-  }, []);
+  }, [activeProvider]);
 
   // Persiste recursos no AsyncStorage
   const saveResourcesToDisk = async (newResources: CloudResource[]) => {
@@ -225,9 +235,24 @@ export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ chil
   };
 
   /**
-   * Recalcula oscilacoes de telemetria sem excluir nenhuma instancia da lista
+   * Recalcula telemetria (Tenta buscar dados reais do TelemetryRepository e faz fallback suave)
    */
-  const refreshMetrics = () => {
+  const refreshMetrics = async (): Promise<void> => {
+    try {
+      const repoRes = await telemetryRepository.getInstances(activeProvider);
+      setTelemetrySource(repoRes.source);
+
+      if (repoRes.data && repoRes.data.length > 0) {
+        setResources(repoRes.data);
+        saveResourcesToDisk(repoRes.data);
+        setLastUpdated(new Date().toLocaleTimeString());
+        return;
+      }
+    } catch (err) {
+      console.log('[CloudContext] Erro ao sincronizar do repositório remoto:', err);
+    }
+
+    // Fallback de oscilacao local
     setResources((prev) => {
       const updated = prev.map((item) => {
         if (item.status === 'REBOOTING' || item.lifecycleState === 'STOPPED') {
@@ -543,6 +568,8 @@ export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ chil
         kpis,
         isLoading,
         lastUpdated,
+        telemetrySource,
+        isLiveCloud: telemetrySource === 'LIVE_CLOUD',
         setProviderFilter: (p) => {
           setSelectedProvider(p);
           if (p !== 'ALL') switchActiveProvider(p);
@@ -563,6 +590,9 @@ export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ chil
         injectChaosCpuOverload,
         crashPrimaryInstance,
         restoreInfrastructure,
+        simulateLoadSpike: injectChaosCpuOverload,
+        simulateHostOutage: crashPrimaryInstance,
+        restoreNormalHealth: restoreInfrastructure,
       }}
     >
       {children}

@@ -4,9 +4,9 @@
  * a aplicacao recorre ao armazenamento local seguro (EncryptedStorage/AsyncStorage)
  */
 
-export const API_URL = 'http://167.234.241.171:3000/api';
+import { API_BASE_URL, REQUEST_TIMEOUT_MS } from '../config/env';
 
-const REQUEST_TIMEOUT_MS = 2500;
+export const API_URL = API_BASE_URL;
 
 interface ApiResponse<T = any> {
   success: boolean;

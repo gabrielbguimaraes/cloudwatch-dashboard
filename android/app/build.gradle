@@ -21,6 +21,9 @@ react {
     // Empty list means even debug APK contains the bundled JS offline for phone installation
     debuggableVariants = []
 
+    /* Node executable and memory */
+    nodeExecutableAndArgs = ["node", "--max-old-space-size=4096"]
+
     /* Bundling */
     //   A list containing the node command and its flags. Default is just 'node'.
     // nodeExecutableAndArgs = ["node"]
