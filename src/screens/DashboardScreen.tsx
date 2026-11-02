@@ -39,6 +39,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
     deleteInstance,
     editInstance,
     provisionInstance,
+    addCustomResource,
     setSelectedResource,
     injectChaosCpuOverload,
     crashPrimaryInstance,
@@ -65,6 +66,16 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
 
   // Modal Executivo de Simulacao de Carga e Resiliencia
   const [isStressModalVisible, setIsStressModalVisible] = useState(false);
+
+  // Modal de Cadastro de Recurso OCI Real (Host/IP Zabbix)
+  const [isAddResourceModalVisible, setIsAddResourceModalVisible] = useState(false);
+  const [newResourceName, setNewResourceName] = useState('');
+  const [newResourceShape, setNewResourceShape] = useState('VM.Standard.A1.Flex (Compute)');
+  const [newResourcePublicIp, setNewResourcePublicIp] = useState('167.234.241.171');
+  const [newResourcePrivateIp, setNewResourcePrivateIp] = useState('10.0.0.10');
+  const [newResourceOcpus, setNewResourceOcpus] = useState('2');
+  const [newResourceMemoryGb, setNewResourceMemoryGb] = useState('16');
+  const [isSavingResource, setIsSavingResource] = useState(false);
 
   const activePalette = CLOUD_PALETTES[activeProvider] || CLOUD_PALETTES.OCI;
   const activeAccountConfig = cloudAccounts[activeProvider];
@@ -102,6 +113,39 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
       await sharePdfAsync(pdfResult.uri, `Relatorio Executivo - ${activePalette.name}`);
     } catch (err: any) {
       setToastMessage('Falha ao exportar relatorio PDF');
+    }
+  };
+
+  const handleSaveNewResource = async () => {
+    if (!newResourceName.trim()) {
+      Alert.alert('Atenção', 'Informe o nome do recurso OCI.');
+      return;
+    }
+    setIsSavingResource(true);
+    try {
+      await addCustomResource({
+        name: newResourceName.trim(),
+        provider: activeProvider,
+        shape: newResourceShape,
+        resourceType: newResourceShape.includes('Database')
+          ? 'Autonomous Database'
+          : newResourceShape.includes('VCN')
+            ? 'VCN Gateway'
+            : 'Compute Instance',
+        publicIp: newResourcePublicIp.trim() || '167.234.241.171',
+        privateIp: newResourcePrivateIp.trim() || '10.0.0.10',
+        region: activeAccountConfig?.region || 'sa-saopaulo-1',
+        ocpus: Number(newResourceOcpus) || 2,
+        memoryGb: Number(newResourceMemoryGb) || 16,
+      });
+      setIsAddResourceModalVisible(false);
+      const savedName = newResourceName.trim();
+      setNewResourceName('');
+      setToastMessage(`Recurso "${savedName}" cadastrado no monitoramento!`);
+    } catch (err: any) {
+      Alert.alert('Erro', 'Falha ao cadastrar recurso.');
+    } finally {
+      setIsSavingResource(false);
     }
   };
 
@@ -274,6 +318,16 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
             </View>
 
             <View style={styles.actionGroup}>
+              <TouchableOpacity
+                style={styles.addResourceBtn}
+                onPress={() => setIsAddResourceModalVisible(true)}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.addResourceBtnText} numberOfLines={1}>
+                  + Recurso
+                </Text>
+              </TouchableOpacity>
+
               <TouchableOpacity
                 style={styles.stressBtn}
                 onPress={() => setIsStressModalVisible(true)}
@@ -562,6 +616,158 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
         </View>
       </Modal>
 
+      {/* Modal de Cadastro de Recurso OCI Real (Host/IP Zabbix) */}
+      <Modal
+        visible={isAddResourceModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setIsAddResourceModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.addResourceModalCard}>
+            <View style={styles.stressModalHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.stressModalTitle}>Cadastrar Recurso OCI</Text>
+                <Text style={styles.addResourceSubtitle}>
+                  Monitore recursos reais com IP público para sondagem Zabbix
+                </Text>
+              </View>
+              <TouchableOpacity onPress={() => setIsAddResourceModalVisible(false)}>
+                <Text style={styles.modalCloseText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Seletor Rapido de Tipo / Shape */}
+            <Text style={styles.formLabel}>TIPO / SHAPE DO RECURSO</Text>
+            <View style={styles.shapeSelectorRow}>
+              {[
+                'VM.Standard.A1.Flex (Compute)',
+                'VM.Standard.E2.1.Micro',
+                'Autonomous Database',
+                'VCN / Load Balancer',
+              ].map((s) => (
+                <TouchableOpacity
+                  key={s}
+                  style={[
+                    styles.shapePill,
+                    newResourceShape === s && styles.shapePillActive,
+                  ]}
+                  onPress={() => {
+                    setNewResourceShape(s);
+                    if (s.includes('A1.Flex')) {
+                      setNewResourceOcpus('4');
+                      setNewResourceMemoryGb('24');
+                    } else if (s.includes('Micro')) {
+                      setNewResourceOcpus('1');
+                      setNewResourceMemoryGb('1');
+                    } else if (s.includes('Database')) {
+                      setNewResourceOcpus('2');
+                      setNewResourceMemoryGb('16');
+                    }
+                  }}
+                >
+                  <Text
+                    style={[
+                      styles.shapePillText,
+                      newResourceShape === s && styles.shapePillTextActive,
+                    ]}
+                    numberOfLines={1}
+                  >
+                    {s.split(' ')[0]}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* Nome do Recurso */}
+            <View style={styles.formGroup}>
+              <Text style={styles.formLabel}>NOME DO RECURSO OCI</Text>
+              <TextInput
+                style={styles.formInput}
+                value={newResourceName}
+                onChangeText={setNewResourceName}
+                placeholder="Ex: vnic-sidebrain-prd ou db-oracle-prod"
+                placeholderTextColor="#5F6368"
+                autoCapitalize="none"
+              />
+            </View>
+
+            {/* Endereco IP Publico para Sondagem Zabbix */}
+            <View style={styles.formGroup}>
+              <Text style={styles.formLabel}>ENDEREÇO IP PÚBLICO (SONDAGEM ZABBIX)</Text>
+              <TextInput
+                style={styles.formInput}
+                value={newResourcePublicIp}
+                onChangeText={setNewResourcePublicIp}
+                placeholder="Ex: 167.234.241.171"
+                placeholderTextColor="#5F6368"
+                autoCapitalize="none"
+              />
+            </View>
+
+            {/* Endereco IP Privado */}
+            <View style={styles.formGroup}>
+              <Text style={styles.formLabel}>ENDEREÇO IP PRIVADO (VCN SUBNET)</Text>
+              <TextInput
+                style={styles.formInput}
+                value={newResourcePrivateIp}
+                onChangeText={setNewResourcePrivateIp}
+                placeholder="Ex: 10.0.0.10"
+                placeholderTextColor="#5F6368"
+                autoCapitalize="none"
+              />
+            </View>
+
+            {/* OCPUs e Memoria (GB) */}
+            <View style={styles.formRowTwoCols}>
+              <View style={[styles.formGroup, { flex: 1 }]}>
+                <Text style={styles.formLabel}>OCPUS</Text>
+                <TextInput
+                  style={styles.formInput}
+                  value={newResourceOcpus}
+                  onChangeText={setNewResourceOcpus}
+                  placeholder="2"
+                  placeholderTextColor="#5F6368"
+                  keyboardType="numeric"
+                />
+              </View>
+
+              <View style={[styles.formGroup, { flex: 1 }]}>
+                <Text style={styles.formLabel}>MEMÓRIA (GB)</Text>
+                <TextInput
+                  style={styles.formInput}
+                  value={newResourceMemoryGb}
+                  onChangeText={setNewResourceMemoryGb}
+                  placeholder="16"
+                  placeholderTextColor="#5F6368"
+                  keyboardType="numeric"
+                />
+              </View>
+            </View>
+
+            {/* Acoes do Modal */}
+            <View style={styles.quickModalActions}>
+              <TouchableOpacity
+                style={styles.quickCancelBtn}
+                onPress={() => setIsAddResourceModalVisible(false)}
+              >
+                <Text style={styles.quickCancelText}>Cancelar</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.quickSaveBtn, isSavingResource && { opacity: 0.6 }]}
+                onPress={handleSaveNewResource}
+                disabled={isSavingResource}
+              >
+                <Text style={styles.quickSaveText}>
+                  {isSavingResource ? 'Cadastrando...' : 'Cadastrar Recurso OCI'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       {/* Modal Executivo: Simulacao de Carga e Resiliencia */}
       <Modal
         visible={isStressModalVisible}
@@ -697,6 +903,19 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+  },
+  addResourceBtn: {
+    backgroundColor: '#0F382A',
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#22C55E',
+  },
+  addResourceBtnText: {
+    color: '#86EFAC',
+    fontSize: 11,
+    fontWeight: '700',
   },
   stressBtn: {
     backgroundColor: '#262C36',
@@ -1044,6 +1263,52 @@ const styles = StyleSheet.create({
     color: '#0F1318',
     fontSize: 12,
     fontWeight: '700',
+  },
+  addResourceModalCard: {
+    backgroundColor: '#1A1D24',
+    borderRadius: 16,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: '#2D3139',
+    width: '100%',
+    maxWidth: 440,
+  },
+  addResourceSubtitle: {
+    color: '#9AA0A6',
+    fontSize: 12,
+    marginTop: 4,
+    marginBottom: 12,
+  },
+  shapeSelectorRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginBottom: 14,
+  },
+  shapePill: {
+    backgroundColor: '#0F1318',
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#2D3139',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  shapePillActive: {
+    backgroundColor: '#1E3A5F',
+    borderColor: '#38BDF8',
+  },
+  shapePillText: {
+    color: '#9AA0A6',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  shapePillTextActive: {
+    color: '#38BDF8',
+    fontWeight: '700',
+  },
+  formRowTwoCols: {
+    flexDirection: 'row',
+    gap: 10,
   },
   stressModalCard: {
     backgroundColor: '#1A1D24',

@@ -20,6 +20,7 @@ import type { CloudResource } from '../types';
 import { NEUTRAL_THEME, CLOUD_PALETTES } from '../theme/tokens';
 import { EditIcon, TrashIcon } from './common/AppIcons';
 import { VectorAssetRenderer } from './common/VectorAssetRenderer';
+import { telemetryRepository, NetworkPortProbe } from '../services/telemetryRepository';
 
 interface InstanceActionSheetProps {
   visible: boolean;
@@ -51,6 +52,23 @@ export const InstanceActionSheet: React.FC<InstanceActionSheetProps> = ({
   const [editShape, setEditShape] = useState('');
   const [editOcpus, setEditOcpus] = useState('4');
   const [editRam, setEditRam] = useState('24');
+  const [probedPorts, setProbedPorts] = useState<NetworkPortProbe[] | null>(null);
+  const [isProbing, setIsProbing] = useState(false);
+
+  const handleProbe = async () => {
+    if (!instance) return;
+    setIsProbing(true);
+    try {
+      const ip = (instance.metadata as any)?.publicIp || '167.234.241.171';
+      const res = await telemetryRepository.probeNetwork(ip, instance.id);
+      setProbedPorts(res.ports);
+      onShowToast(`Sondagem Zabbix concluída no IP ${ip}`);
+    } catch {
+      onShowToast('Falha na sondagem de rede');
+    } finally {
+      setIsProbing(false);
+    }
+  };
 
   if (!instance) return null;
 
@@ -217,6 +235,44 @@ export const InstanceActionSheet: React.FC<InstanceActionSheetProps> = ({
                   <Text style={styles.specValHighlight}>
                     {ocpus} OCPUs (ARM) • {ramGb} GB RAM
                   </Text>
+                </View>
+              </View>
+
+              {/* Painel Zabbix TCP Probe Rapido */}
+              <View style={styles.sheetProbeContainer}>
+                <View style={styles.sheetProbeHeader}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.sheetProbeTitle}>SONDAGEM DE REDE ZABBIX TCP</Text>
+                    <Text style={styles.sheetProbeSubtitle}>Host: {publicIp}</Text>
+                  </View>
+                  <TouchableOpacity
+                    style={[styles.sheetProbeBtn, isProbing && { opacity: 0.6 }]}
+                    onPress={handleProbe}
+                    disabled={isProbing}
+                  >
+                    <Text style={styles.sheetProbeBtnText}>
+                      {isProbing ? 'Sondando...' : 'Sondar Agora'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                <View style={styles.sheetPortRow}>
+                  {(probedPorts || [
+                    { port: 22, status: 'OPEN', latencyMs: 3.8 },
+                    { port: 80, status: 'CLOSED', latencyMs: 15 },
+                    { port: 443, status: 'CLOSED', latencyMs: 14 },
+                    { port: 3000, status: 'OPEN', latencyMs: 1.4 },
+                    { port: 5432, status: 'OPEN', latencyMs: 2.2 },
+                  ]).map((p) => {
+                    const isOpen = p.status === 'OPEN';
+                    return (
+                      <View key={p.port} style={[styles.sheetPortPill, isOpen ? styles.sheetPortOpen : styles.sheetPortClosed]}>
+                        <Text style={[styles.sheetPortText, { color: isOpen ? '#4ADE80' : '#9CA3AF' }]}>
+                          :{p.port} {isOpen ? `${p.latencyMs}ms` : 'OFF'}
+                        </Text>
+                      </View>
+                    );
+                  })}
                 </View>
               </View>
 
@@ -515,6 +571,70 @@ const styles = StyleSheet.create({
     color: '#34D399',
     fontSize: 12,
     fontWeight: '700',
+  },
+  sheetProbeContainer: {
+    backgroundColor: '#1E232B',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#282E38',
+    padding: 12,
+    marginBottom: 14,
+  },
+  sheetProbeHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  sheetProbeTitle: {
+    color: '#9AA0A6',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+  },
+  sheetProbeSubtitle: {
+    color: '#E8EAED',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginTop: 2,
+  },
+  sheetProbeBtn: {
+    backgroundColor: '#0F291E',
+    borderWidth: 1,
+    borderColor: '#22C55E',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  sheetProbeBtnText: {
+    color: '#4ADE80',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  sheetPortRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 6,
+  },
+  sheetPortPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    borderWidth: 1,
+  },
+  sheetPortOpen: {
+    backgroundColor: '#0F382A',
+    borderColor: '#22C55E40',
+  },
+  sheetPortClosed: {
+    backgroundColor: '#111827',
+    borderColor: '#374151',
+  },
+  sheetPortText: {
+    fontSize: 10,
+    fontWeight: '800',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   actionsSectionTitle: {
     color: '#9AA0A6',
