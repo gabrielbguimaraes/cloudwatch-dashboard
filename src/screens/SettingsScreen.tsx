@@ -37,6 +37,7 @@ export const SettingsScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
     activeOciAccountId,
     setActiveOciAccountId,
     toggleBiometrics,
+    linkCloudProvider,
     unlinkCloudProvider,
     logoutMaster,
   } = useAuth();
@@ -380,41 +381,151 @@ export const SettingsScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
 
           <View style={styles.divider} />
 
-          {/* AMAZON WEB SERVICES (AWS) — Sprint 3 */}
-          <View style={[styles.cloudRow, { opacity: 0.72 }]}>
+          {/* AMAZON WEB SERVICES (AWS) — Multi-Cloud Híbrido */}
+          <View style={styles.cloudRow}>
             <View style={styles.cloudRowTop}>
               <View style={styles.cloudTitleBlock}>
                 <CloudLogo provider="AWS" size={28} />
                 <View style={styles.cloudNameCol}>
                   <Text style={styles.cloudNameText}>{CLOUD_PALETTES.AWS.name}</Text>
                   <Text style={styles.cloudIdText}>
-                    Integração real planejada para a Sprint 3
+                    {cloudAccounts.AWS?.isConfigured
+                      ? `${maskAccountIdentifier(cloudAccounts.AWS.accountIdentifier)} • ${cloudAccounts.AWS.region}`
+                      : 'Nenhuma conta vinculada'}
                   </Text>
                 </View>
               </View>
-              <View style={styles.statusBadgeSoon}>
-                <Text style={styles.statusBadgeSoonText}>EM BREVE</Text>
-              </View>
+              {cloudAccounts.AWS?.isConfigured ? (
+                <View
+                  style={[
+                    styles.statusBadge,
+                    {
+                      backgroundColor: CLOUD_PALETTES.AWS.badgeBg,
+                      borderColor: CLOUD_PALETTES.AWS.primary,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.statusBadgeText, { color: CLOUD_PALETTES.AWS.badgeText }]}>
+                    SIMULADO ATIVO
+                  </Text>
+                </View>
+              ) : (
+                <View style={styles.statusBadgeUnlinked}>
+                  <Text style={styles.statusBadgeUnlinkedText}>NÃO CONECTADA</Text>
+                </View>
+              )}
+            </View>
+
+            <View style={styles.connectActionRow}>
+              {cloudAccounts.AWS?.isConfigured ? (
+                <TouchableOpacity
+                  style={styles.revokeButton}
+                  onPress={async () => {
+                    await unlinkCloudProvider('AWS');
+                    setToastMessage('Conta AWS desconectada.');
+                  }}
+                >
+                  <Text style={styles.revokeButtonText}>Desconectar AWS</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity
+                  style={[
+                    styles.connectButtonPrimary,
+                    { backgroundColor: CLOUD_PALETTES.AWS.primary },
+                  ]}
+                  onPress={async () => {
+                    await linkCloudProvider(
+                      'AWS',
+                      {
+                        accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
+                        secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+                        region: 'us-east-1',
+                      },
+                      false
+                    );
+                    setToastMessage('Credenciais AWS de demonstração ativadas!');
+                  }}
+                >
+                  <Text style={[styles.connectButtonPrimaryText, { color: '#111827' }]}>
+                    Preencher Credenciais Demo (AWS)
+                  </Text>
+                </TouchableOpacity>
+              )}
             </View>
           </View>
 
           <View style={styles.divider} />
 
-          {/* GOOGLE CLOUD PLATFORM (GCP) — Sprint 3 */}
-          <View style={[styles.cloudRow, { opacity: 0.72 }]}>
+          {/* GOOGLE CLOUD PLATFORM (GCP) — Multi-Cloud Híbrido */}
+          <View style={styles.cloudRow}>
             <View style={styles.cloudRowTop}>
               <View style={styles.cloudTitleBlock}>
                 <CloudLogo provider="GCP" size={28} />
                 <View style={styles.cloudNameCol}>
                   <Text style={styles.cloudNameText}>{CLOUD_PALETTES.GCP.name}</Text>
                   <Text style={styles.cloudIdText}>
-                    Integração real planejada para a Sprint 3
+                    {cloudAccounts.GCP?.isConfigured
+                      ? `${maskAccountIdentifier(cloudAccounts.GCP.accountIdentifier)} • ${cloudAccounts.GCP.region}`
+                      : 'Nenhum projeto vinculado'}
                   </Text>
                 </View>
               </View>
-              <View style={styles.statusBadgeSoon}>
-                <Text style={styles.statusBadgeSoonText}>EM BREVE</Text>
-              </View>
+              {cloudAccounts.GCP?.isConfigured ? (
+                <View
+                  style={[
+                    styles.statusBadge,
+                    {
+                      backgroundColor: CLOUD_PALETTES.GCP.badgeBg,
+                      borderColor: CLOUD_PALETTES.GCP.primary,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.statusBadgeText, { color: CLOUD_PALETTES.GCP.badgeText }]}>
+                    SIMULADO ATIVO
+                  </Text>
+                </View>
+              ) : (
+                <View style={styles.statusBadgeUnlinked}>
+                  <Text style={styles.statusBadgeUnlinkedText}>NÃO CONECTADA</Text>
+                </View>
+              )}
+            </View>
+
+            <View style={styles.connectActionRow}>
+              {cloudAccounts.GCP?.isConfigured ? (
+                <TouchableOpacity
+                  style={styles.revokeButton}
+                  onPress={async () => {
+                    await unlinkCloudProvider('GCP');
+                    setToastMessage('Projeto GCP desconectado.');
+                  }}
+                >
+                  <Text style={styles.revokeButtonText}>Desconectar GCP</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity
+                  style={[
+                    styles.connectButtonPrimary,
+                    { backgroundColor: CLOUD_PALETTES.GCP.primary },
+                  ]}
+                  onPress={async () => {
+                    await linkCloudProvider(
+                      'GCP',
+                      {
+                        projectId: 'cloudwatch-gcp-prod-3940',
+                        clientEmail: 'telemetry-sa@cloudwatch-gcp-prod.iam.gserviceaccount.com',
+                        region: 'southamerica-east1',
+                      },
+                      false
+                    );
+                    setToastMessage('Credenciais GCP de demonstração ativadas!');
+                  }}
+                >
+                  <Text style={styles.connectButtonPrimaryText}>
+                    Preencher Credenciais Demo (GCP)
+                  </Text>
+                </TouchableOpacity>
+              )}
             </View>
           </View>
         </View>

@@ -115,12 +115,33 @@ export function parseOciConfigBlock(rawText: string): {
 // 1. ETAPA POS-CADASTRO: "CONECTE SUA NUVEM" (COM "PULAR POR ENQUANTO")
 // ============================================================================
 export const ConnectCloudsIntroScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
-  const { masterUser, cloudAccounts, clearJustRegistered } = useAuth();
+  const { masterUser, cloudAccounts, linkCloudProvider, clearJustRegistered } = useAuth();
   const isOciConnected = Boolean(cloudAccounts.OCI?.isConfigured);
+  const isAwsConnected = Boolean(cloudAccounts.AWS?.isConfigured);
+  const isGcpConnected = Boolean(cloudAccounts.GCP?.isConfigured);
+  const hasAnyConnected = isOciConnected || isAwsConnected || isGcpConnected;
 
   const handleSkipOrContinue = () => {
     clearJustRegistered();
     navigation.replace('MainTabs');
+  };
+
+  const handleQuickConnectSimProvider = async (provider: 'AWS' | 'GCP') => {
+    await linkCloudProvider(
+      provider,
+      provider === 'AWS'
+        ? {
+            accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
+            secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+            region: 'us-east-1',
+          }
+        : {
+            projectId: 'cloudwatch-gcp-prod-3940',
+            clientEmail: 'telemetry-sa@cloudwatch-gcp-prod.iam.gserviceaccount.com',
+            region: 'southamerica-east1',
+          },
+      false
+    );
   };
 
   return (
@@ -130,8 +151,8 @@ export const ConnectCloudsIntroScreen: React.FC<{ navigation: any }> = ({ naviga
           <Text style={styles.kickerBadge}>CONTA CRIADA COM SUCESSO</Text>
           <Text style={styles.screenTitle}>Conecte sua nuvem</Text>
           <Text style={styles.screenSubtitle}>
-            Olá, {masterUser?.username || 'usuário'}! Conecte apenas os provedores que você utiliza,
-            ou pule esta etapa e configure quando quiser.
+            Olá, {masterUser?.username || 'usuário'}! Conecte sua conta real da Oracle Cloud (OCI)
+            ou habilite os provedores Multi-Cloud (AWS e GCP).
           </Text>
         </View>
 
@@ -141,9 +162,9 @@ export const ConnectCloudsIntroScreen: React.FC<{ navigation: any }> = ({ naviga
             <View style={styles.providerTitleRow}>
               <CloudLogo provider="OCI" size={26} />
               <View style={{ flex: 1 }}>
-                <Text style={styles.providerName}>Oracle Cloud Infrastructure</Text>
+                <Text style={styles.providerName}>Oracle Cloud Infrastructure (Real)</Text>
                 <Text style={styles.providerDesc}>
-                  Conexão rápida pelo Cloud Shell sem digitar OCIDs (somente leitura).
+                  Conexão rápida pelo Cloud Shell sem digitar OCIDs (somente leitura via OCI SDK).
                 </Text>
               </View>
             </View>
@@ -166,45 +187,63 @@ export const ConnectCloudsIntroScreen: React.FC<{ navigation: any }> = ({ naviga
           )}
         </View>
 
-        {/* Card Amazon Web Services (AWS - Em breve) */}
-        <View style={[styles.providerCard, styles.providerCardDisabled]}>
+        {/* Card Amazon Web Services (AWS) */}
+        <View style={styles.providerCard}>
           <View style={styles.providerTitleRow}>
             <CloudLogo provider="AWS" size={26} />
             <View style={{ flex: 1 }}>
-              <Text style={styles.providerNameMuted}>Amazon Web Services (AWS)</Text>
-              <Text style={styles.providerDescMuted}>
-                Integração real via IAM Role / CloudWatch prevista para a Sprint 3.
+              <Text style={styles.providerName}>Amazon Web Services (AWS)</Text>
+              <Text style={styles.providerDesc}>
+                Telemetria Multi-Cloud (EC2, RDS e Lambda em us-east-1).
               </Text>
             </View>
-            <View style={styles.soonBadge}>
-              <Text style={styles.soonBadgeText}>Em breve</Text>
-            </View>
+            {isAwsConnected ? (
+              <View style={styles.connectedTag}>
+                <Text style={styles.connectedTagText}>ATIVA</Text>
+              </View>
+            ) : (
+              <TouchableOpacity
+                style={styles.soonBadge}
+                onPress={() => handleQuickConnectSimProvider('AWS')}
+              >
+                <Text style={[styles.soonBadgeText, { color: '#FF9900' }]}>Vincular</Text>
+              </TouchableOpacity>
+            )}
           </View>
         </View>
 
-        {/* Card Google Cloud Platform (GCP - Em breve) */}
-        <View style={[styles.providerCard, styles.providerCardDisabled]}>
+        {/* Card Google Cloud Platform (GCP) */}
+        <View style={styles.providerCard}>
           <View style={styles.providerTitleRow}>
             <CloudLogo provider="GCP" size={26} />
             <View style={{ flex: 1 }}>
-              <Text style={styles.providerNameMuted}>Google Cloud Platform (GCP)</Text>
-              <Text style={styles.providerDescMuted}>
-                Integração real via Cloud Monitoring prevista para a Sprint 3.
+              <Text style={styles.providerName}>Google Cloud Platform (GCP)</Text>
+              <Text style={styles.providerDesc}>
+                Telemetria Multi-Cloud (Cloud Run e Compute Engine em southamerica-east1).
               </Text>
             </View>
-            <View style={styles.soonBadge}>
-              <Text style={styles.soonBadgeText}>Em breve</Text>
-            </View>
+            {isGcpConnected ? (
+              <View style={styles.connectedTag}>
+                <Text style={styles.connectedTagText}>ATIVA</Text>
+              </View>
+            ) : (
+              <TouchableOpacity
+                style={styles.soonBadge}
+                onPress={() => handleQuickConnectSimProvider('GCP')}
+              >
+                <Text style={[styles.soonBadgeText, { color: '#4285F4' }]}>Vincular</Text>
+              </TouchableOpacity>
+            )}
           </View>
         </View>
 
         <TouchableOpacity
-          style={isOciConnected ? styles.primaryProceedBtn : styles.skipBtn}
+          style={hasAnyConnected ? styles.primaryProceedBtn : styles.skipBtn}
           onPress={handleSkipOrContinue}
           activeOpacity={0.8}
         >
-          <Text style={isOciConnected ? styles.primaryProceedBtnText : styles.skipBtnText}>
-            {isOciConnected ? 'Ir para o Painel' : 'Pular por enquanto'}
+          <Text style={hasAnyConnected ? styles.primaryProceedBtnText : styles.skipBtnText}>
+            {hasAnyConnected ? 'Ir para o Painel' : 'Pular por enquanto'}
           </Text>
         </TouchableOpacity>
       </ScrollView>
@@ -275,12 +314,13 @@ export const OciOnboardingScreen: React.FC<{ navigation: any }> = ({ navigation 
     return () => clearInterval(interval);
   }, [pairingSession?.expiresAt]);
 
-  // Passo 5: Polling a cada 2s em GET /api/oci/pairing/:id/status enquanto PENDING
+  // Passo 5: Polling a cada 2.5s em GET /api/oci/pairing/:id/status enquanto PENDING
   useEffect(() => {
     if (!pairingSession?.id) return;
     if (
       pairingStatus &&
       (pairingStatus.status === 'CONNECTED' ||
+        pairingStatus.status === 'COMPLETED' ||
         pairingStatus.status === 'EXPIRED' ||
         pairingStatus.status === 'FAILED')
     ) {
@@ -290,23 +330,36 @@ export const OciOnboardingScreen: React.FC<{ navigation: any }> = ({ navigation 
     let active = true;
 
     const poll = async () => {
-      const res = await telemetryRepository.getPairingStatus(pairingSession.id);
-      if (!active || !res.ok || !res.data) return;
+      try {
+        const res = await telemetryRepository.getPairingStatus(pairingSession.id);
+        if (!active || !res.ok || !res.data) return;
 
-      setPairingStatus(res.data);
+        setPairingStatus(res.data);
 
-      if (
-        res.data.status === 'CONNECTED' &&
-        syncedOnConnectRef.current !== pairingSession.id
-      ) {
-        syncedOnConnectRef.current = pairingSession.id;
-        await refreshCloudAccounts();
-        await refreshMetrics(true);
+        if (
+          (res.data.status === 'CONNECTED' ||
+            res.data.status === 'COMPLETED' ||
+            res.data.completed) &&
+          syncedOnConnectRef.current !== pairingSession.id
+        ) {
+          syncedOnConnectRef.current = pairingSession.id;
+          await refreshCloudAccounts();
+          await refreshMetrics(true);
+
+          if (Platform.OS === 'android') {
+            ToastAndroid.show(
+              `Oracle Cloud conectada (${res.data.region || 'sa-saopaulo-1'})!`,
+              ToastAndroid.SHORT
+            );
+          }
+        }
+      } catch (_pollErr) {
+        // Ignora erro de rede transiente durante o polling
       }
     };
 
     poll();
-    const timer = setInterval(poll, 2000);
+    const timer = setInterval(poll, 2500);
     return () => {
       active = false;
       clearInterval(timer);
@@ -319,17 +372,24 @@ export const OciOnboardingScreen: React.FC<{ navigation: any }> = ({ navigation 
     setPairingStatus(null);
     setCopiedFeedback(false);
 
-    const res = await telemetryRepository.createPairingSession();
-    setIsGeneratingCommand(false);
+    try {
+      const res = await telemetryRepository.createPairingSession();
 
-    if (!res.ok || !res.data) {
+      if (!res.ok || !res.data) {
+        setCommandError(
+          res.error || 'Não foi possível gerar o comando de conexão no momento.'
+        );
+        return;
+      }
+
+      setPairingSession(res.data);
+    } catch (err: any) {
       setCommandError(
-        res.error || 'Não foi possível gerar o comando de conexão no momento.'
+        err?.message || 'Erro de comunicação ao gerar comando de conexão.'
       );
-      return;
+    } finally {
+      setIsGeneratingCommand(false);
     }
-
-    setPairingSession(res.data);
   };
 
   const handleCopyCommand = () => {
@@ -385,52 +445,66 @@ export const OciOnboardingScreen: React.FC<{ navigation: any }> = ({ navigation 
     setManualPassphrase('');
     setIsSubmittingManual(true);
 
-    const res = await linkCloudProvider(
-      'OCI',
-      {
-        tenancyOcid: manualTenancyOcid.trim(),
-        userOcid: manualUserOcid.trim(),
-        fingerprint: manualFingerprint.trim(),
-        region: manualRegion.trim().toLowerCase(),
-        privateKeyPem: pemToSend,
-        passphrase: passphraseToSend,
-      },
-      false
-    );
-
-    setIsSubmittingManual(false);
-
-    if (!res.success) {
-      setManualError(
-        res.error ||
-        'A Oracle Cloud rejeitou as credenciais informadas. Nada foi salvo.'
+    try {
+      const res = await linkCloudProvider(
+        'OCI',
+        {
+          tenancyOcid: manualTenancyOcid.trim(),
+          userOcid: manualUserOcid.trim(),
+          fingerprint: manualFingerprint.trim(),
+          region: manualRegion.trim().toLowerCase(),
+          privateKeyPem: pemToSend,
+          passphrase: passphraseToSend,
+        },
+        false
       );
-      return;
-    }
 
-    setManualSuccessInfo({
-      permissionStatus: res.permissionStatus,
-      hint: res.hint,
-    });
-    await refreshMetrics(true);
+      if (!res.success) {
+        setManualError(
+          res.error ||
+            'A Oracle Cloud rejeitou as credenciais informadas. Nada foi salvo.'
+        );
+        return;
+      }
+
+      setManualSuccessInfo({
+        permissionStatus: res.permissionStatus,
+        hint: res.hint,
+      });
+      await refreshMetrics(true);
+    } catch (err: any) {
+      setManualError(
+        err?.message || 'Erro ao enviar credenciais para validação.'
+      );
+    } finally {
+      setIsSubmittingManual(false);
+    }
   };
 
   const handleOwnerDemoConnect = async () => {
     setIsActivatingDemo(true);
-    const res = await activateOwnerDemoAccount();
-    setIsActivatingDemo(false);
+    try {
+      const res = await activateOwnerDemoAccount();
 
-    if (!res.success) {
+      if (!res.success) {
+        Alert.alert(
+          'Conta da VM indisponível',
+          res.error || 'Não foi possível autenticar via Instance Principal.'
+        );
+        return;
+      }
+
+      await refreshMetrics(true);
+      clearJustRegistered();
+      navigation.navigate('MainTabs');
+    } catch (err: any) {
       Alert.alert(
-        'Conta da VM indisponível',
-        res.error || 'Não foi possível autenticar via Instance Principal.'
+        'Erro ao ativar demonstração',
+        err?.message || 'Falha de comunicação com o servidor.'
       );
-      return;
+    } finally {
+      setIsActivatingDemo(false);
     }
-
-    await refreshMetrics(true);
-    clearJustRegistered();
-    navigation.navigate('MainTabs');
   };
 
   const handleFinishToDashboard = () => {

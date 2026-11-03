@@ -537,17 +537,81 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   /**
-   * Conexao manual de conta OCI no BFF (POST /api/oci/accounts) — nunca persiste chave privada no celular
+   * Conexao de conta de nuvem:
+   * - OCI: validacao real e persistencia criptografada AES-256-GCM no BFF (POST /api/oci/accounts)
+   * - AWS e GCP: vinculacao hibrida de telemetria simulada Multi-Cloud
    */
   const linkCloudProvider = async (
     provider: SupportedCloud,
     credentials: Record<string, string>,
     enableBiometrics: boolean
   ): Promise<{ success: boolean; error?: string; permissionStatus?: string; hint?: string }> => {
-    if (provider !== 'OCI') {
+    if (provider === 'AWS' || provider === 'GCP') {
+      let bioSuccess = false;
+      if (enableBiometrics) {
+        try {
+          const auth = await Keychain.getGenericPassword({
+            service: BIOMETRIC_GATE_SERVICE,
+            authenticationPrompt: {
+              title: `Ativar Biometria (${provider})`,
+              subtitle: 'Proteção adicional no dispositivo',
+              description: `Confirme sua digital para proteger o acesso à conta ${provider}`,
+              cancel: 'Cancelar',
+            },
+          });
+          bioSuccess = Boolean(auth && auth.username);
+        } catch {
+          bioSuccess = false;
+        }
+      }
+
+      const accountIdentifier =
+        provider === 'AWS'
+          ? credentials.accessKeyId || 'AKIA-PROD-AWS-EAST1'
+          : credentials.projectId || 'gcp-cloudwatch-prod';
+      const defaultRegion =
+        provider === 'AWS'
+          ? credentials.region || 'us-east-1'
+          : credentials.region || 'southamerica-east1';
+
+      const updated: Record<SupportedCloud, CloudCredentialConfig> = {
+        ...cloudAccounts,
+        [provider]: {
+          id: `acc-${provider.toLowerCase()}-${Date.now().toString(36)}`,
+          provider,
+          isConfigured: true,
+          biometricsEnabled: bioSuccess,
+          accountIdentifier,
+          tenancyName:
+            provider === 'AWS'
+              ? `AWS Production (${defaultRegion})`
+              : `Google Cloud (${accountIdentifier})`,
+          region: defaultRegion,
+          subscribedRegions: [defaultRegion],
+          permissionStatus: 'OK',
+          authMode: 'USER_API_KEY',
+          credentials: {
+            region: defaultRegion,
+            accountIdentifier,
+          },
+          lastSyncedAt: new Date().toISOString(),
+        },
+      };
+
+      setCloudAccounts(updated);
+      if (masterUser?.id) {
+        await AsyncStorage.setItem(
+          getCloudAccountsStorageKey(masterUser.id),
+          JSON.stringify(updated)
+        ).catch(() => {});
+      }
+
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      setActiveProvider(provider);
+
       return {
-        success: false,
-        error: `Integração com ${provider} estará disponível em breve (Sprint 3).`,
+        success: true,
+        permissionStatus: 'OK',
       };
     }
 

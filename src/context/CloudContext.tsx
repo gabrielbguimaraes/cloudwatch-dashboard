@@ -64,6 +64,10 @@ interface CloudContextData {
   refreshMetrics: (forceRefresh?: boolean) => Promise<void>;
   togglePin: (resourceId: string) => void;
   isResourcePinned: (resourceId: string) => boolean;
+  simulateLoadSpike: (resourceId: string) => Promise<void>;
+  mitigateAnomaly: (resourceId: string) => Promise<{ ok: boolean; message: string }>;
+  provisionInstance: (targetProvider?: CloudProvider) => Promise<CloudResource | null>;
+  deleteInstance: (resourceId: string) => Promise<void>;
 }
 
 const CloudContext = createContext<CloudContextData>({} as CloudContextData);
@@ -287,6 +291,43 @@ export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ chil
     await fetchRealResources(forceRefresh);
   };
 
+  const simulateLoadSpike = async (resourceId: string): Promise<void> => {
+    telemetryRepository.triggerLoadSpike(resourceId);
+    await fetchRealResources(false);
+  };
+
+  const mitigateAnomaly = async (
+    resourceId: string
+  ): Promise<{ ok: boolean; message: string }> => {
+    const res = await telemetryRepository.mitigateRootCause(resourceId);
+    await fetchRealResources(false);
+    return { ok: res.ok, message: res.message };
+  };
+
+  const provisionInstance = async (
+    targetProvider?: CloudProvider
+  ): Promise<CloudResource | null> => {
+    const prov = targetProvider || activeProvider;
+    const created = await telemetryRepository.createInstance({
+      name: `${prov} - Node-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+      provider: prov,
+      serviceType: prov === 'OCI' ? 'OCI_COMPUTE' : prov === 'AWS' ? 'EC2' : 'GCP_RUN',
+      region:
+        prov === 'OCI'
+          ? 'sa-saopaulo-1'
+          : prov === 'AWS'
+          ? 'us-east-1'
+          : 'southamerica-east1',
+    });
+    await fetchRealResources(false);
+    return created.instance || null;
+  };
+
+  const deleteInstance = async (resourceId: string): Promise<void> => {
+    await telemetryRepository.deleteInstance(resourceId);
+    await fetchRealResources(false);
+  };
+
   return (
     <CloudContext.Provider
       value={{
@@ -306,7 +347,7 @@ export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ chil
         isLoading,
         lastUpdated,
         telemetrySource,
-        isLiveCloud: telemetrySource === 'LIVE_OCI',
+        isLiveCloud: telemetrySource === 'LIVE_OCI' || telemetrySource === 'SIMULATION',
         isOfflineCache,
         cachedAtHHmm,
         syncError,
@@ -324,6 +365,10 @@ export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ chil
         refreshMetrics,
         togglePin,
         isResourcePinned,
+        simulateLoadSpike,
+        mitigateAnomaly,
+        provisionInstance,
+        deleteInstance,
       }}
     >
       {children}

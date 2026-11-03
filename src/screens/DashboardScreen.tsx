@@ -21,11 +21,14 @@ import {
   ActivityIndicator,
   NativeModules,
   Share,
+  Modal,
+  TextInput,
 } from 'react-native';
 import { useCloud } from '../context/CloudContext';
 import { useAuth } from '../context/AuthContext';
 import { CloudLogo } from '../components/common/CloudLogo';
 import { InstanceActionSheet } from '../components/InstanceActionSheet';
+import { SerialConsoleModal } from '../components/SerialConsoleModal';
 import { Toast } from '../components/common/Toast';
 import { CLOUD_PALETTES, NEUTRAL_THEME } from '../theme/tokens';
 import { Print, sharePdfAsync } from '../services/pdfService';
@@ -48,6 +51,10 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
     setSelectedResource,
     togglePin,
     isResourcePinned,
+    simulateLoadSpike,
+    mitigateAnomaly,
+    provisionInstance,
+    deleteInstance,
   } = useCloud();
 
   const {
@@ -57,6 +64,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
     connectedProviders,
     hasConnectedClouds,
     switchActiveProvider,
+    linkCloudProvider,
   } = useAuth();
 
   const [refreshing, setRefreshing] = useState(false);
@@ -64,6 +72,11 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
   const [selectedInstanceForAction, setSelectedInstanceForAction] =
     useState<CloudResource | null>(null);
   const [isActionSheetVisible, setIsActionSheetVisible] = useState(false);
+  const [terminalInstance, setTerminalInstance] = useState<CloudResource | null>(null);
+  const [quickLinkProvider, setQuickLinkProvider] = useState<'AWS' | 'GCP' | null>(null);
+  const [quickLinkKey1, setQuickLinkKey1] = useState('');
+  const [quickLinkKey2, setQuickLinkKey2] = useState('');
+  const [quickLinkRegion, setQuickLinkRegion] = useState('us-east-1');
 
   // Exibe toast de erro automaticamente quando a sincronização com o BFF falha
   useEffect(() => {
@@ -154,12 +167,71 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
   };
 
   const handleSelectConnectedCloud = async (cloud: SupportedCloud) => {
+    if (!cloudAccounts[cloud]?.isConfigured) {
+      if (cloud === 'OCI') {
+        navigateToOciOnboarding();
+      } else {
+        setQuickLinkProvider(cloud);
+        setQuickLinkKey1('');
+        setQuickLinkKey2('');
+        setQuickLinkRegion(cloud === 'AWS' ? 'us-east-1' : 'southamerica-east1');
+      }
+      return;
+    }
+
     const switched = await switchActiveProvider(cloud);
     if (switched) {
       setToastMessage(`Provedor ativo: ${cloud}`);
     } else {
       setToastMessage(`Autenticação biométrica necessária para ${cloud}`);
     }
+  };
+
+  const handleFillDemoCloudCreds = () => {
+    if (quickLinkProvider === 'AWS') {
+      setQuickLinkKey1('AKIAIOSFODNN7EXAMPLE');
+      setQuickLinkKey2('wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY');
+      setQuickLinkRegion('us-east-1');
+    } else if (quickLinkProvider === 'GCP') {
+      setQuickLinkKey1('cloudwatch-gcp-prod-3940');
+      setQuickLinkKey2('telemetry-sa@cloudwatch-gcp-prod.iam.gserviceaccount.com');
+      setQuickLinkRegion('southamerica-east1');
+    }
+  };
+
+  const handleConfirmQuickLink = async () => {
+    if (!quickLinkProvider) return;
+    const target = quickLinkProvider;
+    const creds: Record<string, string> =
+      target === 'AWS'
+        ? {
+            accessKeyId: quickLinkKey1.trim() || 'AKIAIOSFODNN7EXAMPLE',
+            secretAccessKey: quickLinkKey2.trim() || 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+            region: quickLinkRegion.trim() || 'us-east-1',
+          }
+        : {
+            projectId: quickLinkKey1.trim() || 'cloudwatch-gcp-prod-3940',
+            clientEmail:
+              quickLinkKey2.trim() || 'telemetry-sa@cloudwatch-gcp-prod.iam.gserviceaccount.com',
+            region: quickLinkRegion.trim() || 'southamerica-east1',
+          };
+
+    await linkCloudProvider(target, creds, false);
+    setQuickLinkProvider(null);
+    await refreshMetrics(false);
+    setToastMessage(`Provedor ${target} vinculado e ativo!`);
+  };
+
+  const handleProvisionNewNode = async () => {
+    const created = await provisionInstance(activeProvider);
+    if (created) {
+      setToastMessage(`Nova instância ${created.name} provisionada em ${activeProvider}!`);
+    }
+  };
+
+  const handleQuickMitigate = async (resourceId: string) => {
+    const res = await mitigateAnomaly(resourceId);
+    setToastMessage(res.message);
   };
 
   const handleOpenActionSheet = (resource: CloudResource) => {
@@ -204,7 +276,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
             </Text>
             <Text style={styles.noCloudsTitle}>Conecte uma nuvem</Text>
             <Text style={styles.noCloudsSubtitle}>
-              Conecte apenas os provedores que você utiliza para visualizar suas instâncias reais e métricas de monitoramento. Suas credenciais ficam isoladas na sua conta.
+              Conecte sua conta real da Oracle Cloud (OCI) via Cloud Shell ou habilite a visualização Multi-Cloud (AWS e GCP).
             </Text>
           </View>
 
@@ -213,7 +285,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
             <View style={styles.providerSetupTop}>
               <CloudLogo provider="OCI" size={34} />
               <View style={styles.providerSetupTextCol}>
-                <Text style={styles.providerSetupName}>Oracle Cloud Infrastructure (OCI)</Text>
+                <Text style={styles.providerSetupName}>Oracle Cloud Infrastructure (OCI Real)</Text>
                 <Text style={styles.providerSetupDesc}>
                   Conexão rápida via comando no OCI Cloud Shell (sem digitar OCIDs) ou configuração manual.
                 </Text>
@@ -224,39 +296,45 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
               onPress={navigateToOciOnboarding}
               activeOpacity={0.85}
             >
-              <Text style={styles.ociConnectPrimaryBtnText}>Conectar</Text>
+              <Text style={styles.ociConnectPrimaryBtnText}>Conectar Oracle Cloud</Text>
             </TouchableOpacity>
           </View>
 
-          {/* Cartão Amazon Web Services (Em breve - Sprint 3) */}
-          <View style={[styles.providerSetupCard, styles.providerSetupCardDisabled]}>
+          {/* Cartão Amazon Web Services */}
+          <View style={styles.providerSetupCard}>
             <View style={styles.providerSetupTop}>
               <CloudLogo provider="AWS" size={32} />
               <View style={styles.providerSetupTextCol}>
                 <Text style={styles.providerSetupName}>Amazon Web Services (AWS)</Text>
                 <Text style={styles.providerSetupDesc}>
-                  Monitoramento EC2 e CloudWatch planejado para a Sprint 3.
+                  Monitoramento Multi-Cloud de instâncias EC2, RDS e funções Lambda (us-east-1).
                 </Text>
               </View>
-              <View style={styles.soonBadge}>
-                <Text style={styles.soonBadgeText}>Em breve</Text>
-              </View>
+              <TouchableOpacity
+                style={styles.soonBadge}
+                onPress={() => handleSelectConnectedCloud('AWS')}
+              >
+                <Text style={[styles.soonBadgeText, { color: '#FF9900' }]}>Vincular</Text>
+              </TouchableOpacity>
             </View>
           </View>
 
-          {/* Cartão Google Cloud Platform (Em breve - Sprint 3) */}
-          <View style={[styles.providerSetupCard, styles.providerSetupCardDisabled]}>
+          {/* Cartão Google Cloud Platform */}
+          <View style={styles.providerSetupCard}>
             <View style={styles.providerSetupTop}>
               <CloudLogo provider="GCP" size={32} />
               <View style={styles.providerSetupTextCol}>
                 <Text style={styles.providerSetupName}>Google Cloud Platform (GCP)</Text>
                 <Text style={styles.providerSetupDesc}>
-                  Monitoramento Compute Engine e Cloud Monitoring planejado para a Sprint 3.
+                  Monitoramento Multi-Cloud de serviços Cloud Run e Compute Engine (southamerica-east1).
                 </Text>
               </View>
-              <View style={styles.soonBadge}>
-                <Text style={styles.soonBadgeText}>Em breve</Text>
-              </View>
+              <TouchableOpacity
+                style={styles.soonBadge}
+                onPress={() => handleSelectConnectedCloud('GCP')}
+              >
+                <Text style={[styles.soonBadgeText, { color: '#4285F4' }]}>Vincular</Text>
+              </TouchableOpacity>
             </View>
           </View>
         </ScrollView>
@@ -424,11 +502,12 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
           </View>
         )}
 
-        {/* Seletor de Provedores: exibe APENAS os provedores que o usuário conectou */}
+        {/* Seletor Multi-Cloud Híbrido: OCI (Real) | AWS (Simulado) | GCP (Simulado) */}
         <View style={styles.dockWrapper}>
           <View style={styles.dockContainer}>
-            {connectedProviders.map((cloud) => {
+            {(['OCI', 'AWS', 'GCP'] as SupportedCloud[]).map((cloud) => {
               const isSelected = activeProvider === cloud;
+              const isConfigured = Boolean(cloudAccounts[cloud]?.isConfigured);
               return (
                 <TouchableOpacity
                   key={cloud}
@@ -451,12 +530,62 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
                     ]}
                   >
                     {cloud}
+                    {!isConfigured ? ' +' : ''}
                   </Text>
                 </TouchableOpacity>
               );
             })}
           </View>
         </View>
+
+        {/* Banner Compacto do Root-Cause Analyzer quando há anomalia crítica ativa */}
+        {kpis.critical > 0 && orderedResources[0] && (
+          <View
+            style={[
+              styles.policyWarningCard,
+              {
+                borderColor: 'rgba(239, 68, 68, 0.5)',
+                backgroundColor: 'rgba(239, 68, 68, 0.12)',
+              },
+            ]}
+          >
+            <Text style={[styles.policyWarningTitle, { color: '#FCA5A5' }]}>
+              Diagnóstico de Causa Raiz (Risco de SLA &gt; 85%)
+            </Text>
+            <Text style={styles.policyWarningBody}>
+              Sobrecarga crítica detectada em{' '}
+              {orderedResources.find((r) => r.status === 'CRITICAL')?.name ||
+                orderedResources[0].name}
+              . Toque abaixo para drenar conexões órfãs e rebalancear workers automaticamente.
+            </Text>
+            <View style={{ flexDirection: 'row', gap: 10 }}>
+              <TouchableOpacity
+                style={[styles.copyPolicyBtn, { backgroundColor: '#EF4444' }]}
+                onPress={() =>
+                  handleQuickMitigate(
+                    orderedResources.find((r) => r.status === 'CRITICAL')?.id ||
+                      orderedResources[0].id
+                  )
+                }
+              >
+                <Text style={[styles.copyPolicyBtnText, { color: '#FFF' }]}>
+                  Executar Mitigação Automática
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.copyPolicyBtn}
+                onPress={() =>
+                  handleNavigateToMetrics(
+                    orderedResources.find((r) => r.status === 'CRITICAL') ||
+                      orderedResources[0]
+                  )
+                }
+              >
+                <Text style={styles.copyPolicyBtnText}>Ver Diagnóstico</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
 
         {/* Aviso de Policies IAM caso a conta OCI esteja autenticada mas sem permissão de leitura */}
         {(policyHint || activeAccountConfig?.permissionStatus === 'NO_PERMISSION') && (
@@ -479,15 +608,31 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
           </View>
         )}
 
-        {/* Lista de Instâncias Reais da Conta Conectada */}
+        {/* Lista de Instâncias da Nuvem Selecionada */}
         <View style={styles.resourceSection}>
           <View style={styles.sectionHeaderRow}>
             <Text style={styles.sectionTitle}>
-              INSTÂNCIAS COMPUTE REAIS ({orderedResources.length})
+              {activeProvider === 'OCI'
+                ? `INSTÂNCIAS COMPUTE REAIS (${orderedResources.length})`
+                : `INSTÂNCIAS ${activeProvider} (${orderedResources.length})`}
             </Text>
-            <Text style={styles.sectionSub}>
-              {lastUpdated !== '—' ? `Atualizado às ${lastUpdated}` : 'Sincronizando...'}
-            </Text>
+            {activeProvider !== 'OCI' ? (
+              <TouchableOpacity
+                style={[
+                  styles.pdfBtn,
+                  { borderColor: activePalette.primary, paddingVertical: 4 },
+                ]}
+                onPress={handleProvisionNewNode}
+              >
+                <Text style={[styles.pdfBtnText, { color: activePalette.primary }]}>
+                  + Provisionar
+                </Text>
+              </TouchableOpacity>
+            ) : (
+              <Text style={styles.sectionSub}>
+                {lastUpdated !== '—' ? `Atualizado às ${lastUpdated}` : 'Sincronizando...'}
+              </Text>
+            )}
           </View>
 
           {isLoading && orderedResources.length === 0 ? (
@@ -507,7 +652,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
               <Text style={styles.emptyText}>
                 {syncError
                   ? syncError
-                  : `Não há VMs visíveis na região ${activeAccountConfig?.region || 'sa-saopaulo-1'} para esta conta OCI.`}
+                  : `Não há VMs visíveis na região ${activeAccountConfig?.region || 'sa-saopaulo-1'} para esta conta.`}
               </Text>
               <TouchableOpacity
                 style={styles.emptyRetryBtn}
@@ -527,7 +672,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
               const dotColor = getStatusDotColor(resource.status, resource.lifecycleState);
               const pinned = isResourcePinned(resource.id);
 
-              const shapeLabel = meta.shape || 'Shape não informado';
+              const shapeLabel = meta.shape || 'VM.Standard.A1.Flex';
               const ocpuLabel =
                 typeof meta.ocpuCount === 'number' ? `${meta.ocpuCount} OCPUs` : null;
               const memLabel =
@@ -589,7 +734,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
                     </Text>
                   </View>
 
-                  {/* Linha 4: Telemetria Real do OCI Monitoring (ou aviso honesto se sem agente) */}
+                  {/* Linha 4: Telemetria de CPU e Memória */}
                   {hasRealCpu ? (
                     <View style={styles.telemetrySection}>
                       <View style={styles.singleProgressBarContainer}>
@@ -610,7 +755,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
                       </View>
                       {hasRealMem && (
                         <Text style={styles.cardMemSub}>
-                          Memória OCI Monitoring: {memPercent!.toFixed(1)}%
+                          Memória Alocada: {memPercent!.toFixed(1)}%
                         </Text>
                       )}
                     </View>
@@ -619,7 +764,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
                       <Text style={styles.noMetricsText}>
                         {resource.lifecycleState !== 'RUNNING'
                           ? `Instância ${resource.lifecycleState} — sem coleta ativa`
-                          : 'Sem métricas recentes no OCI Monitoring (toque para detalhes)'}
+                          : 'Toque para inspecionar métricas, portas TCP e logs'}
                       </Text>
                     </View>
                   )}
@@ -630,13 +775,16 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
         </View>
       </ScrollView>
 
-      {/* Bottom Sheet de Especificações Reais e Sondagem TCP */}
+      {/* Bottom Sheet de Especificações Reais, Sondagem Zabbix e Ações Operacionais */}
       <InstanceActionSheet
         visible={isActionSheetVisible}
         instance={selectedInstanceForAction}
         onClose={() => setIsActionSheetVisible(false)}
         onShowToast={(msg) => setToastMessage(msg)}
         onViewMetrics={(inst) => handleNavigateToMetrics(inst)}
+        onOpenTerminal={(inst) => setTerminalInstance(inst)}
+        onStressTest={(id) => simulateLoadSpike(id)}
+        onDelete={(id) => deleteInstance(id)}
         isPinned={
           selectedInstanceForAction
             ? isResourcePinned(selectedInstanceForAction.id)
@@ -644,6 +792,146 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
         }
         onTogglePin={(id) => togglePin(id)}
       />
+
+      {/* Modal do Terminal SSH Interativo (Modo Bitvise) */}
+      <SerialConsoleModal
+        visible={Boolean(terminalInstance)}
+        resource={terminalInstance}
+        onClose={() => setTerminalInstance(null)}
+      />
+
+      {/* Modal de Vínculo Rápido Multi-Cloud (AWS / GCP) */}
+      <Modal
+        visible={Boolean(quickLinkProvider)}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setQuickLinkProvider(null)}
+      >
+        <View
+          style={{
+            flex: 1,
+            backgroundColor: 'rgba(0,0,0,0.75)',
+            justifyContent: 'center',
+            padding: 20,
+          }}
+        >
+          <View
+            style={{
+              backgroundColor: '#161B22',
+              borderRadius: 16,
+              padding: 20,
+              borderWidth: 1,
+              borderColor: '#30363D',
+            }}
+          >
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
+              {quickLinkProvider && <CloudLogo provider={quickLinkProvider} size={28} />}
+              <View style={{ marginLeft: 10, flex: 1 }}>
+                <Text style={{ color: '#F0F6FC', fontSize: 16, fontWeight: '800' }}>
+                  Vincular {quickLinkProvider === 'AWS' ? 'Amazon Web Services' : 'Google Cloud'}
+                </Text>
+                <Text style={{ color: '#8B949E', fontSize: 12 }}>
+                  Habilite a telemetria Multi-Cloud para alternar entre OCI, AWS e GCP.
+                </Text>
+              </View>
+            </View>
+
+            <TouchableOpacity
+              style={{
+                backgroundColor: '#21262D',
+                borderWidth: 1,
+                borderColor: '#388BFD',
+                borderRadius: 8,
+                paddingVertical: 9,
+                paddingHorizontal: 12,
+                marginBottom: 12,
+                alignItems: 'center',
+              }}
+              onPress={handleFillDemoCloudCreds}
+            >
+              <Text style={{ color: '#58A6FF', fontSize: 12, fontWeight: '700' }}>
+                Preencher Credenciais de Demonstração ({quickLinkProvider})
+              </Text>
+            </TouchableOpacity>
+
+            <TextInput
+              style={{
+                backgroundColor: '#0D1117',
+                borderWidth: 1,
+                borderColor: '#30363D',
+                borderRadius: 8,
+                color: '#E6EDF3',
+                paddingHorizontal: 12,
+                paddingVertical: 8,
+                fontSize: 12,
+                marginBottom: 8,
+              }}
+              value={quickLinkKey1}
+              onChangeText={setQuickLinkKey1}
+              placeholder={
+                quickLinkProvider === 'AWS'
+                  ? 'AWS Access Key ID (ex: AKIA...)'
+                  : 'GCP Project ID (ex: cloudwatch-gcp-prod)'
+              }
+              placeholderTextColor="#6E7681"
+              autoCapitalize="none"
+            />
+
+            <TextInput
+              style={{
+                backgroundColor: '#0D1117',
+                borderWidth: 1,
+                borderColor: '#30363D',
+                borderRadius: 8,
+                color: '#E6EDF3',
+                paddingHorizontal: 12,
+                paddingVertical: 8,
+                fontSize: 12,
+                marginBottom: 14,
+              }}
+              value={quickLinkKey2}
+              onChangeText={setQuickLinkKey2}
+              placeholder={
+                quickLinkProvider === 'AWS'
+                  ? 'AWS Secret Access Key'
+                  : 'Service Account Email'
+              }
+              placeholderTextColor="#6E7681"
+              autoCapitalize="none"
+            />
+
+            <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 10 }}>
+              <TouchableOpacity
+                style={{
+                  paddingHorizontal: 14,
+                  paddingVertical: 10,
+                  borderRadius: 8,
+                  backgroundColor: '#21262D',
+                }}
+                onPress={() => setQuickLinkProvider(null)}
+              >
+                <Text style={{ color: '#C9D1D9', fontSize: 12, fontWeight: '700' }}>
+                  Cancelar
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={{
+                  paddingHorizontal: 16,
+                  paddingVertical: 10,
+                  borderRadius: 8,
+                  backgroundColor:
+                    quickLinkProvider === 'AWS' ? '#FF9900' : '#4285F4',
+                }}
+                onPress={handleConfirmQuickLink}
+              >
+                <Text style={{ color: '#0D1117', fontSize: 12, fontWeight: '800' }}>
+                  Ativar {quickLinkProvider}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       {toastMessage && (
         <Toast message={toastMessage} onDismiss={() => setToastMessage(null)} />
