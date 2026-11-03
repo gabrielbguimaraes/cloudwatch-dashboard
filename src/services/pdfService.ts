@@ -49,7 +49,19 @@ export const generateExecutiveReportHtml = (
       ? 'CRÍTICO'
       : resource.status === 'WARNING'
         ? 'ATENÇÃO'
-        : 'OPERACIONAL';
+        : resource.status === 'OFFLINE'
+          ? 'PARADO'
+          : 'OPERACIONAL';
+
+  const cpuDisplay =
+    typeof resource.metricsSummary?.cpuPercent === 'number'
+      ? `${resource.metricsSummary.cpuPercent.toFixed(1)}%`
+      : 'N/D';
+  const memoryDisplay =
+    typeof resource.metricsSummary?.memoryPercent === 'number'
+      ? `${resource.metricsSummary.memoryPercent.toFixed(1)}%`
+      : 'N/D';
+  const shapeDisplay = (resource.metadata as any)?.shape || '—';
 
   return `
 <!DOCTYPE html>
@@ -254,8 +266,8 @@ export const generateExecutiveReportHtml = (
         <td><strong>${resource.provider}</strong></td>
         <td>${resource.region}</td>
         <td><span class="status-badge">${statusText}</span></td>
-        <td><strong>${resource.metricsSummary.cpuPercent}%</strong></td>
-        <td><strong>${resource.metricsSummary.memoryPercent || 48}%</strong></td>
+        <td><strong>${cpuDisplay}</strong></td>
+        <td><strong>${memoryDisplay}</strong></td>
       </tr>
     </tbody>
   </table>
@@ -264,15 +276,15 @@ export const generateExecutiveReportHtml = (
   <div class="kpi-row">
     <div class="kpi-box">
       <div class="kpi-box-label">Utilização CPU</div>
-      <div class="kpi-box-val">${resource.metricsSummary.cpuPercent}%</div>
+      <div class="kpi-box-val">${cpuDisplay}</div>
     </div>
     <div class="kpi-box">
       <div class="kpi-box-label">Memória RAM</div>
-      <div class="kpi-box-val">${resource.metricsSummary.memoryPercent || 48}%</div>
+      <div class="kpi-box-val">${memoryDisplay}</div>
     </div>
     <div class="kpi-box">
-      <div class="kpi-box-label">Latência I/O</div>
-      <div class="kpi-box-val">${resource.metricsSummary.latencyMs || 4.2}ms</div>
+      <div class="kpi-box-label">Shape / Estado</div>
+      <div class="kpi-box-val" style="font-size: 13px;">${shapeDisplay} (${resource.lifecycleState})</div>
     </div>
     <div class="kpi-box">
       <div class="kpi-box-label">SLA Uptime</div>

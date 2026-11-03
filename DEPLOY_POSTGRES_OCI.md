@@ -1,77 +1,58 @@
-# Instruções de Implantação e Atualização na VM OCI (167.234.241.171)
+# Guia Rápido de Banco PostgreSQL e Processo PM2 na VM OCI
 
-Este guia contém as instruções prontas para o desenvolvedor implantar o banco de dados PostgreSQL isolado e atualizar o serviço BFF para a **Sprint 2** na máquina Oracle Cloud (Oracle Linux ARM / Ampere A1).
+> **Atenção:** este guia genérico assume PostgreSQL instalado no host (`sudo -u postgres`). Na VM `vnic-sidebrain-prd` o PostgreSQL roda no container Docker `sidebrain_db`. Para essa VM siga [`docs/PLANO_PRODUCAO_OCI_REAL.md`](docs/PLANO_PRODUCAO_OCI_REAL.md).
+
+Este guia resume a criação da base PostgreSQL e o gerenciamento do processo `cloudwatch-api` via PM2 em uma VM **Oracle Linux ARM (Ampere A1)** na Oracle Cloud Infrastructure.
+
+Para a configuração completa de **HTTPS (TLS/Let's Encrypt na porta 443)** e **permissões IAM / Oracle Cloud Agent**, consulte os documentos oficiais da Fase 4:
+- [`docs/DEPLOY_HTTPS.md`](docs/DEPLOY_HTTPS.md) — Domínio DNS, Caddy ou Nginx + Certbot, porta 443, variáveis `.env` do BFF e stub de SSL Pinning.
+- [`docs/OCI_SETUP.md`](docs/OCI_SETUP.md) — Dynamic Group do dono, policies IAM, plugin `Compute Instance Monitoring`, usuário somente leitura, revogação da chave do app e troubleshooting.
 
 ---
 
 ## 1. Conectar na VM OCI via SSH
 ```bash
-ssh -i ~/.oci/oci_api_key.pem opc@167.234.241.171
+ssh -i ~/.ssh/<SUA_CHAVE_SSH> opc@<IP_PUBLICO_DA_VM>
 ```
 
 ---
 
 ## 2. Banco de Dados PostgreSQL (`cloudwatch_db`)
-Caso ainda não tenha criado a base dedicada:
+Caso ainda não tenha criado o usuário e a base dedicada:
 ```bash
-sudo -u postgres psql -c "CREATE USER cloudwatch_user WITH ENCRYPTED PASSWORD 'CloudWatch2024#Secure';"
+sudo -u postgres psql -c "CREATE USER cloudwatch_user WITH ENCRYPTED PASSWORD '<SENHA_FORTE_DO_BANCO>';"
 sudo -u postgres psql -c "CREATE DATABASE cloudwatch_db OWNER cloudwatch_user;"
 ```
 
-> **Sincronização Automática:** As tabelas (`users`, `master_users`, `cloud_accounts`, `instances` e `instances_cache`) são criadas e sincronizadas automaticamente pelo `cloudwatch-bff` no startup através da função `initDatabase()`.
+> **Sincronização Automática (`initDatabase`):** No startup, o `cloudwatch-bff` garante automaticamente as tabelas `master_users`, `refresh_tokens` (apenas hashes SHA-256), `cloud_accounts` (credenciais OCI cifradas com AES-256-GCM) e `oci_pairing_sessions` (hashes SHA-256 de códigos de uso único com TTL de 10 minutos).
 
 ---
 
-## 3. Atualizar o BFF para a Sprint 2 (`cloudwatch-bff/`)
-O BFF da Sprint 2 inclui assinador OCI RSA-SHA256 nativo, sondagem de rede estilo Zabbix (`/api/telemetry/network-probe`), inspeção Docker (`/api/telemetry/containers`), telemetria real do host OCI (`os.loadavg()`, `os.freemem()`), endpoints de série temporal e Logs Insights:
-
+## 3. Configurar `.env` e Atualizar o Serviço (`cloudwatch-bff/`)
 ```bash
-# Navegar até a pasta do BFF
 cd ~/cloudwatch-bff
+cp -n .env.example .env
+# Edite o arquivo .env preenchendo DB_PASSWORD, JWT_ACCESS_SECRET, CREDENTIALS_ENC_KEY e PUBLIC_BASE_URL (https://...)
 
-# Instalar dependências (inclui bcryptjs, pg, cors, dotenv, express)
 npm install
 
-# Iniciar ou recarregar o processo padronizado com PM2
-pm2 describe cloudwatch-api > /dev/null 2>&1 && pm2 restart cloudwatch-api || pm2 start index.js --name "cloudwatch-api"
+pm2 describe cloudwatch-api > /dev/null 2>&1 && pm2 restart cloudwatch-api --update-env || pm2 start index.js --name "cloudwatch-api"
 pm2 save
 ```
 
-Para verificar os logs de execução em tempo real:
+Logs em tempo real:
 ```bash
 pm2 logs cloudwatch-api --lines 50
 ```
 
 ---
 
-## 4. Firewall da VM (Porta 3000)
-Certifique-se de liberar o tráfego de entrada na porta 3000 no Oracle Linux (firewalld):
+## 4. Verificação Local do BFF
+Com `NODE_ENV=production` e `BIND_HOST=127.0.0.1`, o Node.js responde apenas localmente para o proxy reverso HTTPS (`:443`):
 ```bash
-sudo firewall-cmd --permanent --add-port=3000/tcp
-sudo firewall-cmd --reload
+# 1. Healthcheck público:
+curl -s http://127.0.0.1:3000/health | jq .
+
+# 2. Verificar exigência de JWT nas rotas protegidas (deve retornar HTTP 401):
+curl -i http://127.0.0.1:3000/api/oci/status
 ```
-
----
-
-## 5. Teste Rápido de Verificação dos Endpoints Sprint 2
-```bash
-# 1. Healthcheck e métricas de host OCI:
-curl -s http://localhost:3000/health | jq .
-
-# 2. Instâncias e recursos da conta OCI:
-curl -s "http://localhost:3000/api/clouds/instances?provider=OCI" | jq .
-
-# 3. Sondagem de rede estilo Zabbix por IP real (Portas 22, 80, 443, 3000, 5432):
-curl -s "http://localhost:3000/api/telemetry/network-probe?host=167.234.241.171" | jq .
-
-# 4. Containers Docker ativos no host:
-curl -s "http://localhost:3000/api/telemetry/containers" | jq .
-
-# 5. Série temporal para correlação CPU x Memória (janela 24h):
-curl -s "http://localhost:3000/api/telemetry/metrics/res-oci-sidebrain-prd?window=24h" | jq .
-
-# 6. Logs centralizados operacionais:
-curl -s "http://localhost:3000/api/telemetry/logs/res-oci-sidebrain-prd?severity=ALL" | jq .
-```
-
-> **Garantia de Resiliência (Offline-First):** O aplicativo mobile foi projetado com fallback automático (`telemetryRepository.ts`). Caso a máquina OCI esteja temporariamente inacessível ou em manutenção, o aplicativo recorre de forma transparente ao cache local criptografado (`EncryptedStorage` e `AsyncStorage`), garantindo funcionamento ininterrupto para a apresentação da banca.

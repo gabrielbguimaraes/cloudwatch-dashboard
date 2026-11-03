@@ -197,7 +197,7 @@ console.log('  ✓ GARANTIA CRIPTOGRÁFICA: Assinatura OCI validada com par de c
 console.log('\n7. Validando Estrutura e Portas da Sondagem Zabbix TCP:');
 const targetProbedPorts = [22, 80, 443, 3000, 5432];
 const dummyProbe = {
-  host: '167.234.241.171',
+  host: '192.0.2.10',
   ports: [
     { port: 22, service: 'OpenSSH Server', status: 'OPEN', latencyMs: 3.8 },
     { port: 80, service: 'HTTP Web Server', status: 'CLOSED', latencyMs: 15.0 },

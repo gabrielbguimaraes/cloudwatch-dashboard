@@ -27,7 +27,7 @@ export type LifecycleState =
   | 'STOPPED'
   | 'TERMINATED'
   | 'DEGRADED'
-  | 'PROVISIONING';
+  | 'PROVISIONING' | 'STOPPING' | 'MOVING' | 'UNKNOWN';
 
 /** Níveis de Severidade para Logs e Alertas */
 export type SeverityLevel = 'INFO' | 'WARN' | 'ERROR' | 'CRITICAL';
@@ -98,7 +98,7 @@ export interface UserSession {
   userId: string;
   email: string;
   name: string;
-  role: 'ADMIN' | 'OPERATOR' | 'VIEWER';
+  role: 'USER' | 'ADMIN' | 'OPERATOR' | 'VIEWER';
   token: string;
   refreshToken: string;
   twoFactorEnabled: boolean;

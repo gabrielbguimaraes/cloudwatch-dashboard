@@ -1,10 +1,14 @@
 /**
- * DashboardScreen - Console Executivo de Monitoramento Multi-Cloud
- * Progressive Disclosure Nivel 1 (Cabecalho Executivo) & Nivel 2 (Cards Minimalistas)
- * Zero emojis, zero jargões internos de engenharia, estetica Google Cloud / MD3.
+ * DashboardScreen - Painel Principal de Monitoramento Multi-Cloud (Dados Reais OCI)
+ * Fase 3 (Sprint 2):
+ *  - Nuvens independentes: exibe apenas os provedores conectados pelo usuário autenticado
+ *  - Estado inicial sem nuvens: tela "Conecte uma nuvem" (OCI ativo, AWS/GCP "Em breve")
+ *  - Badge visível LIVE / CACHE, banner "Dados em cache de HH:mm" e toast de erro se o BFF falhar
+ *  - Cartões com dados 100% reais das VMs OCI (nome, shape, OCPUs, memória, IPs, lifecycleState e CPU/RAM)
+ *  - Zero botões de simulação, zero provisionamento falso, zero terminal simulado.
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -13,17 +17,15 @@ import {
   ScrollView,
   SafeAreaView,
   RefreshControl,
-  LayoutAnimation,
   Platform,
-  Modal,
-  TextInput,
-  Alert,
+  ActivityIndicator,
+  NativeModules,
+  Share,
 } from 'react-native';
 import { useCloud } from '../context/CloudContext';
 import { useAuth } from '../context/AuthContext';
 import { CloudLogo } from '../components/common/CloudLogo';
 import { InstanceActionSheet } from '../components/InstanceActionSheet';
-import { SerialConsoleModal } from '../components/SerialConsoleModal';
 import { Toast } from '../components/common/Toast';
 import { CLOUD_PALETTES, NEUTRAL_THEME } from '../theme/tokens';
 import { Print, sharePdfAsync } from '../services/pdfService';
@@ -33,203 +35,136 @@ import type { SupportedCloud } from '../types/auth';
 export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   const {
     filteredResources,
+    pinnedResourceIds,
     kpis,
-    refreshMetrics,
-    restartInstance,
-    deleteInstance,
-    editInstance,
-    provisionInstance,
-    addCustomResource,
-    setSelectedResource,
-    injectChaosCpuOverload,
-    crashPrimaryInstance,
-    restoreInfrastructure,
+    isLoading,
+    lastUpdated,
     telemetrySource,
-    isLiveCloud,
+    isOfflineCache,
+    cachedAtHHmm,
+    syncError,
+    policyHint,
+    refreshMetrics,
+    setSelectedResource,
+    togglePin,
+    isResourcePinned,
   } = useCloud();
 
-  const { activeProvider, cloudAccounts, switchActiveProvider, linkCloudProvider } = useAuth();
+  const {
+    masterUser,
+    activeProvider,
+    cloudAccounts,
+    connectedProviders,
+    hasConnectedClouds,
+    switchActiveProvider,
+  } = useAuth();
 
   const [refreshing, setRefreshing] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const [selectedInstanceForAction, setSelectedInstanceForAction] = useState<CloudResource | null>(null);
+  const [selectedInstanceForAction, setSelectedInstanceForAction] =
+    useState<CloudResource | null>(null);
   const [isActionSheetVisible, setIsActionSheetVisible] = useState(false);
 
-  // Terminal Serial Linux Emulado
-  const [terminalInstance, setTerminalInstance] = useState<CloudResource | null>(null);
-  const [isTerminalModalVisible, setIsTerminalModalVisible] = useState(false);
-
-  // Modal para conectar conta de nuvem diretamente do Dock
-  const [quickLinkModalProvider, setQuickLinkModalProvider] = useState<SupportedCloud | null>(null);
-  const [quickInputKey, setQuickInputKey] = useState('');
-  const [quickInputSecret, setQuickInputSecret] = useState('');
-
-  // Modal Executivo de Simulacao de Carga e Resiliencia
-  const [isStressModalVisible, setIsStressModalVisible] = useState(false);
-
-  // Modal de Cadastro de Recurso OCI Real (Host/IP Zabbix)
-  const [isAddResourceModalVisible, setIsAddResourceModalVisible] = useState(false);
-  const [newResourceName, setNewResourceName] = useState('');
-  const [newResourceShape, setNewResourceShape] = useState('VM.Standard.A1.Flex (Compute)');
-  const [newResourcePublicIp, setNewResourcePublicIp] = useState('167.234.241.171');
-  const [newResourcePrivateIp, setNewResourcePrivateIp] = useState('10.0.0.10');
-  const [newResourceOcpus, setNewResourceOcpus] = useState('2');
-  const [newResourceMemoryGb, setNewResourceMemoryGb] = useState('16');
-  const [isSavingResource, setIsSavingResource] = useState(false);
+  // Exibe toast de erro automaticamente quando a sincronização com o BFF falha
+  useEffect(() => {
+    if (syncError) {
+      setToastMessage(syncError);
+    }
+  }, [syncError]);
 
   const activePalette = CLOUD_PALETTES[activeProvider] || CLOUD_PALETTES.OCI;
   const activeAccountConfig = cloudAccounts[activeProvider];
 
+  // Ordena instâncias fixadas primeiro
+  const orderedResources = useMemo(() => {
+    return [...filteredResources].sort((a, b) => {
+      const aPinned = pinnedResourceIds.includes(a.id) ? 1 : 0;
+      const bPinned = pinnedResourceIds.includes(b.id) ? 1 : 0;
+      return bPinned - aPinned;
+    });
+  }, [filteredResources, pinnedResourceIds]);
+
+  const navigateToOciOnboarding = () => {
+    if (navigation.getParent?.()) {
+      navigation.getParent().navigate('OciOnboarding');
+    } else {
+      navigation.navigate('OciOnboarding');
+    }
+  };
+
   const handleRefresh = async () => {
     setRefreshing(true);
-    await refreshMetrics();
+    await refreshMetrics(true);
     setRefreshing(false);
-    setToastMessage('Telemetria sincronizada com o provedor');
+  };
+
+  const handleCopyPolicyHint = async (text: string) => {
+    try {
+      const clipboard = (NativeModules as any)?.Clipboard;
+      if (clipboard && typeof clipboard.setString === 'function') {
+        clipboard.setString(text);
+        setToastMessage('Policies IAM copiadas para a área de transferência');
+      } else {
+        await Share.share({ message: text });
+      }
+    } catch {
+      setToastMessage('Não foi possível copiar o texto');
+    }
   };
 
   const handleExportPdf = async () => {
     try {
-      const target = filteredResources[0];
+      const target = orderedResources[0];
       if (!target) {
-        setToastMessage('Nenhuma instancia disponivel para relatorio');
+        setToastMessage('Nenhuma instância disponível para gerar relatório PDF');
         return;
       }
 
-      setToastMessage('Gerando relatorio executivo em PDF...');
-      const html = Print.generateExecutiveReportHtml(target);
+      setToastMessage('Gerando relatório executivo em PDF...');
+      const auditorLabel = masterUser
+        ? `${masterUser.username} (${masterUser.email})`
+        : undefined;
+      const html = Print.generateExecutiveReportHtml(target, auditorLabel);
+      const cpuStr =
+        typeof target.metricsSummary?.cpuPercent === 'number'
+          ? `${target.metricsSummary.cpuPercent.toFixed(1)}%`
+          : 'N/D';
+      const memStr =
+        typeof target.metricsSummary?.memoryPercent === 'number'
+          ? `${target.metricsSummary.memoryPercent.toFixed(1)}%`
+          : 'N/D';
+
       const pdfResult = await Print.printToFileAsync({
         html,
         serverName: target.name,
         provider: target.provider,
         region: target.region,
         status: target.status,
-        cpu: `${target.metricsSummary?.cpuPercent ?? 12}%`,
-        memory: `${target.metricsSummary?.memoryPercent ?? 45}%`,
+        cpu: cpuStr,
+        memory: memStr,
         ocid: target.ocid || target.arn || target.id,
         sla: `${kpis.uptimeSla}%`,
-        auditor: 'Joao Gabriel Barros Guimaraes - FATEC 4DSM',
+        auditor: auditorLabel,
       });
 
-      await sharePdfAsync(pdfResult.uri, `Relatorio Executivo - ${activePalette.name}`);
-    } catch (err: any) {
-      setToastMessage('Falha ao exportar relatorio PDF');
+      await sharePdfAsync(pdfResult.uri, `Relatório de Telemetria - ${target.name}`);
+    } catch {
+      setToastMessage('Falha ao exportar relatório PDF');
     }
   };
 
-  const handleSaveNewResource = async () => {
-    if (!newResourceName.trim()) {
-      Alert.alert('Atenção', 'Informe o nome do recurso OCI.');
-      return;
-    }
-    setIsSavingResource(true);
-    try {
-      await addCustomResource({
-        name: newResourceName.trim(),
-        provider: activeProvider,
-        shape: newResourceShape,
-        resourceType: newResourceShape.includes('Database')
-          ? 'Autonomous Database'
-          : newResourceShape.includes('VCN')
-            ? 'VCN Gateway'
-            : 'Compute Instance',
-        publicIp: newResourcePublicIp.trim() || '167.234.241.171',
-        privateIp: newResourcePrivateIp.trim() || '10.0.0.10',
-        region: activeAccountConfig?.region || 'sa-saopaulo-1',
-        ocpus: Number(newResourceOcpus) || 2,
-        memoryGb: Number(newResourceMemoryGb) || 16,
-      });
-      setIsAddResourceModalVisible(false);
-      const savedName = newResourceName.trim();
-      setNewResourceName('');
-      setToastMessage(`Recurso "${savedName}" cadastrado no monitoramento!`);
-    } catch (err: any) {
-      Alert.alert('Erro', 'Falha ao cadastrar recurso.');
-    } finally {
-      setIsSavingResource(false);
-    }
-  };
-
-  const handleSelectCloud = async (cloud: SupportedCloud) => {
-    const isConfigured = cloudAccounts[cloud]?.isConfigured;
-    if (isConfigured) {
-      const switched = await switchActiveProvider(cloud);
-      if (switched) {
-        setToastMessage(`Console alternado para ${cloud}`);
-      } else {
-        setToastMessage(`Autorizacao para ${cloud} pendente`);
-      }
+  const handleSelectConnectedCloud = async (cloud: SupportedCloud) => {
+    const switched = await switchActiveProvider(cloud);
+    if (switched) {
+      setToastMessage(`Provedor ativo: ${cloud}`);
     } else {
-      setQuickLinkModalProvider(cloud);
-      setQuickInputKey('');
-      setQuickInputSecret('');
+      setToastMessage(`Autenticação biométrica necessária para ${cloud}`);
     }
-  };
-
-  const handlePasteQuickConfig = () => {
-    if (!quickLinkModalProvider) return;
-    if (quickLinkModalProvider === 'OCI') {
-      setQuickInputKey('ocid1.tenancy.oc1..aaaaaaaab1234567890');
-      setQuickInputSecret('0e:ed:6e:d2:98:cf:84:1e:7d:b7:16:37:ef:8c:e1:59');
-      setToastMessage('Perfil OCI de homologação aplicado');
-    } else if (quickLinkModalProvider === 'AWS') {
-      setQuickInputKey('AKIAIOSFODNN7EXAMPLE');
-      setQuickInputSecret('wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY');
-      setToastMessage('Perfil AWS de homologação aplicado');
-    } else {
-      setQuickInputKey('cloudwatch-prd-421');
-      setQuickInputSecret('sa-cloudwatch@cloudwatch-prd-421.iam.gserviceaccount.com');
-      setToastMessage('Perfil GCP de homologação aplicado');
-    }
-  };
-
-  const handleSaveQuickLink = async () => {
-    if (!quickLinkModalProvider) return;
-    if (!quickInputKey.trim()) {
-      Alert.alert('Atencao', 'Informe o identificador da conta.');
-      return;
-    }
-
-    const provider = quickLinkModalProvider;
-    const creds: Record<string, string> = {
-      accountIdentifier: quickInputKey.trim(),
-      accessKey: quickInputSecret.trim(),
-      region: provider === 'OCI' ? 'sa-saopaulo-1' : provider === 'AWS' ? 'us-east-1' : 'southamerica-east1',
-    };
-
-    setQuickLinkModalProvider(null);
-
-    Alert.alert(
-      'Autenticacao Biometrica',
-      `Deseja ativar autenticacao biometrica nativa para a conta ${provider}?`,
-      [
-        {
-          text: 'Pular',
-          style: 'cancel',
-          onPress: async () => {
-            await linkCloudProvider(provider, creds, false);
-            await switchActiveProvider(provider);
-            setToastMessage(`Conta ${provider} conectada com sucesso`);
-          },
-        },
-        {
-          text: 'Ativar',
-          onPress: async () => {
-            await linkCloudProvider(provider, creds, true);
-            await switchActiveProvider(provider);
-            setToastMessage(`Conta ${provider} conectada com biometria ativa`);
-          },
-        },
-      ]
-    );
   };
 
   const handleOpenActionSheet = (resource: CloudResource) => {
     setSelectedInstanceForAction(resource);
     setIsActionSheetVisible(true);
-  };
-
-  const handleCardPress = (resource: CloudResource) => {
-    handleOpenActionSheet(resource);
   };
 
   const handleNavigateToMetrics = (resource: CloudResource) => {
@@ -240,37 +175,112 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
     });
   };
 
-  const handleOpenTerminalFromSheet = (instance: CloudResource) => {
-    setTerminalInstance(instance);
-    setIsTerminalModalVisible(true);
-  };
-
-  const getStatusDotColor = (status: string) => {
+  const getStatusDotColor = (status: string, lifecycleState?: string) => {
+    if (lifecycleState === 'STOPPED' || lifecycleState === 'STOPPING' || status === 'OFFLINE') {
+      return '#6B7280';
+    }
     switch (status) {
-      case 'RUNNING':
       case 'HEALTHY':
-        return '#22C55E'; // Verde solido
+        return '#22C55E';
       case 'REBOOTING':
       case 'WARNING':
-      case 'DEGRADED':
-        return '#F59E0B'; // Ambar solido
-      case 'STOPPED':
+        return '#F59E0B';
       case 'CRITICAL':
       default:
-        return '#EF4444'; // Vermelho solido
+        return '#EF4444';
     }
   };
 
-  // Frase diagnostica executiva do Nivel 1
-  let diagnosticMessage = 'Todos os sistemas operacionais';
-  let diagnosticColor = '#22C55E';
+  // ==========================================================================
+  // ESTADO VAZIO INICIAL: USUÁRIO SEM NENHUMA NUVEM CONECTADA
+  // ==========================================================================
+  if (!hasConnectedClouds) {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <ScrollView contentContainerStyle={styles.noCloudsContainer}>
+          <View style={styles.noCloudsHeader}>
+            <Text style={styles.welcomeLabel}>
+              Olá, {masterUser?.username || 'usuário'}
+            </Text>
+            <Text style={styles.noCloudsTitle}>Conecte uma nuvem</Text>
+            <Text style={styles.noCloudsSubtitle}>
+              Conecte apenas os provedores que você utiliza para visualizar suas instâncias reais e métricas de monitoramento. Suas credenciais ficam isoladas na sua conta.
+            </Text>
+          </View>
+
+          {/* Cartão Oracle Cloud Infrastructure (Ativo) */}
+          <View style={[styles.providerSetupCard, styles.providerSetupCardOci]}>
+            <View style={styles.providerSetupTop}>
+              <CloudLogo provider="OCI" size={34} />
+              <View style={styles.providerSetupTextCol}>
+                <Text style={styles.providerSetupName}>Oracle Cloud Infrastructure (OCI)</Text>
+                <Text style={styles.providerSetupDesc}>
+                  Conexão rápida via comando no OCI Cloud Shell (sem digitar OCIDs) ou configuração manual.
+                </Text>
+              </View>
+            </View>
+            <TouchableOpacity
+              style={styles.ociConnectPrimaryBtn}
+              onPress={navigateToOciOnboarding}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.ociConnectPrimaryBtnText}>Conectar</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Cartão Amazon Web Services (Em breve - Sprint 3) */}
+          <View style={[styles.providerSetupCard, styles.providerSetupCardDisabled]}>
+            <View style={styles.providerSetupTop}>
+              <CloudLogo provider="AWS" size={32} />
+              <View style={styles.providerSetupTextCol}>
+                <Text style={styles.providerSetupName}>Amazon Web Services (AWS)</Text>
+                <Text style={styles.providerSetupDesc}>
+                  Monitoramento EC2 e CloudWatch planejado para a Sprint 3.
+                </Text>
+              </View>
+              <View style={styles.soonBadge}>
+                <Text style={styles.soonBadgeText}>Em breve</Text>
+              </View>
+            </View>
+          </View>
+
+          {/* Cartão Google Cloud Platform (Em breve - Sprint 3) */}
+          <View style={[styles.providerSetupCard, styles.providerSetupCardDisabled]}>
+            <View style={styles.providerSetupTop}>
+              <CloudLogo provider="GCP" size={32} />
+              <View style={styles.providerSetupTextCol}>
+                <Text style={styles.providerSetupName}>Google Cloud Platform (GCP)</Text>
+                <Text style={styles.providerSetupDesc}>
+                  Monitoramento Compute Engine e Cloud Monitoring planejado para a Sprint 3.
+                </Text>
+              </View>
+              <View style={styles.soonBadge}>
+                <Text style={styles.soonBadgeText}>Em breve</Text>
+              </View>
+            </View>
+          </View>
+        </ScrollView>
+
+        <Toast message={toastMessage} onDismiss={() => setToastMessage(null)} />
+      </SafeAreaView>
+    );
+  }
+
+  // Diagnóstico executivo derivado exclusivamente dos dados reais
+  let diagnosticMessage =
+    kpis.total === 0
+      ? 'Nenhuma VM encontrada na região ativa'
+      : 'Instâncias verificadas na conta conectada';
+  let diagnosticColor = kpis.total === 0 ? '#9AA0A6' : '#22C55E';
   if (kpis.critical > 0) {
-    diagnosticMessage = 'Incidente crítico em andamento';
+    diagnosticMessage = 'Atenção: instância parada ou com utilização crítica';
     diagnosticColor = '#EF4444';
   } else if (kpis.warning > 0) {
-    diagnosticMessage = 'Atenção: sobrecarga moderada detectada';
+    diagnosticMessage = 'Utilização moderada/alta detectada';
     diagnosticColor = '#F59E0B';
   }
+
+  const isLiveBadge = telemetrySource === 'LIVE_OCI';
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -285,7 +295,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
           />
         }
       >
-        {/* Nivel 1: Cabecalho Executivo Simplificado MD3 */}
+        {/* Cabeçalho Executivo com Badge LIVE / CACHE */}
         <View
           style={[
             styles.executiveHeader,
@@ -300,60 +310,68 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
               <CloudLogo provider={activeProvider} size={30} />
               <View style={styles.headerMeta}>
                 <Text style={styles.providerName} numberOfLines={1}>
-                  {activePalette.name}
+                  {activeAccountConfig?.tenancyName ||
+                    activeAccountConfig?.accountIdentifier ||
+                    activePalette.name}
                 </Text>
-                {/* Badge discreto de conexao */}
                 <View style={styles.connectionBadge}>
                   <View
                     style={[
                       styles.connectionDot,
-                      { backgroundColor: isLiveCloud ? '#22C55E' : '#38BDF8' },
+                      { backgroundColor: isLiveBadge ? '#22C55E' : '#F59E0B' },
                     ]}
                   />
                   <Text style={styles.connectionText} numberOfLines={1}>
-                    Conectado à {activeProvider} ({activeAccountConfig?.region || activePalette.defaultRegion})
+                    {activeProvider} • {activeAccountConfig?.region || activePalette.defaultRegion}
                   </Text>
                 </View>
               </View>
             </View>
 
             <View style={styles.actionGroup}>
-              <TouchableOpacity
-                style={styles.addResourceBtn}
-                onPress={() => setIsAddResourceModalVisible(true)}
-                activeOpacity={0.7}
+              {/* Badge visível indicando LIVE ou CACHE */}
+              <View
+                style={[
+                  styles.sourcePill,
+                  isLiveBadge ? styles.sourcePillLive : styles.sourcePillCache,
+                ]}
               >
-                <Text style={styles.addResourceBtnText} numberOfLines={1}>
-                  + Recurso
+                <View
+                  style={[
+                    styles.sourcePillDot,
+                    { backgroundColor: isLiveBadge ? '#22C55E' : '#F59E0B' },
+                  ]}
+                />
+                <Text
+                  style={[
+                    styles.sourcePillText,
+                    { color: isLiveBadge ? '#4ADE80' : '#FDE68A' },
+                  ]}
+                >
+                  {isLiveBadge ? 'LIVE' : 'CACHE'}
                 </Text>
-              </TouchableOpacity>
+              </View>
 
-              <TouchableOpacity
-                style={styles.stressBtn}
-                onPress={() => setIsStressModalVisible(true)}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.stressBtnText} numberOfLines={1}>
-                  Simular Carga
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.pdfBtn}
-                onPress={handleExportPdf}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.pdfBtnText} numberOfLines={1}>
-                  Relatório PDF
-                </Text>
-              </TouchableOpacity>
+              {orderedResources.length > 0 && (
+                <TouchableOpacity
+                  style={styles.pdfBtn}
+                  onPress={handleExportPdf}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.pdfBtnText} numberOfLines={1}>
+                    PDF
+                  </Text>
+                </TouchableOpacity>
+              )}
             </View>
           </View>
 
-          {/* Resumo de Saude Limpo: SLA + Frase Diagnostica Executiva */}
+          {/* Resumo Real das Instâncias */}
           <View style={styles.healthSummaryCard}>
             <View style={styles.healthSummaryMain}>
-              <Text style={styles.healthSlaValue}>{kpis.uptimeSla}% SLA</Text>
+              <Text style={styles.healthSlaValue}>
+                {kpis.total > 0 ? `${kpis.uptimeSla}% ATIVAS` : '0 VMs'}
+              </Text>
               <View style={styles.diagnosticRow}>
                 <View style={[styles.diagnosticDot, { backgroundColor: diagnosticColor }]} />
                 <Text style={[styles.diagnosticText, { color: diagnosticColor }]}>
@@ -367,31 +385,50 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
                 <Text style={styles.healthCounterNum}>
                   {kpis.healthy}/{kpis.total}
                 </Text>
-                <Text style={styles.healthCounterLabel}>OPERACIONAIS</Text>
+                <Text style={styles.healthCounterLabel}>SAUDÁVEIS</Text>
               </View>
               <View style={styles.healthCounterItem}>
                 <Text
                   style={[
                     styles.healthCounterNum,
-                    (kpis.critical + kpis.warning) > 0 && { color: '#F59E0B' },
+                    kpis.critical + kpis.warning > 0 && { color: '#F59E0B' },
                     kpis.critical > 0 && { color: '#EF4444' },
                   ]}
                 >
                   {kpis.critical + kpis.warning}
                 </Text>
-                <Text style={styles.healthCounterLabel}>ALERTAS</Text>
+                <Text style={styles.healthCounterLabel}>ATENÇÃO</Text>
               </View>
             </View>
           </View>
         </View>
 
-        {/* Floating Dock: Seletor Central de Nuvem (Segmented Control) */}
+        {/* Banner Offline-First quando exibindo snapshot em cache */}
+        {isOfflineCache && (
+          <View style={styles.cacheBanner}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.cacheBannerTitle}>
+                Dados em cache de {cachedAtHHmm || lastUpdated}
+              </Text>
+              <Text style={styles.cacheBannerSub}>
+                Servidor BFF inacessível no momento. Exibindo o último snapshot real salvo para sua conta.
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.cacheRetryBtn}
+              onPress={handleRefresh}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.cacheRetryBtnText}>Reconectar</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Seletor de Provedores: exibe APENAS os provedores que o usuário conectou */}
         <View style={styles.dockWrapper}>
           <View style={styles.dockContainer}>
-            {(['OCI', 'AWS', 'GCP'] as SupportedCloud[]).map((cloud) => {
+            {connectedProviders.map((cloud) => {
               const isSelected = activeProvider === cloud;
-              const isConfigured = cloudAccounts[cloud]?.isConfigured;
-
               return (
                 <TouchableOpacity
                   key={cloud}
@@ -402,9 +439,8 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
                       borderColor: CLOUD_PALETTES[cloud].borderFocus,
                       borderWidth: 1.5,
                     },
-                    !isConfigured && styles.dockChipUnconfigured,
                   ]}
-                  onPress={() => handleSelectCloud(cloud)}
+                  onPress={() => handleSelectConnectedCloud(cloud)}
                   activeOpacity={0.7}
                 >
                   <CloudLogo provider={cloud} size={18} />
@@ -412,108 +448,181 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
                     style={[
                       styles.dockChipText,
                       isSelected && { color: '#E8EAED', fontWeight: '800' },
-                      !isConfigured && styles.dockChipTextFaded,
                     ]}
                   >
                     {cloud}
                   </Text>
-                  {!isConfigured && (
-                    <View style={styles.unconfiguredBadge}>
-                      <Text style={styles.unconfiguredBadgeText}>+</Text>
-                    </View>
-                  )}
                 </TouchableOpacity>
               );
             })}
           </View>
         </View>
 
-        {/* Botao Corporativo de Provisionamento */}
-        <View style={styles.provisionBar}>
-          <TouchableOpacity
-            style={styles.provisionButton}
-            onPress={() => {
-              const newInst = provisionInstance();
-              setToastMessage(`Instancia ${newInst.name} provisionada em ${activeProvider}`);
-            }}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.provisionButtonText}>+ Provisionar Servidor ({activeProvider})</Text>
-          </TouchableOpacity>
-        </View>
+        {/* Aviso de Policies IAM caso a conta OCI esteja autenticada mas sem permissão de leitura */}
+        {(policyHint || activeAccountConfig?.permissionStatus === 'NO_PERMISSION') && (
+          <View style={styles.policyWarningCard}>
+            <Text style={styles.policyWarningTitle}>
+              Conta OCI autenticada, mas sem permissão de leitura (IAM Policy)
+            </Text>
+            <Text style={styles.policyWarningBody}>
+              {policyHint ||
+                'Adicione as policies de leitura (inspect/read instances, vnic-attachments, vnics, metrics e audit-events) ao grupo do seu usuário no Console da Oracle Cloud.'}
+            </Text>
+            {policyHint ? (
+              <TouchableOpacity
+                style={styles.copyPolicyBtn}
+                onPress={() => handleCopyPolicyHint(policyHint)}
+              >
+                <Text style={styles.copyPolicyBtnText}>Copiar Policies Necessárias</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        )}
 
-        {/* Nivel 2: Lista de Cards de Servidor Minimalistas (4 Elementos Essenciais) */}
+        {/* Lista de Instâncias Reais da Conta Conectada */}
         <View style={styles.resourceSection}>
           <View style={styles.sectionHeaderRow}>
             <Text style={styles.sectionTitle}>
-              SERVIDORES MONITORADOS ({filteredResources.length})
+              INSTÂNCIAS COMPUTE REAIS ({orderedResources.length})
             </Text>
-            <Text style={styles.sectionSub}>Atualização Contínua</Text>
+            <Text style={styles.sectionSub}>
+              {lastUpdated !== '—' ? `Atualizado às ${lastUpdated}` : 'Sincronizando...'}
+            </Text>
           </View>
 
-          {filteredResources.length === 0 ? (
+          {isLoading && orderedResources.length === 0 ? (
             <View style={styles.emptyContainer}>
+              <ActivityIndicator size="small" color={activePalette.primary} />
+              <Text style={[styles.emptyText, { marginTop: 12, marginBottom: 0 }]}>
+                Consultando instâncias reais na Oracle Cloud...
+              </Text>
+            </View>
+          ) : orderedResources.length === 0 ? (
+            <View style={styles.emptyContainer}>
+              <Text style={styles.emptyTitle}>
+                {syncError
+                  ? 'Não foi possível carregar suas instâncias'
+                  : 'Nenhuma instância Compute encontrada'}
+              </Text>
               <Text style={styles.emptyText}>
-                Nenhum servidor monitorado nesta conta de nuvem.
+                {syncError
+                  ? syncError
+                  : `Não há VMs visíveis na região ${activeAccountConfig?.region || 'sa-saopaulo-1'} para esta conta OCI.`}
               </Text>
               <TouchableOpacity
-                style={styles.emptyAddBtn}
-                onPress={() => provisionInstance()}
+                style={styles.emptyRetryBtn}
+                onPress={() => refreshMetrics(true)}
+                activeOpacity={0.8}
               >
-                <Text style={styles.emptyAddBtnText}>Provisionar Primeiro Servidor</Text>
+                <Text style={styles.emptyRetryBtnText}>Tentar novamente</Text>
               </TouchableOpacity>
             </View>
           ) : (
-            filteredResources.map((resource) => {
-              const cpuPercent = resource.metricsSummary?.cpuPercent ?? 0;
-              const dotColor = getStatusDotColor(resource.status);
+            orderedResources.map((resource) => {
+              const meta = (resource.metadata || {}) as Record<string, any>;
+              const cpuPercent = resource.metricsSummary?.cpuPercent;
+              const memPercent = resource.metricsSummary?.memoryPercent;
+              const hasRealCpu = typeof cpuPercent === 'number';
+              const hasRealMem = typeof memPercent === 'number';
+              const dotColor = getStatusDotColor(resource.status, resource.lifecycleState);
+              const pinned = isResourcePinned(resource.id);
+
+              const shapeLabel = meta.shape || 'Shape não informado';
+              const ocpuLabel =
+                typeof meta.ocpuCount === 'number' ? `${meta.ocpuCount} OCPUs` : null;
+              const memLabel =
+                typeof meta.memoryInGBs === 'number' ? `${meta.memoryInGBs} GB RAM` : null;
+              const specsLine = [shapeLabel, ocpuLabel, memLabel].filter(Boolean).join(' • ');
 
               return (
                 <TouchableOpacity
                   key={resource.id}
-                  style={styles.minimalCard}
-                  onPress={() => handleCardPress(resource)}
-                  activeOpacity={0.7}
+                  style={styles.vmCard}
+                  onPress={() => handleNavigateToMetrics(resource)}
+                  activeOpacity={0.75}
                 >
-                  {/* Elemento 1, 2 e 4: Ponto Semaforico + Nome/Logo + Botao Opcoes */}
+                  {/* Linha 1: Status + Logo + Nome + Estado OCI + Menu (...) */}
                   <View style={styles.cardHeaderRow}>
                     <View style={styles.cardHeaderLeft}>
-                      {/* 1. Ponto Semaforico Solido */}
                       <View style={[styles.statusDot, { backgroundColor: dotColor }]} />
-                      {/* 2. Logo discreto e Nome da Instancia */}
-                      <CloudLogo provider={resource.provider} size={15} />
+                      <CloudLogo provider={resource.provider} size={16} />
                       <Text style={styles.cardTitle} numberOfLines={1}>
+                        {pinned ? '★ ' : ''}
                         {resource.name}
                       </Text>
                     </View>
 
-                    {/* 4. Botao de Opcoes (...) para abrir Bottom Sheet */}
-                    <TouchableOpacity
-                      style={styles.moreActionBtn}
-                      onPress={() => handleOpenActionSheet(resource)}
-                      hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-                    >
-                      <Text style={styles.moreActionText}>...</Text>
-                    </TouchableOpacity>
-                  </View>
-
-                  {/* Elemento 3: Uma Unica Barra de Progresso Horizontal com Valor a Direita */}
-                  <View style={styles.singleProgressBarContainer}>
-                    <View style={styles.progressBarTrack}>
+                    <View style={styles.cardHeaderRight}>
                       <View
                         style={[
-                          styles.progressBarFill,
-                          {
-                            width: `${Math.min(100, Math.max(3, cpuPercent))}%`,
-                            backgroundColor: dotColor,
-                          },
+                          styles.lifecycleBadge,
+                          { borderColor: `${dotColor}66` },
                         ]}
-                      />
+                      >
+                        <Text style={[styles.lifecycleBadgeText, { color: dotColor }]}>
+                          {resource.lifecycleState}
+                        </Text>
+                      </View>
+
+                      <TouchableOpacity
+                        style={styles.moreActionBtn}
+                        onPress={() => handleOpenActionSheet(resource)}
+                        hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                      >
+                        <Text style={styles.moreActionText}>•••</Text>
+                      </TouchableOpacity>
                     </View>
-                    <Text style={[styles.cardCpuValue, { color: dotColor }]}>
-                      {cpuPercent}% CPU
+                  </View>
+
+                  {/* Linha 2: Shape, OCPUs e Memória Real */}
+                  <Text style={styles.vmSpecsText} numberOfLines={1}>
+                    {specsLine}
+                  </Text>
+
+                  {/* Linha 3: IPs Público e Privado + Região */}
+                  <View style={styles.vmIpRow}>
+                    <Text style={styles.vmIpItem}>
+                      Público: <Text style={styles.vmIpMono}>{meta.publicIp || '—'}</Text>
+                    </Text>
+                    <Text style={styles.vmIpItem}>
+                      Privado: <Text style={styles.vmIpMono}>{meta.privateIp || '—'}</Text>
                     </Text>
                   </View>
+
+                  {/* Linha 4: Telemetria Real do OCI Monitoring (ou aviso honesto se sem agente) */}
+                  {hasRealCpu ? (
+                    <View style={styles.telemetrySection}>
+                      <View style={styles.singleProgressBarContainer}>
+                        <View style={styles.progressBarTrack}>
+                          <View
+                            style={[
+                              styles.progressBarFill,
+                              {
+                                width: `${Math.min(100, Math.max(2, cpuPercent!))}%`,
+                                backgroundColor: dotColor,
+                              },
+                            ]}
+                          />
+                        </View>
+                        <Text style={[styles.cardCpuValue, { color: dotColor }]}>
+                          {cpuPercent!.toFixed(1)}% CPU
+                        </Text>
+                      </View>
+                      {hasRealMem && (
+                        <Text style={styles.cardMemSub}>
+                          Memória OCI Monitoring: {memPercent!.toFixed(1)}%
+                        </Text>
+                      )}
+                    </View>
+                  ) : (
+                    <View style={styles.noMetricsBar}>
+                      <Text style={styles.noMetricsText}>
+                        {resource.lifecycleState !== 'RUNNING'
+                          ? `Instância ${resource.lifecycleState} — sem coleta ativa`
+                          : 'Sem métricas recentes no OCI Monitoring (toque para detalhes)'}
+                      </Text>
+                    </View>
+                  )}
                 </TouchableOpacity>
               );
             })
@@ -521,326 +630,20 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
         </View>
       </ScrollView>
 
-      {/* Bottom Sheet de Detalhes Tecnicos e Ciclo de Vida */}
+      {/* Bottom Sheet de Especificações Reais e Sondagem TCP */}
       <InstanceActionSheet
         visible={isActionSheetVisible}
         instance={selectedInstanceForAction}
         onClose={() => setIsActionSheetVisible(false)}
-        onRestart={(id) => restartInstance(id)}
-        onEdit={(id, newName, shape) => editInstance(id, newName, shape)}
-        onDelete={(id) => deleteInstance(id)}
         onShowToast={(msg) => setToastMessage(msg)}
-        onOpenTerminal={(inst) => handleOpenTerminalFromSheet(inst)}
-        onStressTest={() => injectChaosCpuOverload()}
         onViewMetrics={(inst) => handleNavigateToMetrics(inst)}
+        isPinned={
+          selectedInstanceForAction
+            ? isResourcePinned(selectedInstanceForAction.id)
+            : false
+        }
+        onTogglePin={(id) => togglePin(id)}
       />
-
-      {/* Console Serial Linux Emulado */}
-      <SerialConsoleModal
-        visible={isTerminalModalVisible}
-        onClose={() => setIsTerminalModalVisible(false)}
-        instance={terminalInstance}
-        onRestartInstance={(id) => restartInstance(id)}
-      />
-
-      {/* Modal de Conectar Conta de Nuvem com Botao de Colar JSON Rapido */}
-      <Modal
-        visible={quickLinkModalProvider !== null}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setQuickLinkModalProvider(null)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.quickModalCard}>
-            <Text style={styles.quickModalTitle}>
-              Conectar Conta: {quickLinkModalProvider}
-            </Text>
-            <Text style={styles.quickModalSubtitle}>
-              Insira as credenciais para autorizar a observabilidade nesta nuvem:
-            </Text>
-
-            {/* Botao Discreto: Colar JSON de Configuracao Rapida */}
-            <TouchableOpacity
-              style={styles.pasteJsonBtn}
-              onPress={handlePasteQuickConfig}
-              activeOpacity={0.8}
-            >
-              <Text style={styles.pasteJsonBtnText}>Colar JSON de Configuração Rápida</Text>
-            </TouchableOpacity>
-
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>
-                {quickLinkModalProvider === 'OCI'
-                  ? 'TENANCY OCID'
-                  : quickLinkModalProvider === 'AWS'
-                    ? 'AWS ACCESS KEY ID'
-                    : 'GCP PROJECT ID'}
-              </Text>
-              <TextInput
-                style={styles.formInput}
-                value={quickInputKey}
-                onChangeText={setQuickInputKey}
-                placeholder="Identificador da conta"
-                placeholderTextColor="#5F6368"
-                autoCapitalize="none"
-              />
-            </View>
-
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>
-                {quickLinkModalProvider === 'AWS' ? 'SECRET ACCESS KEY' : 'API KEY / TOKEN'}
-              </Text>
-              <TextInput
-                style={styles.formInput}
-                value={quickInputSecret}
-                onChangeText={setQuickInputSecret}
-                placeholder="Chave secreta de operacao"
-                placeholderTextColor="#5F6368"
-                secureTextEntry
-              />
-            </View>
-
-            <View style={styles.quickModalActions}>
-              <TouchableOpacity
-                style={styles.quickCancelBtn}
-                onPress={() => setQuickLinkModalProvider(null)}
-              >
-                <Text style={styles.quickCancelText}>Cancelar</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity style={styles.quickSaveBtn} onPress={handleSaveQuickLink}>
-                <Text style={styles.quickSaveText}>Salvar e Conectar</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      {/* Modal de Cadastro de Recurso OCI Real (Host/IP Zabbix) */}
-      <Modal
-        visible={isAddResourceModalVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setIsAddResourceModalVisible(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.addResourceModalCard}>
-            <View style={styles.stressModalHeader}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.stressModalTitle}>Cadastrar Recurso OCI</Text>
-                <Text style={styles.addResourceSubtitle}>
-                  Monitore recursos reais com IP público para sondagem Zabbix
-                </Text>
-              </View>
-              <TouchableOpacity onPress={() => setIsAddResourceModalVisible(false)}>
-                <Text style={styles.modalCloseText}>✕</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Seletor Rapido de Tipo / Shape */}
-            <Text style={styles.formLabel}>TIPO / SHAPE DO RECURSO</Text>
-            <View style={styles.shapeSelectorRow}>
-              {[
-                'VM.Standard.A1.Flex (Compute)',
-                'VM.Standard.E2.1.Micro',
-                'Autonomous Database',
-                'VCN / Load Balancer',
-              ].map((s) => (
-                <TouchableOpacity
-                  key={s}
-                  style={[
-                    styles.shapePill,
-                    newResourceShape === s && styles.shapePillActive,
-                  ]}
-                  onPress={() => {
-                    setNewResourceShape(s);
-                    if (s.includes('A1.Flex')) {
-                      setNewResourceOcpus('4');
-                      setNewResourceMemoryGb('24');
-                    } else if (s.includes('Micro')) {
-                      setNewResourceOcpus('1');
-                      setNewResourceMemoryGb('1');
-                    } else if (s.includes('Database')) {
-                      setNewResourceOcpus('2');
-                      setNewResourceMemoryGb('16');
-                    }
-                  }}
-                >
-                  <Text
-                    style={[
-                      styles.shapePillText,
-                      newResourceShape === s && styles.shapePillTextActive,
-                    ]}
-                    numberOfLines={1}
-                  >
-                    {s.split(' ')[0]}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            {/* Nome do Recurso */}
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>NOME DO RECURSO OCI</Text>
-              <TextInput
-                style={styles.formInput}
-                value={newResourceName}
-                onChangeText={setNewResourceName}
-                placeholder="Ex: vnic-sidebrain-prd ou db-oracle-prod"
-                placeholderTextColor="#5F6368"
-                autoCapitalize="none"
-              />
-            </View>
-
-            {/* Endereco IP Publico para Sondagem Zabbix */}
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>ENDEREÇO IP PÚBLICO (SONDAGEM ZABBIX)</Text>
-              <TextInput
-                style={styles.formInput}
-                value={newResourcePublicIp}
-                onChangeText={setNewResourcePublicIp}
-                placeholder="Ex: 167.234.241.171"
-                placeholderTextColor="#5F6368"
-                autoCapitalize="none"
-              />
-            </View>
-
-            {/* Endereco IP Privado */}
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>ENDEREÇO IP PRIVADO (VCN SUBNET)</Text>
-              <TextInput
-                style={styles.formInput}
-                value={newResourcePrivateIp}
-                onChangeText={setNewResourcePrivateIp}
-                placeholder="Ex: 10.0.0.10"
-                placeholderTextColor="#5F6368"
-                autoCapitalize="none"
-              />
-            </View>
-
-            {/* OCPUs e Memoria (GB) */}
-            <View style={styles.formRowTwoCols}>
-              <View style={[styles.formGroup, { flex: 1 }]}>
-                <Text style={styles.formLabel}>OCPUS</Text>
-                <TextInput
-                  style={styles.formInput}
-                  value={newResourceOcpus}
-                  onChangeText={setNewResourceOcpus}
-                  placeholder="2"
-                  placeholderTextColor="#5F6368"
-                  keyboardType="numeric"
-                />
-              </View>
-
-              <View style={[styles.formGroup, { flex: 1 }]}>
-                <Text style={styles.formLabel}>MEMÓRIA (GB)</Text>
-                <TextInput
-                  style={styles.formInput}
-                  value={newResourceMemoryGb}
-                  onChangeText={setNewResourceMemoryGb}
-                  placeholder="16"
-                  placeholderTextColor="#5F6368"
-                  keyboardType="numeric"
-                />
-              </View>
-            </View>
-
-            {/* Acoes do Modal */}
-            <View style={styles.quickModalActions}>
-              <TouchableOpacity
-                style={styles.quickCancelBtn}
-                onPress={() => setIsAddResourceModalVisible(false)}
-              >
-                <Text style={styles.quickCancelText}>Cancelar</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.quickSaveBtn, isSavingResource && { opacity: 0.6 }]}
-                onPress={handleSaveNewResource}
-                disabled={isSavingResource}
-              >
-                <Text style={styles.quickSaveText}>
-                  {isSavingResource ? 'Cadastrando...' : 'Cadastrar Recurso OCI'}
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      {/* Modal Executivo: Simulacao de Carga e Resiliencia */}
-      <Modal
-        visible={isStressModalVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setIsStressModalVisible(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.stressModalCard}>
-            <View style={styles.stressModalHeader}>
-              <Text style={styles.stressModalTitle}>Simulação de Carga e Resiliência</Text>
-              <TouchableOpacity onPress={() => setIsStressModalVisible(false)}>
-                <Text style={styles.modalCloseText}>FECHAR</Text>
-              </TouchableOpacity>
-            </View>
-
-            <Text style={styles.stressModalDesc}>
-              Avalie a reação do ecossistema de observabilidade a anomalias e picos de demanda operacional:
-            </Text>
-
-            <View style={styles.stressActionList}>
-              <TouchableOpacity
-                style={styles.stressItem}
-                onPress={() => {
-                  injectChaosCpuOverload();
-                  setIsStressModalVisible(false);
-                  setToastMessage('Pico de carga induzido (98% CPU)');
-                }}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.stressItemTitle}>Simular Pico de Carga (CPU 98%)</Text>
-                <Text style={styles.stressItemSub}>
-                  Injeta sobrecarga severa no host para aferir violação de limiar crítico de SLA (85%).
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.stressItem, styles.stressItemCrash]}
-                onPress={() => {
-                  crashPrimaryInstance();
-                  setIsStressModalVisible(false);
-                  setToastMessage('Queda de host induzida (Failover)');
-                }}
-                activeOpacity={0.7}
-              >
-                <Text style={[styles.stressItemTitle, styles.stressCrashText]}>
-                  Simular Queda de Host (0% CPU / Failover)
-                </Text>
-                <Text style={styles.stressItemSub}>
-                  Derruba a máquina primária para avaliar isolamento de falha e acionamento de contingência.
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.stressItem, styles.stressItemRestore]}
-                onPress={() => {
-                  restoreInfrastructure();
-                  setIsStressModalVisible(false);
-                  setToastMessage('Infraestrutura restaurada para estado saudável');
-                }}
-                activeOpacity={0.7}
-              >
-                <Text style={[styles.stressItemTitle, styles.stressRestoreText]}>
-                  Restabelecer Normalidade Operacional
-                </Text>
-                <Text style={styles.stressItemSub}>
-                  Normaliza telemetria de CPU e Memória para todos os servidores da conta ativa.
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
 
       {toastMessage && (
         <Toast message={toastMessage} onDismiss={() => setToastMessage(null)} />
@@ -856,6 +659,92 @@ const styles = StyleSheet.create({
   },
   container: {
     paddingBottom: 40,
+  },
+  noCloudsContainer: {
+    padding: 20,
+    paddingBottom: 40,
+  },
+  noCloudsHeader: {
+    marginTop: 12,
+    marginBottom: 22,
+  },
+  welcomeLabel: {
+    color: '#8AB4F8',
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginBottom: 6,
+  },
+  noCloudsTitle: {
+    color: '#E8EAED',
+    fontSize: 24,
+    fontWeight: '800',
+    marginBottom: 8,
+  },
+  noCloudsSubtitle: {
+    color: '#9AA0A6',
+    fontSize: 13,
+    lineHeight: 20,
+  },
+  providerSetupCard: {
+    backgroundColor: '#161A22',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#262D38',
+    padding: 16,
+    marginBottom: 14,
+  },
+  providerSetupCardOci: {
+    borderColor: '#F8000055',
+    backgroundColor: '#19161A',
+  },
+  providerSetupCardDisabled: {
+    opacity: 0.72,
+  },
+  providerSetupTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  providerSetupTextCol: {
+    flex: 1,
+  },
+  providerSetupName: {
+    color: '#E8EAED',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  providerSetupDesc: {
+    color: '#9AA0A6',
+    fontSize: 12,
+    lineHeight: 17,
+    marginTop: 4,
+  },
+  ociConnectPrimaryBtn: {
+    marginTop: 14,
+    backgroundColor: '#F80000',
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  ociConnectPrimaryBtnText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  soonBadge: {
+    backgroundColor: '#20242C',
+    borderWidth: 1,
+    borderColor: '#374151',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  soonBadgeText: {
+    color: '#9CA3AF',
+    fontSize: 11,
+    fontWeight: '700',
   },
   executiveHeader: {
     paddingHorizontal: 18,
@@ -874,6 +763,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flex: 1,
     gap: 10,
+    marginRight: 8,
   },
   headerMeta: {
     flex: 1,
@@ -904,37 +794,39 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
   },
-  addResourceBtn: {
-    backgroundColor: '#0F382A',
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    borderRadius: 8,
+  sourcePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 6,
     borderWidth: 1,
+    gap: 5,
+  },
+  sourcePillLive: {
+    backgroundColor: '#0F382A',
     borderColor: '#22C55E',
   },
-  addResourceBtnText: {
-    color: '#86EFAC',
-    fontSize: 11,
-    fontWeight: '700',
+  sourcePillCache: {
+    backgroundColor: '#3A3018',
+    borderColor: '#F59E0B',
   },
-  stressBtn: {
-    backgroundColor: '#262C36',
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#374151',
+  sourcePillDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
   },
-  stressBtnText: {
-    color: '#E8EAED',
-    fontSize: 11,
-    fontWeight: '700',
+  sourcePillText: {
+    fontSize: 10,
+    fontWeight: '800',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    letterSpacing: 0.5,
   },
   pdfBtn: {
     backgroundColor: '#1E3A5F',
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
     borderWidth: 1,
     borderColor: '#3B82F6',
   },
@@ -955,12 +847,13 @@ const styles = StyleSheet.create({
   },
   healthSummaryMain: {
     flex: 1,
+    marginRight: 10,
   },
   healthSlaValue: {
     color: '#E8EAED',
-    fontSize: 20,
+    fontSize: 19,
     fontWeight: '800',
-    letterSpacing: 0.5,
+    letterSpacing: 0.3,
   },
   diagnosticRow: {
     flexDirection: 'row',
@@ -974,12 +867,13 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
   diagnosticText: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '700',
+    flex: 1,
   },
   healthCounters: {
     flexDirection: 'row',
-    gap: 16,
+    gap: 14,
   },
   healthCounterItem: {
     alignItems: 'center',
@@ -997,10 +891,44 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
     marginTop: 2,
   },
+  cacheBanner: {
+    marginHorizontal: 18,
+    marginTop: 12,
+    backgroundColor: '#2C2210',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#F59E0B',
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  cacheBannerTitle: {
+    color: '#FDE68A',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  cacheBannerSub: {
+    color: '#E5E7EB',
+    fontSize: 11,
+    marginTop: 2,
+    lineHeight: 15,
+  },
+  cacheRetryBtn: {
+    backgroundColor: '#F59E0B',
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 6,
+  },
+  cacheRetryBtnText: {
+    color: '#0F1318',
+    fontSize: 11,
+    fontWeight: '800',
+  },
   dockWrapper: {
     paddingHorizontal: 18,
     marginTop: 14,
-    marginBottom: 6,
+    marginBottom: 4,
   },
   dockContainer: {
     flexDirection: 'row',
@@ -1020,46 +948,45 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     gap: 6,
   },
-  dockChipUnconfigured: {
-    opacity: 0.7,
-  },
   dockChipText: {
     color: '#9AA0A6',
     fontSize: 12,
     fontWeight: '700',
   },
-  dockChipTextFaded: {
-    color: '#6B7280',
-  },
-  unconfiguredBadge: {
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    backgroundColor: '#374151',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  unconfiguredBadgeText: {
-    color: '#D1D5DB',
-    fontSize: 10,
-    fontWeight: '700',
-    lineHeight: 12,
-  },
-  provisionBar: {
-    paddingHorizontal: 18,
-    marginTop: 10,
-  },
-  provisionButton: {
-    backgroundColor: '#1E232B',
-    borderRadius: 10,
+  policyWarningCard: {
+    marginHorizontal: 18,
+    marginTop: 12,
+    backgroundColor: '#2B1F12',
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#282E38',
-    paddingVertical: 10,
-    alignItems: 'center',
+    borderColor: '#F59E0B',
+    padding: 14,
   },
-  provisionButtonText: {
-    color: '#8AB4F8',
-    fontSize: 12,
+  policyWarningTitle: {
+    color: '#FDE68A',
+    fontSize: 13,
+    fontWeight: '800',
+    marginBottom: 6,
+  },
+  policyWarningBody: {
+    color: '#E8EAED',
+    fontSize: 11,
+    lineHeight: 17,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  copyPolicyBtn: {
+    marginTop: 10,
+    alignSelf: 'flex-start',
+    backgroundColor: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+    borderRadius: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  copyPolicyBtnText: {
+    color: '#93C5FD',
+    fontSize: 11,
     fontWeight: '700',
   },
   resourceSection: {
@@ -1090,24 +1017,32 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#262C36',
   },
+  emptyTitle: {
+    color: '#E8EAED',
+    fontSize: 14,
+    fontWeight: '800',
+    textAlign: 'center',
+    marginBottom: 6,
+  },
   emptyText: {
     color: '#9AA0A6',
-    fontSize: 13,
+    fontSize: 12,
     textAlign: 'center',
+    lineHeight: 18,
     marginBottom: 14,
   },
-  emptyAddBtn: {
+  emptyRetryBtn: {
     backgroundColor: '#8AB4F8',
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderRadius: 8,
   },
-  emptyAddBtnText: {
+  emptyRetryBtnText: {
     color: '#0F1318',
     fontSize: 12,
-    fontWeight: '700',
+    fontWeight: '800',
   },
-  minimalCard: {
+  vmCard: {
     backgroundColor: '#161A22',
     borderRadius: 12,
     borderWidth: 1,
@@ -1119,7 +1054,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: 6,
   },
   cardHeaderLeft: {
     flexDirection: 'row',
@@ -1127,6 +1062,11 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: 8,
     marginRight: 8,
+  },
+  cardHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
   },
   statusDot: {
     width: 8,
@@ -1139,16 +1079,51 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     flex: 1,
   },
+  lifecycleBadge: {
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 4,
+    borderWidth: 1,
+    backgroundColor: '#0F1318',
+  },
+  lifecycleBadgeText: {
+    fontSize: 9,
+    fontWeight: '800',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
   moreActionBtn: {
-    paddingHorizontal: 8,
+    paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 4,
   },
   moreActionText: {
     color: '#9AA0A6',
-    fontSize: 16,
+    fontSize: 12,
     fontWeight: '800',
-    letterSpacing: 1,
+  },
+  vmSpecsText: {
+    color: '#93C5FD',
+    fontSize: 11,
+    fontWeight: '600',
+    marginBottom: 6,
+  },
+  vmIpRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 14,
+    marginBottom: 10,
+  },
+  vmIpItem: {
+    color: '#9AA0A6',
+    fontSize: 11,
+  },
+  vmIpMono: {
+    color: '#E8EAED',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: 11,
+  },
+  telemetrySection: {
+    gap: 4,
   },
   singleProgressBarContainer: {
     flexDirection: 'row',
@@ -1170,210 +1145,24 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '800',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    minWidth: 64,
+    minWidth: 74,
     textAlign: 'right',
   },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.75)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
-  },
-  quickModalCard: {
-    backgroundColor: '#1A1D24',
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: '#2D3139',
-    padding: 20,
-    width: '100%',
-    maxWidth: 400,
-  },
-  quickModalTitle: {
-    color: '#E8EAED',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  quickModalSubtitle: {
-    color: '#9AA0A6',
-    fontSize: 12,
-    marginTop: 4,
-    marginBottom: 14,
-  },
-  pasteJsonBtn: {
-    backgroundColor: '#1E293B',
-    borderWidth: 1,
-    borderColor: '#38BDF8',
-    borderRadius: 8,
-    paddingVertical: 10,
-    alignItems: 'center',
-    marginBottom: 14,
-  },
-  pasteJsonBtnText: {
-    color: '#38BDF8',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  formGroup: {
-    marginBottom: 12,
-  },
-  formLabel: {
+  cardMemSub: {
     color: '#9AA0A6',
     fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 0.5,
-    marginBottom: 6,
-  },
-  formInput: {
-    backgroundColor: '#0F1318',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#2D3139',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    color: '#E8EAED',
-    fontSize: 13,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
-  quickModalActions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: 10,
-    marginTop: 14,
-  },
-  quickCancelBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#2D3139',
-  },
-  quickCancelText: {
-    color: '#9AA0A6',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  quickSaveBtn: {
-    backgroundColor: '#8AB4F8',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 8,
-  },
-  quickSaveText: {
-    color: '#0F1318',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  addResourceModalCard: {
-    backgroundColor: '#1A1D24',
-    borderRadius: 16,
-    padding: 18,
-    borderWidth: 1,
-    borderColor: '#2D3139',
-    width: '100%',
-    maxWidth: 440,
-  },
-  addResourceSubtitle: {
-    color: '#9AA0A6',
-    fontSize: 12,
-    marginTop: 4,
-    marginBottom: 12,
-  },
-  shapeSelectorRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-    marginBottom: 14,
-  },
-  shapePill: {
-    backgroundColor: '#0F1318',
+  noMetricsBar: {
+    backgroundColor: '#11151C',
     borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#2D3139',
-    paddingHorizontal: 10,
     paddingVertical: 6,
-  },
-  shapePillActive: {
-    backgroundColor: '#1E3A5F',
-    borderColor: '#38BDF8',
-  },
-  shapePillText: {
-    color: '#9AA0A6',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  shapePillTextActive: {
-    color: '#38BDF8',
-    fontWeight: '700',
-  },
-  formRowTwoCols: {
-    flexDirection: 'row',
-    gap: 10,
-  },
-  stressModalCard: {
-    backgroundColor: '#1A1D24',
-    borderRadius: 16,
+    paddingHorizontal: 10,
     borderWidth: 1,
-    borderColor: '#2D3139',
-    padding: 20,
-    width: '100%',
-    maxWidth: 420,
+    borderColor: '#1F2632',
   },
-  stressModalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  stressModalTitle: {
-    color: '#E8EAED',
-    fontSize: 15,
-    fontWeight: '800',
-  },
-  modalCloseText: {
+  noMetricsText: {
     color: '#9AA0A6',
     fontSize: 11,
-    fontWeight: '700',
-  },
-  stressModalDesc: {
-    color: '#9AA0A6',
-    fontSize: 12,
-    lineHeight: 18,
-    marginBottom: 16,
-  },
-  stressActionList: {
-    gap: 10,
-  },
-  stressItem: {
-    backgroundColor: '#20242C',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#2D3139',
-    padding: 12,
-  },
-  stressItemCrash: {
-    borderColor: '#4D1F1F',
-    backgroundColor: '#2D151520',
-  },
-  stressItemRestore: {
-    borderColor: '#1E3A2F',
-    backgroundColor: '#0F291E20',
-  },
-  stressItemTitle: {
-    color: '#E8EAED',
-    fontSize: 13,
-    fontWeight: '700',
-    marginBottom: 4,
-  },
-  stressCrashText: {
-    color: '#F28B82',
-  },
-  stressRestoreText: {
-    color: '#81C995',
-  },
-  stressItemSub: {
-    color: '#9AA0A6',
-    fontSize: 11,
-    lineHeight: 16,
   },
 });

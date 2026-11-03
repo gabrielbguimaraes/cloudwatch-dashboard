@@ -1,173 +1,156 @@
 # CloudWatch Mobile Dashboard
 
-Painel corporativo mobile para monitoramento e governança de infraestrutura multi-cloud com prioridade nativa para **Oracle Cloud Infrastructure (OCI)**, complementado por suporte a **Amazon Web Services (AWS)** e **Google Cloud Platform (GCP)**.
+Aplicativo Android multiusuário (**1:N**) desenvolvido em **React Native + TypeScript** com **Backend-for-Frontend (BFF) em Node.js/Express + PostgreSQL**, voltado ao monitoramento real e seguro de infraestrutura em **Oracle Cloud Infrastructure (OCI)** utilizando o **SDK Oficial da Oracle (`oci-*`)**.
 
-O projeto implementa uma arquitetura híbrida segura, integrando recursos de hardware físico do smartphone (Leitor Biométrico, Câmera e GPS) e um motor dinâmico de telemetria em tempo real.
-
+Na **Sprint 2**, toda a camada de dados simulados foi **desativada e desconectada da interface**, substituindo mocks estáticos e geradores sintéticos por autenticação JWT real com rotação de refresh token, vínculo criptografado de contas OCI por usuário (via pareamento automatizado no OCI Cloud Shell ou configuração manual validada) e telemetria real extraída dos serviços **OCI Resource Search**, **Compute**, **Virtual Network**, **Monitoring (`oci_computeagent`)** e **Audit**.
 
 ---
 
-## 🏗️ Arquitetura do Sistema
+## 🏗️ Arquitetura Real (Sprint 2 — Multiusuário 1:N)
 
-A solução adota o padrão **Dual-Engine Multi-Cloud**, desacoplando a autenticação e segurança de hardware dos provedores de dados. Esse modelo garante a integridade dos testes de validação em bancas acadêmicas sem gerar custos financeiros ou dependência de conectividade externa constante.
+Cada usuário possui sua própria conta no aplicativo e conecta **zero, uma ou múltiplas contas OCI** de forma independente e isolada. Entrar no aplicativo não exige conectar nenhuma nuvem previamente; o usuário visualiza exclusivamente os provedores e recursos que ele mesmo vinculou.
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                       CAMADA 1: APRESENTAÇÃO (UI)                           │
-│  ┌───────────────────────┐  ┌──────────────────────┐  ┌───────────────────┐ │
-│  │     LoginScreen       │  │   DashboardScreen    │  │MetricsDetailScreen│ │
-│  │ (Form OCI + Cam Modal)│  │ (Semáforo + KPIs)    │  │(CPU/RAM + Histórico│ │
-│  └───────────┬───────────┘  └──────────┬───────────┘  └─────────┬─────────┘ │
-└──────────────┼─────────────────────────┼────────────────────────┼───────────┘
-               ▼                         ▼                        ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                 CAMADA 2: GESTÃO DE ESTADO & REGRAS DE NEGÓCIO              │
-│       ┌───────────────────────────────┐ ┌─────────────────────────┐         │
-│       │          AuthContext          │ │      CloudContext       │         │
-│       │ • Validação Sintática OCI     │ │ • Filtro de Provedor    │         │
-│       │ • Sessão e Pareamento         │ │ • Recursos Fixados (Pin)│         │
-│       └──────────────┬────────────────┘ └───────────┬─────────────┘         │
-└──────────────────────┼──────────────────────────────┼───────────────────────┘
-                       ▼                              ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│             CAMADA 3: NATIVE HARDWARE BRIDGE & ARMAZENAMENTO SEGURO         │
-│  ┌──────────────────────┐  ┌─────────────────────┐  ┌─────────────────────┐ │
-│  │ react-native-keychain│  │  EncryptedStorage   │  │   expo-location     │ │
-│  │ (Biometria / RSA)    │  │  (AES-256-GCM)      │  │ (GPS Fine Location) │ │
-│  │ Token de Sessão 38B  │  │  Credenciais OCI    │  │ sa-saopaulo-1 (Lat) │ │
-│  └──────────────────────┘  └─────────────────────┘  └─────────────────────┘ │
-└──────────────────────┬──────────────────────────────┬───────────────────────┘
-                       ▼                              ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    CAMADA 4: DUAL-ENGINE DE TELEMETRIA                      │
-│       ┌───────────────────────────────┐ ┌─────────────────────────┐         │
-│       │   simulationService (Faker)   │ │  OCI Telemetry REST API │         │
-│       │   (Motor da Sprint 1 / MVP 1) │ │   (Escopo Sprint 2/MVP 2│         │
-│       │ • Flutuação de CPU / Status   │ │ • HTTP Signature RFC    │         │
-│       │ • Provisionamento sob Demanda │ │ • Instâncias VM Compute │         │
-│       └───────────────────────────────┘ └─────────────────────────┘         │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────────┐
+│                     APP ANDROID (React Native 0.74 + TS)                      │
+│  ┌─────────────────────┐  ┌────────────────────────┐  ┌─────────────────────┐ │
+│  │ Auth & Onboarding   │  │    DashboardScreen     │  │ MetricsDetailScreen │ │
+│  │ • Login / Cadastro  │  │ • Somente VMs reais    │  │ • Séries 1h/24h/7d  │ │
+│  │ • Stepper OCI Shell │  │ • Badge LIVE / CACHE   │  │ • OCI Audit Events  │ │
+│  └──────────┬──────────┘  └───────────┬────────────┘  └──────────┬──────────┘ │
+│             ▼                         ▼                          ▼            │
+│  ┌────────────────────────────────────┐  ┌──────────────────────────────────┐ │
+│  │ apiClient + react-native-keychain  │  │ telemetryRepository (Offline 1st)│ │
+│  │ • Bearer JWT (15 min)              │  │ • source: 'LIVE_OCI' | 'CACHE'   │ │
+│  │ • Auto-refresh único em HTTP 401   │  │ • Cache isolado por userId       │ │
+│  │ • Zero chave .pem ou senha no app  │  │ • Banner "Dados em cache HH:mm"  │ │
+│  └──────────────────┬─────────────────┘  └─────────────────┬────────────────┘ │
+└─────────────────────┼──────────────────────────────────────┼──────────────────┘
+                      │          HTTPS / REST (TLS)          │
+                      ▼                                      ▼
+┌───────────────────────────────────────────────────────────────────────────────┐
+│                 CLOUDWATCH BFF (Node.js + Express + PostgreSQL)               │
+│  • Segurança HTTP: helmet, CORS restrito, zod, express-rate-limit             │
+│  • Sessão: JWT (15m, sub=userId) + Refresh Token rotativo (hash SHA-256, 7d)  │
+│  • Pareamento Cloud Shell: código aleatório (12 chars, TTL 10m, uso único)    │
+│  • Validação OCI obrigatória: formato OCID + MD5 SPKI DER + IdentityClient    │
+│  • Cofre em repouso: credenciais OCI cifradas com AES-256-GCM (IV por conta)  │
+└───────────────────────────────────────┬───────────────────────────────────────┘
+                                        │ SDK Oficial Oracle Cloud (oci-*)
+                                        ▼
+┌───────────────────────────────────────────────────────────────────────────────┐
+│                      ORACLE CLOUD INFRASTRUCTURE (OCI)                        │
+│  • IdentityClient       -> Validação real de User/Tenancy e Regiões           │
+│  • ResourceSearchClient -> Descoberta de instâncias em todos os compartimentos│
+│  • Compute & Vnic       -> Shape, OCPUs, RAM, lifecycleState e IPs reais      │
+│  • MonitoringClient     -> CpuUtilization & MemoryUtilization (MQL)           │
+│  • AuditClient          -> Eventos reais de auditoria com busca/severidade    │
+└───────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## 📋 Product Backlog & Tabela Atualizada de Sprints
+---
 
-| ID | Sprint | História de Usuário (Orientada a Valor) | Área de Atuação | Pontos | Status |
-| :---: | :---: | :--- | :--- | :---: | :---: |
-| **US09** | Sprint 2 | Sincronização de contas e credenciais em banco de dados em nuvem com criptografia de ponta a ponta | Governança & Persistência BFF | 8 pts | Em Execução |
-| **US10** | Sprint 2 | Listagem em tempo real das máquinas virtuais ativas diretamente da conta Oracle Cloud (OCI) | Integração Real OCI Compute | 8 pts | Em Execução |
-| **US11** | Sprint 2 | Extração real de séries temporais de processamento (CPU) e memória de servidores em produção | Telemetria Real OCI Monitoring | 13 pts | Em Execução |
-| **US12** | Sprint 2 | Gráficos de tendência suavizados por janela de tempo (1h, 24h, 7d) com Análise de Correlação sobreposta | Visualização Analítica | 8 pts | Em Execução |
-| **US13** | Sprint 2 | Central de Logs (Logs Insights) com busca instantânea e filtros rápidos por severidade (INFO, WARN, ERROR) | Observabilidade & Logs | 5 pts | Em Execução |
-| **US14** | Sprint 3 | Monitoramento unificado de instâncias da Amazon Web Services (AWS) e Google Cloud (GCP) | Ecossistema Multi-Cloud | 8 pts | Backlog |
-| **US15** | Sprint 3 | Mapa de Topologia Visual exibindo as conexões e dependências entre rede, servidores e bancos de dados | Arquitetura & Dependências | 8 pts | Backlog |
-| **US16** | Sprint 3 | Execução remota de comandos de ciclo de vida (iniciar, reiniciar e parar instâncias) | Controle Operacional | 8 pts | Backlog |
-| **US17** | Sprint 3 | Configuração de Regras de Alerta customizáveis por limite de uso com histórico retroativo de incidentes | Gestão de Incidentes | 5 pts | Backlog |
-| **US18** | Sprint 3 | Notificações em segundo plano e exportação consolidada de auditoria de SLA multi-cloud | Alertas & Relatórios | 5 pts | Backlog |
+## 🔒 Segurança, Privacidade e Mudanças Estruturais da Sprint 2
+
+1. **Fim do Armazenamento de Senhas e Chaves Privadas no Celular:**
+   - O aplicativo armazena exclusivamente `accessToken` e `refreshToken` no hardware seguro (`react-native-keychain` / Android Keystore), com suporte a desbloqueio biométrico para renovação real da sessão no BFF.
+   - Chaves privadas RSA (`.pem`) **nunca são salvas no celular**, **nunca são registradas em logs** e **nunca retornam em respostas HTTP**. No fluxo manual, o campo `.pem` é limpo do estado da interface imediatamente após o envio HTTPS ao BFF.
+2. **Pareamento por Comando no OCI Cloud Shell (Substituição do QR Code):**
+   - O antigo leitor de QR Code (`Plain Text`) da Sprint 1 foi removido dos fluxos de autenticação e substituído por pareamento criptográfico via **OCI Cloud Shell** (`curl -fsSL <PUBLIC_BASE_URL>/p/<codigo> | bash`).
+   - O script executado no Cloud Shell do próprio usuário gera um par RSA 2048 exclusivo para o app, cadastra a chave pública via OCI CLI, transmite os dados por HTTPS usando o código de uso único (expiração de 10 minutos) e **apaga os arquivos temporários locais via `trap` mesmo em caso de erro**.
+   - Contas federadas (Identity Domains) ou usuários sem acesso ao Cloud Shell contam com a opção **"Prefiro conectar manualmente"**, que interpreta diretamente o bloco `[DEFAULT]` do `~/.oci/config` + chave `.pem`.
+3. **Verificação Criptográfica e Remota Antes de Persistir (`validateOciCredentials`):**
+   - Nenhuma conta OCI é salva sem antes validar: formato dos OCIDs e região oficial, integridade da chave privada RSA e igualdade exata do fingerprint MD5 calculado sobre o SPKI DER, seguida de chamada assinada real a `IdentityClient.getUser` e `IdentityClient.getTenancy`. Credenciais inválidas ou inexistentes são recusadas sem gravar nada no banco.
+4. **Simulação Desativada (`Zero Fake Data`):**
+   - O arquivo `src/services/simulationService.ts`, o modal `SerialConsoleModal.tsx` e a dependência `@faker-js/faker` permanecem no repositório apenas isolados e **100% desligados** de qualquer tela, contexto ou repositório de dados.
+   - Toda resposta de telemetria possui estritamente `source: 'LIVE_OCI'` ou `source: 'CACHE'`. Quando o plugin `Compute Instance Monitoring` está desativado em uma VM ou não há dados no período, a interface exibe um estado vazio honesto com orientações de configuração, sem inventar curvas ou números.
+5. **Proteção Anti-SSRF na Sondagem de Rede:**
+   - O endpoint `GET /api/telemetry/network-probe` exige autenticação JWT e só permite testar conectividade TCP em endereços IP que comprovadamente pertençam às instâncias OCI reais da conta do usuário autenticado.
 
 ---
 
-## ⚡ Planejamento das Sprints & Entregas de MVP
+## 📋 Status Honesto do Product Backlog (US01 a US18)
 
-### 🟢 Sprint 1: Fundação, Hardware Nativo e OCI-First
+### Sprint 1 — Fundação Mobile & Hardware Nativo
 
-> **🏆 MVP 1:** Aplicativo funcional instalado no smartphone Android (`.apk`), capaz de autenticar o usuário por biometria nativa, importar credenciais corporativas via câmera através de QR Code, identificar a região local mais próxima por satélite e apresentar um painel dinâmico com semáforo de integridade, provisionamento customizável e exportação de relatório operacional em PDF.
+| ID | História de Usuário | Status Atual (Pós-Refatoração Sprint 2) |
+| :---: | :--- | :--- |
+| **US01** | Acesso seguro ao aplicativo com biometria nativa vinculada ao `react-native-keychain` | **Concluído** *(evoluído na Sprint 2 para JWT + Refresh Token rotativo, sem senha local)* |
+| **US02** | Importação rápida de credenciais corporativas OCI sem digitação manual de OCIDs | **Substituído na Sprint 2** *(QR Code removido; substituído por Pareamento via Comando no OCI Cloud Shell + parser `~/.oci/config`)* |
+| **US03** | Sugestão contextual de datacenter próximo via localização GPS nativa Android | **Concluído** |
+| **US04** | Validação rigorosa de estrutura e conformidade dos identificadores OCI | **Concluído** *(evoluído na Sprint 2 com validação criptográfica RSA/Fingerprint + `IdentityClient` ao vivo)* |
+| **US05** | Semáforo visual de integridade para classificação rápida da saúde das instâncias | **Concluído** *(alimentado exclusivamente por métricas reais da OCI na Sprint 2)* |
+| **US06** | Provisionamento interativo simulado de servidores no painel | **Desativado na Sprint 2** *(ocultado da interface; o app lista apenas VMs reais da tenancy conectada)* |
+| **US07** | Fixação (Pin) de servidores prioritários no topo do painel | **Concluído** *(isolado por usuário em `@cloudwatch:pinned_resources:<userId>`)* |
+| **US08** | Exportação e compartilhamento de relatório operacional em PDF nativo Android | **Concluído** *(gerado apenas com dados reais ou `N/D` quando não há métrica coletada)* |
 
-* **Esforço Total:** 44 Story Points
-* **Status:** Concluído
+### Sprint 2 — Autenticação Real, Multiusuário e Telemetria Oficial OCI
 
-#### Sprint Backlog 1
+| ID | História de Usuário | Status Atual |
+| :---: | :--- | :--- |
+| **US09** | Vínculo multiusuário (1:N) de contas OCI com pareamento via Cloud Shell, validação real e criptografia AES-256-GCM no PostgreSQL | **Concluído** |
+| **US10** | Descoberta e listagem real das VMs da conta OCI (shape, OCPUs, memória, estado e IPs público/privado) em todos os compartimentos | **Concluído** |
+| **US11** | Extração real de séries temporais de CPU e Memória via OCI Monitoring (`oci_computeagent` / MQL) | **Concluído** |
+| **US12** | Gráficos por janela (`1h`, `24h`, `7d`) com análise de correlação CPU × Memória e modo Offline-First (`LIVE` / `CACHE`) | **Concluído** |
+| **US13** | Central de eventos reais via OCI Audit API (`ListEvents`) com filtro por severidade e busca textual | **Concluído** |
 
-| ID | História de Usuário | Área de Atuação | Complexidade | Status |
-| :--- | :--- | :--- | :---: | :---: |
-| **US01** | Acesso seguro ao aplicativo por biometria nativa vinculada a cofre digital | Biometria / Segurança Física | 8 pts | Concluído |
-| **US02** | Importação instantânea de credenciais corporativas via leitura óptica de QR Code | Câmera do Smartphone | 8 pts | Concluído |
-| **US03** | Identificação contextual da região de datacenter mais próxima via localização do dispositivo | Sensor de Localização (GPS) | 5 pts | Concluído |
-| **US04** | Validação automática da estrutura e conformidade dos identificadores de nuvem | Validação de Regras OCI | 5 pts | Concluído |
-| **US05** | Semáforo visual de integridade para classificação rápida de incidentes e servidores saudáveis | Interface / Semáforo de Cores | 5 pts | Concluído |
-| **US06** | Provisionamento interativo de servidores com recálculo instantâneo de métricas operacionais | Gestão Dinâmica de Recursos | 5 pts | Concluído |
-| **US07** | Fixação de servidores prioritários no topo da tela para monitoramento contínuo | Painel Operacional | 3 pts | Concluído |
-| **US08** | Geração e compartilhamento de relatório executivo da infraestrutura em arquivo PDF | Exportação de Documentos | 5 pts | Concluído |
+### Sprint 3 — Multi-Cloud Expandido, Ações Remotas e Alertas *(Não implementado nesta Sprint)*
 
----
-
-### 🟡 Sprint 2: Telemetria Real OCI e Análise Gráfica
-
-> **🏆 MVP 2:** Painel conectado diretamente aos serviços oficiais de monitoramento da nuvem em produção, substituindo simulações locais pela extração real de métricas de processamento e armazenamento de servidores ativos, exibindo curvas de tendência em gráficos interativos por período selecionável.
-
-* **Esforço Total:** 42 Story Points
-* **Status:** Em Execução
-
-#### Sprint Backlog 2
-
-| ID | História de Usuário | Área de Atuação | Complexidade | Status |
-| :--- | :--- | :--- | :---: | :---: |
-| **US09** | Sincronização de contas e credenciais em banco de dados em nuvem com criptografia de ponta a ponta | Governança & Persistência BFF | 8 pts | Em Execução |
-| **US10** | Listagem em tempo real das máquinas virtuais ativas diretamente da conta Oracle Cloud (OCI) | Integração Real OCI Compute | 8 pts | Em Execução |
-| **US11** | Extração real de séries temporais de processamento (CPU) e memória de servidores em produção | Telemetria Real OCI Monitoring | 13 pts | Em Execução |
-| **US12** | Gráficos de tendência suavizados por janela de tempo (1h, 24h, 7d) com Análise de Correlação sobreposta | Visualização Analítica | 8 pts | Em Execução |
-| **US13** | Central de Logs (Logs Insights) com busca instantânea e filtros rápidos por severidade (INFO, WARN, ERROR) | Observabilidade & Logs | 5 pts | Em Execução |
+| ID | História de Usuário | Status Atual |
+| :---: | :--- | :--- |
+| **US14** | Integração real com contas Amazon Web Services (AWS) | **Backlog (Sprint 3)** — *exibido como "Em breve" na UI* |
+| **US15** | Integração real com contas Google Cloud Platform (GCP) | **Backlog (Sprint 3)** — *exibido como "Em breve" na UI* |
+| **US16** | Ações remotas reais de ciclo de vida (iniciar, parar e reiniciar VMs na OCI/AWS/GCP) | **Backlog (Sprint 3)** — *ocultado da UI na Sprint 2* |
+| **US17** | Regras de alerta configuráveis e notificações push em segundo plano | **Backlog (Sprint 3)** |
+| **US18** | Console serial real, autenticação em dois fatores (2FA TOTP) e relatórios consolidados de SLA multi-cloud | **Backlog (Sprint 3)** |
 
 ---
 
-### 🔵 Sprint 3: Gestão Multi-Cloud Completa, Ações Remotas e Alertas
+## 🚀 Como Configurar e Executar
 
-> **🏆 MVP 3:** Plataforma unificada de gestão em múltiplos provedores (Oracle OCI, AWS e Google Cloud), permitindo atuar diretamente sobre os servidores com comandos operacionais de parada e reinício na palma da mão, recebendo notificações em segundo plano para saturação de capacidade e gerando auditorias consolidadas de disponibilidade.
+### 1. Backend BFF (`cloudwatch-bff/`)
 
-* **Esforço Total:** 32 Story Points
-* **Status:** Pending
-
-#### Sprint Backlog 3
-
-| ID | História de Usuário | Área de Atuação | Complexidade | Status |
-| :--- | :--- | :--- | :---: | :---: |
-| **US14** | Monitoramento unificado de servidores da Amazon Web Services (AWS) no mesmo painel | Ecossistema Multi-Cloud | 8 pts | Backlog |
-| **US15** | Monitoramento unificado de serviços do Google Cloud Platform (GCP) no mesmo painel | Ecossistema Multi-Cloud | 8 pts | Backlog |
-| **US16** | Execução remota de ações de ciclo de vida (iniciar, pausar e reiniciar servidores) | Automação e Controle Remoto | 8 pts | Backlog |
-| **US17** | Avisos imediatos no dispositivo em caso de sobrecarga de capacidade ou indisponibilidade | Notificações de Incidente | 5 pts | Backlog |
-| **US18** | Exportação consolidada de relatórios de cumprimento de SLA entre diferentes provedores | Auditoria Corporativa | 3 pts | Backlog |
-
----
-
-## 📱 Recursos de Hardware Integrados
-
-1. **Leitor Biométrico (Biometria Nativa):**
-   * Protege as credenciais e chaves criptográficas no hardware seguro do smartphone (Android Keystore).
-   * Exige a confirmação física de identidade por toque para autorizar o acesso à sessão.
-2. **Câmera Física do Dispositivo (Scanner Óptico):**
-   * Abertura do sensor de imagem em tempo de execução para captura de QR Code em texto puro (`Plain Text`).
-   * Decodificação estruturada do payload de configuração da Oracle Cloud:
-     ```json
-     {
-       "provider": "OCI",
-       "tenancyId": "ocid1.tenancy.oc1..aaaa...",
-       "userId": "ocid1.user.oc1..aaaa...",
-       "fingerprint": "0e:ed:6e:d2:98:cf:84:1e:7d:b7:16:37:ef:8c:e1:59",
-       "region": "sa-saopaulo-1"
-     }
+1. Copie o arquivo de exemplo de variáveis de ambiente e preencha os segredos reais:
+   ```bash
+   cd cloudwatch-bff
+   cp .env.example .env
+   ```
+   - Gere `JWT_ACCESS_SECRET` e `CREDENTIALS_ENC_KEY` (exatamente 64 caracteres hexadecimais = 32 bytes para AES-256-GCM):
+     ```bash
+     node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
      ```
-3. **Sensor de GPS (Geolocalização e Proximidade de Datacenter):**
-   * Consulta coordenadas físicas de satélite do aparelho via `expo-location`.
-   * Identifica contextualmente se o operador está na América do Sul e sugere o datacenter local de menor latência geográfica (`sa-saopaulo-1`).
+   - Em produção, `PUBLIC_BASE_URL` **deve** utilizar `https://` (veja [`docs/DEPLOY_HTTPS.md`](docs/DEPLOY_HTTPS.md)). `http://` só é aceito quando `NODE_ENV=development`.
+
+2. Instale as dependências e inicie o servidor:
+   ```bash
+   npm install
+   npm start
+   ```
+
+3. Execute a suíte de validação de segurança, criptografia OCI e isolamento multiusuário:
+   ```bash
+   node test-oci.js
+   ```
+
+### 2. Aplicativo Android (Raiz do Projeto)
+
+1. Copie `.env.example` para `.env` (documentação de build) e instale as dependências:
+   ```bash
+   npm install
+   ```
+2. Valide a tipagem estática TypeScript:
+   ```bash
+   npx tsc --noEmit
+   ```
+3. Inicie o Metro Bundler e execute no dispositivo/emulador Android:
+   ```bash
+   npm start
+   npm run android
+   ```
 
 ---
 
-## 🚦 Semáforo de Integridade Operacional
+## 📚 Documentação Operacional Adicional
 
-O monitoramento classifica as instâncias em três estados com base nos limites de telemetria coletados:
-
-* 🟢 **Operacional (HEALTHY):** Consumo de processamento abaixo de 70%, sem erros ou alertas de instabilidade.
-* 🟡 **Atenção (WARNING):** Consumo de processamento entre 70% e 85%, ou oscilações temporárias de resposta.
-* 🔴 **Crítico (CRITICAL):** Consumo de processamento superior a 85%, esgotamento de memória ou servidores sem resposta.
-
----
-
-## 🛠️ Tecnologias e Bibliotecas
-
-* **Linguagem & Framework:** React Native (0.76+), TypeScript
-* **Navegação:** React Navigation (Native Stack & Bottom Tabs)
-* **Cofre & Criptografia:** `react-native-keychain`, `react-native-encrypted-storage`
-* **Integração de Hardware:** `react-native-camera-kit`, `expo-location`
-* **Geração de Documentos:** `expo-print` (Exportação PDF nativa)
-* **Motor de Telemetria Dinâmica:** `@faker-js/faker` (Simulação e recálculo em tempo real)
-* **Estilização:** Material Design Dark Theme
-
+- **[`docs/OCI_SETUP.md`](docs/OCI_SETUP.md):** Guia passo a passo no console da Oracle Cloud (Dynamic Group do dono da VM, policies IAM de leitura, ativação do plugin `Compute Instance Monitoring`, criação de usuário somente leitura, revogação da chave de API do app e troubleshooting de erros `401`/`403`, limite de 3 chaves e contas federadas).
+- **[`docs/DEPLOY_HTTPS.md`](docs/DEPLOY_HTTPS.md):** Configuração de domínio DNS, proxy reverso HTTPS com Let's Encrypt (Caddy ou Nginx + Certbot) na porta `443`, regras de firewall/VCN na OCI, variáveis de ambiente de produção do BFF e preparação para SSL Pinning.

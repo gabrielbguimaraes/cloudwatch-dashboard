@@ -5,7 +5,8 @@
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { API_BASE_URL, REQUEST_TIMEOUT_MS, SLA_CRITICAL_THRESHOLD } from '../config/env';
+import { SLA_CRITICAL_THRESHOLD } from '../config/env';
+import apiClient from './apiClient';
 import type { CloudResource, CloudProvider, HealthStatus } from '../types';
 import {
   generateSimulatedResources,
@@ -112,53 +113,25 @@ export interface CreateResourceParams {
   region?: string;
   ocpus?: number;
   memoryGb?: number;
-  userId?: string;
 }
-
-/**
- * Utilitario de requisicao HTTP com AbortController e timeout estrito (4.5s)
- */
-const fetchWithTimeout = async (url: string, options: RequestInit = {}): Promise<Response> => {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-  try {
-    const res = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        ...(options.headers || {}),
-      },
-    });
-    clearTimeout(timeoutId);
-    return res;
-  } catch (err) {
-    clearTimeout(timeoutId);
-    throw err;
-  }
-};
 
 /**
  * TelemetryRepository - Interface unica consumida pelas telas do app
  */
 export const telemetryRepository = {
   /**
-   * Obtem a lista de instancias ativas (Tenta BFF OCI -> Cache AsyncStorage -> Motor Local)
+   * Obtem a lista de instancias ativas via apiClient autenticado (sem userId em query)
    */
-  async getInstances(provider: CloudProvider = 'OCI', userId?: string): Promise<InstancesResult> {
+  async getInstances(provider: CloudProvider = 'OCI'): Promise<InstancesResult> {
     const cacheKey = `@cloudwatch_cache_instances_${provider}`;
 
     try {
-      const url = `${API_BASE_URL}/clouds/instances?provider=${encodeURIComponent(
-        provider
-      )}&userId=${encodeURIComponent(userId || '')}`;
+      const response = await apiClient.get<any>(
+        `/clouds/instances?provider=${encodeURIComponent(provider)}`
+      );
 
-      const response = await fetchWithTimeout(url, { method: 'GET' });
-
-      if (response.ok) {
-        const json = await response.json();
+      if (response.ok && response.data) {
+        const json = response.data;
         const rawInstances: any[] = json.instances || [];
 
         if (Array.isArray(rawInstances) && rawInstances.length > 0) {
@@ -208,7 +181,7 @@ export const telemetryRepository = {
             };
           });
 
-          await AsyncStorage.setItem(cacheKey, JSON.stringify(mapped)).catch(() => {});
+          await AsyncStorage.setItem(cacheKey, JSON.stringify(mapped)).catch(() => { });
 
           return {
             data: mapped,
@@ -250,14 +223,10 @@ export const telemetryRepository = {
    */
   async createInstance(params: CreateResourceParams): Promise<{ success: boolean; instance?: CloudResource; error?: string }> {
     try {
-      const url = `${API_BASE_URL}/clouds/instances`;
-      const response = await fetchWithTimeout(url, {
-        method: 'POST',
-        body: JSON.stringify(params),
-      });
+      const response = await apiClient.post<any>('/clouds/instances', params);
 
-      if (response.ok) {
-        const json = await response.json();
+      if (response.ok && response.data) {
+        const json = response.data;
         if (json.success && json.instance) {
           const raw = json.instance;
           const mappedSvc: CloudResource['service'] =
@@ -342,8 +311,7 @@ export const telemetryRepository = {
    */
   async deleteInstance(id: string): Promise<{ success: boolean; error?: string }> {
     try {
-      const url = `${API_BASE_URL}/clouds/instances/${encodeURIComponent(id)}`;
-      const response = await fetchWithTimeout(url, { method: 'DELETE' });
+      const response = await apiClient.delete(`/clouds/instances/${encodeURIComponent(id)}`);
       if (response.ok) {
         return { success: true };
       }
@@ -357,15 +325,15 @@ export const telemetryRepository = {
    * Sondagem Ativa de Rede e Portas estilo Zabbix via TCP Handshake
    */
   async probeNetwork(host?: string, instanceId?: string): Promise<NetworkProbeResult> {
-    const targetHost = host || '167.234.241.171';
+    const targetHost = host || '';
     try {
-      const url = `${API_BASE_URL}/telemetry/network-probe?host=${encodeURIComponent(
-        targetHost
-      )}&instanceId=${encodeURIComponent(instanceId || '')}`;
-
-      const response = await fetchWithTimeout(url, { method: 'GET' });
-      if (response.ok) {
-        const json = await response.json();
+      const response = await apiClient.get<any>(
+        `/telemetry/network-probe?host=${encodeURIComponent(
+          targetHost
+        )}&instanceId=${encodeURIComponent(instanceId || '')}`
+      );
+      if (response.ok && response.data) {
+        const json = response.data;
         if (json.success && Array.isArray(json.ports)) {
           return {
             success: true,
@@ -417,10 +385,9 @@ export const telemetryRepository = {
    */
   async getDockerContainers(): Promise<{ success: boolean; containers: DockerContainerInfo[]; source: TelemetrySource }> {
     try {
-      const url = `${API_BASE_URL}/telemetry/containers`;
-      const response = await fetchWithTimeout(url, { method: 'GET' });
-      if (response.ok) {
-        const json = await response.json();
+      const response = await apiClient.get<any>('/telemetry/containers');
+      if (response.ok && response.data) {
+        const json = response.data;
         if (json.success && Array.isArray(json.containers)) {
           return {
             success: true,
@@ -429,7 +396,7 @@ export const telemetryRepository = {
           };
         }
       }
-    } catch (err) {}
+    } catch (err) { }
 
     const fallbackContainers: DockerContainerInfo[] = [
       {
@@ -473,13 +440,14 @@ export const telemetryRepository = {
    */
   async mitigateRootCause(instanceId: string): Promise<{ success: boolean; message: string }> {
     try {
-      const url = `${API_BASE_URL}/telemetry/mitigate/${encodeURIComponent(instanceId)}`;
-      const response = await fetchWithTimeout(url, { method: 'POST' });
-      if (response.ok) {
-        const json = await response.json();
+      const response = await apiClient.post<any>(
+        `/telemetry/mitigate/${encodeURIComponent(instanceId)}`
+      );
+      if (response.ok && response.data) {
+        const json = response.data;
         return { success: true, message: json.message || 'Mitigacao aplicada com sucesso.' };
       }
-    } catch (err) {}
+    } catch (err) { }
     return { success: true, message: 'Mitigacao executada com sucesso. Carga e conexoes normalizadas.' };
   },
 
@@ -495,16 +463,16 @@ export const telemetryRepository = {
     const cacheKey = `@cloudwatch_cache_metrics_${instanceId}_${window}`;
 
     try {
-      const url = `${API_BASE_URL}/telemetry/metrics/${encodeURIComponent(
-        instanceId
-      )}?window=${encodeURIComponent(window)}`;
+      const response = await apiClient.get<any>(
+        `/telemetry/metrics/${encodeURIComponent(
+          instanceId
+        )}?window=${encodeURIComponent(window)}`
+      );
 
-      const response = await fetchWithTimeout(url, { method: 'GET' });
-
-      if (response.ok) {
-        const json = await response.json();
+      if (response.ok && response.data) {
+        const json = response.data;
         if (json.success && json.cpuSeries && json.memorySeries) {
-          await AsyncStorage.setItem(cacheKey, JSON.stringify(json)).catch(() => {});
+          await AsyncStorage.setItem(cacheKey, JSON.stringify(json)).catch(() => { });
           return {
             data: json,
             source: 'LIVE_CLOUD',
@@ -528,7 +496,7 @@ export const telemetryRepository = {
           };
         }
       }
-    } catch {}
+    } catch { }
 
     const rawCpuPoints = generateTimeSeriesMetrics(instanceId);
     const pointsCount = window === '1h' ? 12 : window === '24h' ? 24 : 28;
@@ -624,16 +592,16 @@ export const telemetryRepository = {
     const cacheKey = `@cloudwatch_cache_logs_${instanceId}`;
 
     try {
-      const url = `${API_BASE_URL}/telemetry/logs/${encodeURIComponent(
-        instanceId
-      )}?severity=${encodeURIComponent(severity)}&search=${encodeURIComponent(search)}`;
+      const response = await apiClient.get<any>(
+        `/telemetry/logs/${encodeURIComponent(
+          instanceId
+        )}?severity=${encodeURIComponent(severity)}&search=${encodeURIComponent(search)}`
+      );
 
-      const response = await fetchWithTimeout(url, { method: 'GET' });
-
-      if (response.ok) {
-        const json = await response.json();
+      if (response.ok && response.data) {
+        const json = response.data;
         if (json.success && Array.isArray(json.logs)) {
-          await AsyncStorage.setItem(cacheKey, JSON.stringify(json.logs)).catch(() => {});
+          await AsyncStorage.setItem(cacheKey, JSON.stringify(json.logs)).catch(() => { });
           return {
             data: json.logs,
             source: 'LIVE_CLOUD',

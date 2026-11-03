@@ -1,11 +1,14 @@
 /**
- * MetricsDetailScreen - Painel de Telemetria Analitica e Logs Insights
- * Progressive Disclosure Nivel 3: Graficos Vetoriais Suavizados (SVG),
- * Analise de Correlacao CPU x Memoria, Limiar Critico de SLA (85%)
- * e Central de Logs com Busca Instantanea e Filtros por Severidade.
+ * MetricsDetailScreen - Painel Analítico de Métricas Reais (OCI Monitoring) e Auditoria (OCI Audit)
+ * Fase 3 (Sprint 2):
+ *  - Séries temporais reais do namespace oci_computeagent (janelas 1h, 24h, 7d)
+ *  - Eventos reais do OCI Audit com filtro de severidade e busca textual
+ *  - Badge visível LIVE / CACHE, banner "Dados em cache de HH:mm" e toast de erro quando offline
+ *  - Estado vazio honesto com instruções do Oracle Cloud Agent quando o plugin de monitoramento está desligado
+ *  - Zero dados simulados, zero botão de mitigação falsa, zero terminal serial simulado.
  */
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -29,8 +32,10 @@ import Svg, {
   Text as SvgText,
 } from 'react-native-svg';
 import { useCloud } from '../context/CloudContext';
+import { useAuth } from '../context/AuthContext';
 import { CloudLogo } from '../components/common/CloudLogo';
-import { CLOUD_PALETTES, NEUTRAL_THEME } from '../theme/tokens';
+import { Toast } from '../components/common/Toast';
+import { CLOUD_PALETTES } from '../theme/tokens';
 import { SLA_CRITICAL_THRESHOLD } from '../config/env';
 import {
   telemetryRepository,
@@ -38,9 +43,9 @@ import {
   InstanceLogEntry,
   NetworkProbeResult,
   DockerContainerInfo,
+  TelemetrySource,
 } from '../services/telemetryRepository';
 import { Print, sharePdfAsync } from '../services/pdfService';
-import { SerialConsoleModal } from '../components/SerialConsoleModal';
 import type { CloudResource } from '../types';
 
 export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = ({
@@ -49,183 +54,259 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
 }) => {
   const { width: screenWidth } = useWindowDimensions();
   const {
-    resources,
+    filteredResources,
     selectedResource,
     setSelectedResource,
-    restartInstance,
-    deleteInstance,
-    editInstance,
+    refreshMetrics,
   } = useCloud();
 
-  // Estados de Janela Temporal e Correlacao (Sprint 2)
+  const {
+    masterUser,
+    activeOciAccountId,
+    hasConnectedClouds,
+    isOwnerUser,
+  } = useAuth();
+
+  // Janela temporal (1h, 24h, 7d) e correlação CPU x Memória
   const [timeWindow, setTimeWindow] = useState<'1h' | '24h' | '7d'>('24h');
   const [isCorrelationActive, setIsCorrelationActive] = useState<boolean>(true);
 
-  // Estados da Central de Logs (Sprint 2)
+  // Estado de métricas reais (OCI Monitoring)
+  const [metricsData, setMetricsData] = useState<StructuredMetricsData | null>(null);
+  const [metricsSource, setMetricsSource] = useState<TelemetrySource>('LIVE_OCI');
+  const [metricsCachedAtHHmm, setMetricsCachedAtHHmm] = useState<string | null>(null);
+  const [metricsHint, setMetricsHint] = useState<string | null>(null);
+  const [metricsError, setMetricsError] = useState<string | null>(null);
+  const [isMetricsLoading, setIsMetricsLoading] = useState<boolean>(false);
+
+  // Estado de eventos reais (OCI Audit)
   const [logFilter, setLogFilter] = useState<'ALL' | 'INFO' | 'WARN' | 'ERROR'>('ALL');
   const [logSearchQuery, setLogSearchQuery] = useState<string>('');
   const [logsData, setLogsData] = useState<InstanceLogEntry[]>([]);
+  const [logsSource, setLogsSource] = useState<TelemetrySource>('LIVE_OCI');
+  const [logsCachedAtHHmm, setLogsCachedAtHHmm] = useState<string | null>(null);
+  const [logsError, setLogsError] = useState<string | null>(null);
   const [isLogsLoading, setIsLogsLoading] = useState<boolean>(false);
 
-  // Estados de Metricas Estruturadas
-  const [metricsData, setMetricsData] = useState<StructuredMetricsData | null>(null);
-  const [isMetricsLoading, setIsMetricsLoading] = useState<boolean>(false);
-
-  // Modais de Acao
-  const [isSerialConsoleOpen, setIsSerialConsoleOpen] = useState(false);
-  const [isExportingPdf, setIsExportingPdf] = useState(false);
-
-  // Estados de Sondagem Zabbix TCP, Docker e Diagnostico de Causa Raiz
+  // Sondagem TCP sob demanda e containers Docker (somente dono da VM)
   const [networkProbeData, setNetworkProbeData] = useState<NetworkProbeResult | null>(null);
+  const [probeError, setProbeError] = useState<string | null>(null);
   const [isProbingNetwork, setIsProbingNetwork] = useState<boolean>(false);
   const [dockerContainers, setDockerContainers] = useState<DockerContainerInfo[]>([]);
-  const [isMitigating, setIsMitigating] = useState<boolean>(false);
-  const [mitigationDone, setMitigationDone] = useState<boolean>(false);
 
-  // Sincronizacao de recurso selecionado via rotas
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [reloadTick, setReloadTick] = useState(0);
+
+  // Sincroniza a instância selecionada via parâmetros de rota
   useEffect(() => {
     const targetId = route?.params?.selectedInstanceId || route?.params?.resourceId;
-    if (targetId && resources.length > 0) {
-      const found = resources.find((r) => r.id === targetId);
+    if (targetId && filteredResources.length > 0) {
+      const found = filteredResources.find((r) => r.id === targetId);
       if (found) {
         setSelectedResource(found);
       }
-    } else if (!selectedResource && resources.length > 0) {
-      setSelectedResource(resources[0]);
+    } else if (!selectedResource && filteredResources.length > 0) {
+      setSelectedResource(filteredResources[0]);
     }
-  }, [route?.params?.selectedInstanceId, route?.params?.resourceId, resources]);
+  }, [
+    route?.params?.selectedInstanceId,
+    route?.params?.resourceId,
+    filteredResources,
+    selectedResource,
+    setSelectedResource,
+  ]);
 
   const activeInstance: CloudResource | null = useMemo(() => {
-    if (!selectedResource) {
-      return resources.length > 0 ? resources[0] : null;
-    }
-    return resources.find((r) => r.id === selectedResource.id) || selectedResource;
-  }, [selectedResource, resources]);
+    if (filteredResources.length === 0) return null;
+    if (!selectedResource) return filteredResources[0];
+    return filteredResources.find((r) => r.id === selectedResource.id) || filteredResources[0];
+  }, [selectedResource, filteredResources]);
 
-  // Carrega Telemetria Estruturada ao mudar instancia ou janela temporal
+  const instanceOcid = activeInstance?.ocid || activeInstance?.id || '';
+
+  // Limpa resultados de sondagem ao trocar de instância
   useEffect(() => {
-    if (!activeInstance) return;
+    setNetworkProbeData(null);
+    setProbeError(null);
+  }, [instanceOcid]);
 
-    let isMounted = true;
-    const fetchTelemetry = async () => {
-      setIsMetricsLoading(true);
-      const res = await telemetryRepository.getMetrics(
-        activeInstance.id,
-        timeWindow,
-        activeInstance.metricsSummary?.cpuPercent ?? 24,
-        activeInstance.metricsSummary?.memoryPercent ?? 48
-      );
-      if (isMounted) {
-        setMetricsData(res.data);
-        setIsMetricsLoading(false);
-      }
-    };
+  // Busca séries reais do OCI Monitoring
+  const loadMetrics = useCallback(async () => {
+    if (!masterUser?.id || !instanceOcid) return;
 
-    fetchTelemetry();
-    return () => {
-      isMounted = false;
-    };
-  }, [activeInstance?.id, timeWindow]);
+    setIsMetricsLoading(true);
+    setMetricsError(null);
 
-  // Carrega Logs Operacionais ao mudar instancia, filtro ou busca
-  useEffect(() => {
-    if (!activeInstance) return;
+    const res = await telemetryRepository.getMetrics(
+      masterUser.id,
+      instanceOcid,
+      timeWindow,
+      activeOciAccountId
+    );
 
-    let isMounted = true;
-    const fetchLogs = async () => {
-      setIsLogsLoading(true);
-      const res = await telemetryRepository.getLogs(
-        activeInstance.id,
-        logFilter,
-        logSearchQuery
-      );
-      if (isMounted) {
-        setLogsData(res.data);
-        setIsLogsLoading(false);
-      }
-    };
-
-    fetchLogs();
-    return () => {
-      isMounted = false;
-    };
-  }, [activeInstance?.id, logFilter, logSearchQuery]);
-
-  const handleProbeNetwork = async (targetIp?: string) => {
-    const ip = targetIp || (activeInstance?.metadata as any)?.publicIp || '167.234.241.171';
-    setIsProbingNetwork(true);
-    try {
-      const probeRes = await telemetryRepository.probeNetwork(ip, activeInstance?.id);
-      setNetworkProbeData(probeRes);
-    } catch (e) {
-      console.warn('Erro ao sondar portas:', e);
-    } finally {
-      setIsProbingNetwork(false);
+    setMetricsData(res.data);
+    setMetricsSource(res.source);
+    setMetricsCachedAtHHmm(res.cachedAtHHmm || null);
+    setMetricsHint(res.hint || res.data?.hint || null);
+    setMetricsError(res.error || null);
+    if (res.error) {
+      setToastMessage(res.error);
     }
-  };
+    setIsMetricsLoading(false);
+  }, [masterUser?.id, instanceOcid, timeWindow, activeOciAccountId]);
 
-  const handleMitigateAnomaly = async () => {
-    if (!activeInstance) return;
-    setIsMitigating(true);
-    try {
-      await telemetryRepository.mitigateRootCause(activeInstance.id);
-      if (editInstance) {
-        editInstance(activeInstance.id, activeInstance.name, (activeInstance.metadata as any)?.shape || 'VM.Standard.A1.Flex');
-      }
-      setMitigationDone(true);
-      setLogsData((prev) => [
-        {
-          id: `mit-${Date.now()}`,
-          timestamp: new Date().toISOString(),
-          timeShort: 'Agora',
-          severity: 'INFO',
-          source: 'root-cause-mitigator',
-          message: 'Mitigação automática executada: pool de conexões reciclado e carga normalizada com sucesso.',
-        },
-        ...prev,
-      ]);
-      Alert.alert(
-        'Mitigação Concluída',
-        'Carga normalizada e conexões recicladas com sucesso. A saúde da instância retornou para o SLA de 99.98%.'
-      );
-    } catch (err: any) {
-      Alert.alert('Erro', 'Falha ao executar mitigação.');
-    } finally {
-      setIsMitigating(false);
-    }
-  };
-
-  // Carrega Sondagem Zabbix e Containers Docker
   useEffect(() => {
-    if (!activeInstance) return;
-    handleProbeNetwork((activeInstance.metadata as any)?.publicIp || '167.234.241.171');
+    loadMetrics();
+  }, [loadMetrics, reloadTick]);
+
+  // Busca eventos reais do OCI Audit
+  const loadLogs = useCallback(async () => {
+    if (!masterUser?.id || !instanceOcid) return;
+
+    setIsLogsLoading(true);
+    setLogsError(null);
+
+    const res = await telemetryRepository.getLogs(
+      masterUser.id,
+      instanceOcid,
+      logFilter,
+      logSearchQuery,
+      activeOciAccountId
+    );
+
+    setLogsData(res.data);
+    setLogsSource(res.source);
+    setLogsCachedAtHHmm(res.cachedAtHHmm || null);
+    setLogsError(res.error || null);
+    if (res.error && !metricsError) {
+      setToastMessage(res.error);
+    }
+    setIsLogsLoading(false);
+  }, [masterUser?.id, instanceOcid, logFilter, logSearchQuery, activeOciAccountId, metricsError]);
+
+  useEffect(() => {
+    loadLogs();
+  }, [loadLogs, reloadTick]);
+
+  // Consulta containers Docker reais APENAS se o usuário autenticado for o OWNER_USERNAME
+  useEffect(() => {
+    if (!isOwnerUser || !instanceOcid) {
+      setDockerContainers([]);
+      return;
+    }
+
+    let mounted = true;
     telemetryRepository.getDockerContainers().then((res) => {
-      setDockerContainers(res.containers);
+      if (mounted) {
+        setDockerContainers(res.success ? res.containers : []);
+      }
     });
-  }, [activeInstance?.id]);
 
-  if (!activeInstance) {
+    return () => {
+      mounted = false;
+    };
+  }, [isOwnerUser, instanceOcid]);
+
+  const navigateToOciOnboarding = () => {
+    if (navigation.getParent?.()) {
+      navigation.getParent().navigate('OciOnboarding');
+    } else {
+      navigation.navigate('OciOnboarding');
+    }
+  };
+
+  if (!hasConnectedClouds) {
     return (
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.emptyContainer}>
-          <Text style={styles.emptyText}>Nenhum servidor selecionado.</Text>
-          <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
-            <Text style={styles.backBtnText}>Voltar ao Console</Text>
+          <Text style={styles.emptyTitle}>Nenhuma nuvem conectada</Text>
+          <Text style={styles.emptyText}>
+            Conecte sua conta Oracle Cloud para visualizar gráficos reais de CPU, memória e eventos de auditoria das suas instâncias.
+          </Text>
+          <TouchableOpacity style={styles.primaryActionBtn} onPress={navigateToOciOnboarding}>
+            <Text style={styles.primaryActionBtnText}>Conectar Oracle Cloud</Text>
           </TouchableOpacity>
         </View>
       </SafeAreaView>
     );
   }
 
-  const activePalette = CLOUD_PALETTES[activeInstance.provider] || CLOUD_PALETTES.OCI;
+  if (!activeInstance) {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <View style={styles.emptyContainer}>
+          <Text style={styles.emptyTitle}>Nenhuma instância disponível</Text>
+          <Text style={styles.emptyText}>
+            Não há instâncias Compute carregadas nesta conta OCI no momento.
+          </Text>
+          <TouchableOpacity
+            style={styles.backBtn}
+            onPress={() => refreshMetrics(true)}
+          >
+            <Text style={styles.backBtnText}>Tentar novamente</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  const meta = (activeInstance.metadata || {}) as Record<string, any>;
+  const targetIp: string | null = meta.publicIp || meta.privateIp || null;
+  const ocpus: number | null = typeof meta.ocpuCount === 'number' ? meta.ocpuCount : null;
+  const ramGb: number | null = typeof meta.memoryInGBs === 'number' ? meta.memoryInGBs : null;
+
+  const handleProbeNetwork = async () => {
+    if (!targetIp) {
+      setProbeError('Esta instância não possui endereço IP para sondagem TCP.');
+      return;
+    }
+
+    setIsProbingNetwork(true);
+    setProbeError(null);
+    try {
+      const probeRes = await telemetryRepository.probeNetwork(targetIp, activeInstance.id);
+      if (probeRes.success && probeRes.ports.length > 0) {
+        setNetworkProbeData(probeRes);
+      } else {
+        setNetworkProbeData(null);
+        setProbeError(probeRes.error || 'Sondagem indisponível para este IP.');
+      }
+    } catch {
+      setNetworkProbeData(null);
+      setProbeError('Falha de comunicação ao sondar portas TCP.');
+    } finally {
+      setIsProbingNetwork(false);
+    }
+  };
+
   const cpuSeries = metricsData?.cpuSeries || [];
   const memorySeries = metricsData?.memorySeries || [];
+  const hasChartSeries = cpuSeries.length > 0 || memorySeries.length > 0;
 
-  // ==========================================================================
-  // GERADOR DE CURVAS SUAVIZADAS (CUBIC BEZIER SVG PATH)
-  // ==========================================================================
-  const chartWidth = Math.max(300, screenWidth - 36 - 28);
-  const chartHeight = 170;
+  const currentCpu =
+    typeof metricsData?.metrics.currentCpu === 'number'
+      ? metricsData.metrics.currentCpu
+      : typeof activeInstance.metricsSummary?.cpuPercent === 'number'
+        ? activeInstance.metricsSummary.cpuPercent
+        : null;
+
+  const avgCpu =
+    typeof metricsData?.metrics.avgCpu === 'number' ? metricsData.metrics.avgCpu : null;
+
+  const currentMem =
+    typeof metricsData?.metrics.currentMemory === 'number'
+      ? metricsData.metrics.currentMemory
+      : typeof activeInstance.metricsSummary?.memoryPercent === 'number'
+        ? activeInstance.metricsSummary.memoryPercent
+        : null;
+
+  const maxMem =
+    typeof metricsData?.metrics.maxMemory === 'number' ? metricsData.metrics.maxMemory : null;
+
+  // Curvas SVG suavizadas para dados reais
+  const chartWidth = Math.max(280, screenWidth - 36 - 28);
+  const chartHeight = 175;
   const padLeft = 20;
   const padRight = 20;
   const padTop = 15;
@@ -237,7 +318,10 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
     if (!series || series.length === 0) return { linePath: '', areaPath: '', points: [] };
 
     const pts = series.map((pt, i) => {
-      const x = padLeft + (i / Math.max(1, series.length - 1)) * usableWidth;
+      const x =
+        series.length === 1
+          ? padLeft + usableWidth / 2
+          : padLeft + (i / (series.length - 1)) * usableWidth;
       const clampedVal = Math.min(100, Math.max(0, pt.value));
       const y = padTop + usableHeight - (clampedVal / 100) * usableHeight;
       return { x, y, value: pt.value, timestamp: pt.timestamp };
@@ -246,7 +330,7 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
     if (pts.length === 1) {
       return {
         linePath: `M ${pts[0].x} ${pts[0].y}`,
-        areaPath: `M ${pts[0].x} ${chartHeight - padBottom} L ${pts[0].x} ${pts[0].y} L ${pts[0].x} ${chartHeight - padBottom} Z`,
+        areaPath: '',
         points: pts,
       };
     }
@@ -267,68 +351,107 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
 
   const cpuPaths = buildSmoothPath(cpuSeries);
   const memPaths = buildSmoothPath(memorySeries);
-
-  // Posicao vertical do limite critico de 85%
+  const axisPoints = cpuPaths.points.length > 0 ? cpuPaths.points : memPaths.points;
   const slaThresholdY = padTop + usableHeight - (SLA_CRITICAL_THRESHOLD / 100) * usableHeight;
 
   const handleExportPdf = async () => {
     if (isExportingPdf) return;
     setIsExportingPdf(true);
     try {
-      const html = Print.generateExecutiveReportHtml(activeInstance);
+      const auditorLabel = masterUser
+        ? `${masterUser.username} (${masterUser.email})`
+        : undefined;
+      const html = Print.generateExecutiveReportHtml(activeInstance, auditorLabel);
       const pdfResult = await Print.printToFileAsync({
         html,
         serverName: activeInstance.name,
         provider: activeInstance.provider,
         region: activeInstance.region,
         status: activeInstance.status,
-        cpu: `${activeInstance.metricsSummary?.cpuPercent ?? 0}%`,
-        memory: `${activeInstance.metricsSummary?.memoryPercent || 48}%`,
-        ocid: activeInstance.ocid || activeInstance.arn || activeInstance.id,
+        cpu: currentCpu !== null ? `${currentCpu.toFixed(1)}%` : 'N/D',
+        memory: currentMem !== null ? `${currentMem.toFixed(1)}%` : 'N/D',
+        ocid: activeInstance.ocid || activeInstance.id,
         sla: `${activeInstance.availabilitySla}%`,
-        auditor: 'Joao Gabriel Barros Guimaraes - FATEC 4DSM',
+        auditor: auditorLabel,
       });
 
-      await sharePdfAsync(pdfResult.uri, `Relatorio de Telemetria e SLA - ${activeInstance.name}`);
+      await sharePdfAsync(
+        pdfResult.uri,
+        `Relatório de Telemetria OCI - ${activeInstance.name}`
+      );
     } catch (error: any) {
-      Alert.alert('Erro ao Exportar PDF', error?.message || 'Falha ao gerar relatorio.');
+      Alert.alert('Erro ao Exportar PDF', error?.message || 'Falha ao gerar relatório.');
     } finally {
       setIsExportingPdf(false);
     }
   };
 
-  const getStatusColor = (status: string) => {
+  const getStatusColor = (status: string, lifecycleState?: string) => {
+    if (lifecycleState === 'STOPPED' || lifecycleState === 'STOPPING' || status === 'OFFLINE') {
+      return '#6B7280';
+    }
     switch (status) {
-      case 'RUNNING':
       case 'HEALTHY':
         return '#22C55E';
       case 'REBOOTING':
       case 'WARNING':
-      case 'DEGRADED':
         return '#F59E0B';
-      case 'STOPPED':
       case 'CRITICAL':
       default:
         return '#EF4444';
     }
   };
 
-  const currentStatusColor = getStatusColor(activeInstance.status);
+  const currentStatusColor = getStatusColor(
+    activeInstance.status,
+    activeInstance.lifecycleState
+  );
+  const isDisplayingCache = metricsSource === 'CACHE' || logsSource === 'CACHE';
+  const cacheTimeDisplay = metricsCachedAtHHmm || logsCachedAtHHmm || 'recente';
 
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={styles.container}>
-        {/* Barra Superior de Navegacao */}
+        {/* Barra Superior */}
         <View style={styles.navBar}>
           <TouchableOpacity
             style={styles.navBackBtn}
-            onPress={() => navigation.goBack()}
+            onPress={() => {
+              if (navigation.canGoBack?.()) {
+                navigation.goBack();
+              } else {
+                navigation.navigate('Dashboard');
+              }
+            }}
             activeOpacity={0.7}
           >
-            <Text style={styles.navBackText}>← Voltar</Text>
+            <Text style={styles.navBackText}>← Painel</Text>
           </TouchableOpacity>
 
           <View style={styles.navActionGroup}>
+            {/* Badge Visível LIVE ou CACHE */}
+            <View
+              style={[
+                styles.sourceBadge,
+                !isDisplayingCache ? styles.sourceBadgeLive : styles.sourceBadgeCache,
+              ]}
+            >
+              <View
+                style={[
+                  styles.sourceDot,
+                  { backgroundColor: !isDisplayingCache ? '#22C55E' : '#F59E0B' },
+                ]}
+              />
+              <Text
+                style={[
+                  styles.sourceBadgeText,
+                  { color: !isDisplayingCache ? '#4ADE80' : '#FDE68A' },
+                ]}
+              >
+                {!isDisplayingCache ? 'LIVE' : 'CACHE'}
+              </Text>
+            </View>
+
             <TouchableOpacity
               style={styles.pdfHeaderBtn}
               onPress={handleExportPdf}
@@ -336,24 +459,45 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
               activeOpacity={0.7}
             >
               <Text style={styles.pdfHeaderBtnText}>
-                {isExportingPdf ? 'Exportando...' : 'Exportar PDF'}
+                {isExportingPdf ? 'Gerando...' : 'Exportar PDF'}
               </Text>
             </TouchableOpacity>
           </View>
         </View>
 
-        {/* Nivel 3.1: Seletor de Instancia no Topo */}
+        {/* Banner Offline-First quando exibindo snapshot em cache */}
+        {isDisplayingCache && (
+          <View style={styles.cacheBanner}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.cacheBannerTitle}>
+                Dados em cache de {cacheTimeDisplay}
+              </Text>
+              <Text style={styles.cacheBannerSub}>
+                Servidor BFF indisponível. Exibindo último snapshot real salvo para esta instância.
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.cacheRetryBtn}
+              onPress={() => setReloadTick((n) => n + 1)}
+            >
+              <Text style={styles.cacheRetryBtnText}>Tentar novamente</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Seletor Horizontal de Instâncias Reais */}
         <View style={styles.pickerSection}>
-          <Text style={styles.sectionHeaderTitle}>SELETOR DE SERVIDORES</Text>
+          <Text style={styles.sectionHeaderTitle}>SELECIONE A INSTÂNCIA</Text>
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
             contentContainerStyle={styles.pickerScroll}
           >
-            {resources.map((inst) => {
+            {filteredResources.map((inst) => {
               const isSelected = activeInstance.id === inst.id;
               const pTheme = CLOUD_PALETTES[inst.provider] || CLOUD_PALETTES.OCI;
-              const dotCol = getStatusColor(inst.status);
+              const dotCol = getStatusColor(inst.status, inst.lifecycleState);
+              const instCpu = inst.metricsSummary?.cpuPercent;
 
               return (
                 <TouchableOpacity
@@ -381,7 +525,7 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
                     {inst.name}
                   </Text>
                   <Text style={[styles.instanceChipCpu, { color: dotCol }]}>
-                    {inst.metricsSummary?.cpuPercent ?? 0}%
+                    {typeof instCpu === 'number' ? `${instCpu.toFixed(0)}%` : inst.lifecycleState}
                   </Text>
                 </TouchableOpacity>
               );
@@ -389,33 +533,33 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
           </ScrollView>
         </View>
 
-        {/* Cabecalho da Maquina Ativa */}
+        {/* Identificação Real da Máquina */}
         <View style={styles.hostMetaCard}>
           <View style={styles.hostMetaHeader}>
             <View style={styles.hostMetaLeft}>
               <View style={[styles.statusPill, { borderColor: currentStatusColor }]}>
                 <View style={[styles.statusPillDot, { backgroundColor: currentStatusColor }]} />
                 <Text style={[styles.statusPillText, { color: currentStatusColor }]}>
-                  {activeInstance.status}
+                  {activeInstance.lifecycleState}
                 </Text>
               </View>
-              <Text style={styles.hostTitle}>{activeInstance.name}</Text>
-            </View>
-            <View style={styles.sourceBadge}>
-              <Text style={styles.sourceBadgeText}>
-                {metricsData ? 'TELEMETRIA ATIVA' : 'LOCAL'}
+              <Text style={styles.hostTitle} numberOfLines={1}>
+                {activeInstance.name}
               </Text>
             </View>
           </View>
 
           <Text style={styles.hostOcid} numberOfLines={1} ellipsizeMode="middle">
-            {activeInstance.ocid || activeInstance.arn || activeInstance.id}
+            {activeInstance.ocid || activeInstance.id}
+          </Text>
+          <Text style={styles.hostSpecsLine}>
+            {meta.shape || '—'} • {activeInstance.region || '—'} • IP:{' '}
+            {meta.publicIp || meta.privateIp || '—'}
           </Text>
         </View>
 
-        {/* Nivel 3.2: Card do Grafico Vetorial SVG com Analise de Correlacao */}
+        {/* Gráfico Real do OCI Monitoring (1h / 24h / 7d) */}
         <View style={styles.chartCard}>
-          {/* Barra de Controles: Janela Temporal + Toggle de Correlacao */}
           <View style={styles.chartControlRow}>
             <View style={styles.timeWindowPills}>
               {(['1h', '24h', '7d'] as const).map((win) => {
@@ -435,7 +579,6 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
               })}
             </View>
 
-            {/* Botao de Toggle: Correlacionar CPU x Memoria */}
             <TouchableOpacity
               style={[
                 styles.correlationToggleBtn,
@@ -456,17 +599,17 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
                   isCorrelationActive && styles.correlationToggleTextActive,
                 ]}
               >
-                Correlacionar CPU × Memória
+                CPU × Memória
               </Text>
             </TouchableOpacity>
           </View>
 
-          {/* Legenda das Curvas e Limites */}
+          {/* Legenda com valores reais ou N/D */}
           <View style={styles.legendRow}>
             <View style={styles.legendItem}>
               <View style={[styles.legendSquare, { backgroundColor: '#38BDF8' }]} />
               <Text style={styles.legendText}>
-                CPU: {metricsData?.metrics.currentCpu ?? activeInstance.metricsSummary?.cpuPercent ?? 0}%
+                CPU: {currentCpu !== null ? `${currentCpu.toFixed(1)}%` : 'N/D'}
               </Text>
             </View>
 
@@ -474,346 +617,312 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
               <View style={styles.legendItem}>
                 <View style={[styles.legendSquare, { backgroundColor: '#F472B6' }]} />
                 <Text style={styles.legendText}>
-                  Memória: {metricsData?.metrics.currentMemory ?? activeInstance.metricsSummary?.memoryPercent ?? 45}%
+                  Memória: {currentMem !== null ? `${currentMem.toFixed(1)}%` : 'N/D'}
                 </Text>
               </View>
             )}
 
             <View style={styles.legendItem}>
-              <View style={[styles.legendLineDashed]} />
+              <View style={styles.legendLineDashed} />
               <Text style={[styles.legendText, { color: '#EF4444' }]}>
-                Limite SLA (85%)
+                Limiar ({SLA_CRITICAL_THRESHOLD}%)
               </Text>
             </View>
           </View>
 
-          {/* Canvas SVG com Curvas Suavizadas */}
-          <View style={styles.svgCanvasWrapper}>
-            {isMetricsLoading && (
-              <View style={styles.chartLoadingOverlay}>
-                <ActivityIndicator size="small" color="#38BDF8" />
-              </View>
-            )}
-
-            <Svg width={chartWidth} height={chartHeight}>
-              <Defs>
-                {/* Gradiente sutil translucido da CPU */}
-                <LinearGradient id="cpuGradient" x1="0" y1="0" x2="0" y2="1">
-                  <Stop offset="0%" stopColor="#38BDF8" stopOpacity={0.35} />
-                  <Stop offset="80%" stopColor="#38BDF8" stopOpacity={0.06} />
-                  <Stop offset="100%" stopColor="#38BDF8" stopOpacity={0.0} />
-                </LinearGradient>
-
-                {/* Gradiente sutil translucido da Memoria */}
-                <LinearGradient id="memGradient" x1="0" y1="0" x2="0" y2="1">
-                  <Stop offset="0%" stopColor="#F472B6" stopOpacity={0.25} />
-                  <Stop offset="100%" stopColor="#F472B6" stopOpacity={0.0} />
-                </LinearGradient>
-              </Defs>
-
-              {/* Linha Tracejada Horizontal em 85% (Limite Critico SLA) */}
-              <Line
-                x1={padLeft}
-                y1={slaThresholdY}
-                x2={chartWidth - padRight}
-                y2={slaThresholdY}
-                stroke="#EF4444"
-                strokeWidth={1.5}
-                strokeDasharray="4 4"
-                strokeOpacity={0.85}
-              />
-              <SvgText
-                x={chartWidth - padRight - 4}
-                y={slaThresholdY - 4}
-                fill="#EF4444"
-                fontSize={9}
-                fontWeight="bold"
-                textAnchor="end"
+          {/* Área do Gráfico ou Estado Vazio Honesto */}
+          {isMetricsLoading && !hasChartSeries ? (
+            <View style={styles.chartEmptyBox}>
+              <ActivityIndicator size="small" color="#38BDF8" />
+              <Text style={styles.chartEmptyText}>
+                Consultando séries temporais no OCI Monitoring ({timeWindow})...
+              </Text>
+            </View>
+          ) : !metricsData && metricsError ? (
+            <View style={styles.chartEmptyBox}>
+              <Text style={styles.chartEmptyTitle}>Falha ao obter métricas</Text>
+              <Text style={styles.chartEmptyText}>{metricsError}</Text>
+              <TouchableOpacity
+                style={styles.retrySmallBtn}
+                onPress={() => setReloadTick((n) => n + 1)}
               >
-                Limite SLA 85%
-              </SvgText>
+                <Text style={styles.retrySmallBtnText}>Tentar novamente</Text>
+              </TouchableOpacity>
+            </View>
+          ) : !hasChartSeries ? (
+            <View style={styles.chartEmptyBox}>
+              <Text style={styles.chartEmptyTitle}>
+                Sem pontos de telemetria nesta janela ({timeWindow})
+              </Text>
+              <Text style={styles.chartEmptyText}>
+                {metricsHint ||
+                  'Nenhum datapoint retornado pelo namespace oci_computeagent. Verifique se a VM está em execução (RUNNING) e se o plugin "Compute Instance Monitoring" do Oracle Cloud Agent está habilitado.'}
+              </Text>
+            </View>
+          ) : (
+            <View style={styles.svgCanvasWrapper}>
+              {isMetricsLoading && (
+                <View style={styles.chartLoadingOverlay}>
+                  <ActivityIndicator size="small" color="#38BDF8" />
+                </View>
+              )}
 
-              {/* Area e Curva de Memoria (quando Correlacao ativada) */}
-              {isCorrelationActive && memPaths.areaPath ? (
-                <>
-                  <Path d={memPaths.areaPath} fill="url(#memGradient)" />
-                  <Path
-                    d={memPaths.linePath}
-                    fill="none"
-                    stroke="#F472B6"
-                    strokeWidth={2}
-                    strokeLinecap="round"
-                  />
-                </>
-              ) : null}
+              <Svg width={chartWidth} height={chartHeight}>
+                <Defs>
+                  <LinearGradient id="cpuGradient" x1="0" y1="0" x2="0" y2="1">
+                    <Stop offset="0%" stopColor="#38BDF8" stopOpacity={0.35} />
+                    <Stop offset="80%" stopColor="#38BDF8" stopOpacity={0.06} />
+                    <Stop offset="100%" stopColor="#38BDF8" stopOpacity={0.0} />
+                  </LinearGradient>
 
-              {/* Area e Curva Principal de CPU */}
-              {cpuPaths.areaPath ? (
-                <>
-                  <Path d={cpuPaths.areaPath} fill="url(#cpuGradient)" />
-                  <Path
-                    d={cpuPaths.linePath}
-                    fill="none"
-                    stroke="#38BDF8"
-                    strokeWidth={2.4}
-                    strokeLinecap="round"
-                  />
-                  {/* Ponto atual ativo no final da curva */}
-                  {cpuPaths.points.length > 0 && (
-                    <Circle
-                      cx={cpuPaths.points[cpuPaths.points.length - 1].x}
-                      cy={cpuPaths.points[cpuPaths.points.length - 1].y}
-                      r={4.5}
-                      fill="#38BDF8"
-                      stroke="#0F1318"
+                  <LinearGradient id="memGradient" x1="0" y1="0" x2="0" y2="1">
+                    <Stop offset="0%" stopColor="#F472B6" stopOpacity={0.25} />
+                    <Stop offset="100%" stopColor="#F472B6" stopOpacity={0.0} />
+                  </LinearGradient>
+                </Defs>
+
+                <Line
+                  x1={padLeft}
+                  y1={slaThresholdY}
+                  x2={chartWidth - padRight}
+                  y2={slaThresholdY}
+                  stroke="#EF4444"
+                  strokeWidth={1.5}
+                  strokeDasharray="4 4"
+                  strokeOpacity={0.85}
+                />
+                <SvgText
+                  x={chartWidth - padRight - 4}
+                  y={slaThresholdY - 4}
+                  fill="#EF4444"
+                  fontSize={9}
+                  fontWeight="bold"
+                  textAnchor="end"
+                >
+                  {`Alerta ${SLA_CRITICAL_THRESHOLD}%`}
+                </SvgText>
+
+                {isCorrelationActive && memPaths.linePath ? (
+                  <>
+                    {memPaths.areaPath ? (
+                      <Path d={memPaths.areaPath} fill="url(#memGradient)" />
+                    ) : null}
+                    <Path
+                      d={memPaths.linePath}
+                      fill="none"
+                      stroke="#F472B6"
                       strokeWidth={2}
+                      strokeLinecap="round"
                     />
-                  )}
-                </>
-              ) : null}
+                  </>
+                ) : null}
 
-              {/* Rotulos Temporais no Rodape do Eixo X */}
-              {cpuPaths.points.map((pt, idx) => {
-                const total = cpuPaths.points.length;
-                const shouldShow =
-                  idx === 0 ||
-                  idx === Math.floor(total / 2) ||
-                  idx === total - 1;
+                {cpuPaths.linePath ? (
+                  <>
+                    {cpuPaths.areaPath ? (
+                      <Path d={cpuPaths.areaPath} fill="url(#cpuGradient)" />
+                    ) : null}
+                    <Path
+                      d={cpuPaths.linePath}
+                      fill="none"
+                      stroke="#38BDF8"
+                      strokeWidth={2.4}
+                      strokeLinecap="round"
+                    />
+                    {cpuPaths.points.length > 0 && (
+                      <Circle
+                        cx={cpuPaths.points[cpuPaths.points.length - 1].x}
+                        cy={cpuPaths.points[cpuPaths.points.length - 1].y}
+                        r={4.5}
+                        fill="#38BDF8"
+                        stroke="#0F1318"
+                        strokeWidth={2}
+                      />
+                    )}
+                  </>
+                ) : null}
 
-                if (!shouldShow) return null;
-                return (
-                  <SvgText
-                    key={idx}
-                    x={pt.x}
-                    y={chartHeight - 4}
-                    fill="#9AA0A6"
-                    fontSize={9}
-                    textAnchor={idx === 0 ? 'start' : idx === total - 1 ? 'end' : 'middle'}
-                  >
-                    {pt.timestamp}
-                  </SvgText>
-                );
-              })}
-            </Svg>
-          </View>
+                {axisPoints.map((pt, idx) => {
+                  const total = axisPoints.length;
+                  const shouldShow =
+                    idx === 0 || idx === Math.floor(total / 2) || idx === total - 1;
+                  if (!shouldShow) return null;
+                  return (
+                    <SvgText
+                      key={idx}
+                      x={pt.x}
+                      y={chartHeight - 4}
+                      fill="#9AA0A6"
+                      fontSize={9}
+                      textAnchor={idx === 0 ? 'start' : idx === total - 1 ? 'end' : 'middle'}
+                    >
+                      {pt.timestamp}
+                    </SvgText>
+                  );
+                })}
+              </Svg>
+            </View>
+          )}
         </View>
 
-        {/* 4 Indicadores Chave de Desempenho */}
+        {/* 4 Indicadores Reais da Instância */}
         <View style={styles.metricsGrid}>
           <View style={styles.metricBox}>
-            <Text style={styles.metricBoxLabel}>CONSUMO CPU</Text>
+            <Text style={styles.metricBoxLabel}>CPU ATUAL</Text>
             <Text style={[styles.metricBoxVal, { color: currentStatusColor }]}>
-              {metricsData?.metrics.currentCpu ?? activeInstance.metricsSummary?.cpuPercent ?? 0}%
+              {currentCpu !== null ? `${currentCpu.toFixed(1)}%` : 'N/D'}
             </Text>
             <Text style={styles.metricBoxSub}>
-              Média: {metricsData?.metrics.avgCpu ?? 22}%
+              {avgCpu !== null ? `Média: ${avgCpu.toFixed(1)}%` : 'Sem série ativa'}
             </Text>
           </View>
 
           <View style={styles.metricBox}>
             <Text style={styles.metricBoxLabel}>MEMÓRIA RAM</Text>
             <Text style={[styles.metricBoxVal, { color: '#F472B6' }]}>
-              {metricsData?.metrics.currentMemory ?? activeInstance.metricsSummary?.memoryPercent ?? 45}%
+              {currentMem !== null ? `${currentMem.toFixed(1)}%` : 'N/D'}
             </Text>
             <Text style={styles.metricBoxSub}>
-              Pico: {metricsData?.metrics.maxMemory ?? 52}%
+              {maxMem !== null ? `Máx: ${maxMem.toFixed(1)}%` : 'Sem série ativa'}
             </Text>
           </View>
 
           <View style={styles.metricBox}>
-            <Text style={styles.metricBoxLabel}>LATÊNCIA I/O</Text>
+            <Text style={styles.metricBoxLabel}>CAPACIDADE</Text>
             <Text style={styles.metricBoxVal}>
-              {metricsData?.metrics.currentLatency ?? 3.4} ms
+              {ocpus !== null ? `${ocpus} OCPU` : '—'}
             </Text>
-            <Text style={styles.metricBoxSub}>Sub-milissegundo</Text>
+            <Text style={styles.metricBoxSub}>
+              {ramGb !== null ? `${ramGb} GB RAM` : meta.shape || '—'}
+            </Text>
           </View>
 
           <View style={styles.metricBox}>
-            <Text style={styles.metricBoxLabel}>DISPONIBILIDADE</Text>
+            <Text style={styles.metricBoxLabel}>ESTADO OCI</Text>
             <Text
               style={[
                 styles.metricBoxVal,
-                activeInstance.availabilitySla < 99.5
-                  ? { color: '#F59E0B' }
-                  : { color: '#22C55E' },
+                { fontSize: 11, color: currentStatusColor },
               ]}
+              numberOfLines={1}
             >
-              {activeInstance.availabilitySla}%
+              {activeInstance.lifecycleState}
             </Text>
-            <Text style={styles.metricBoxSub}>SLA Mensal</Text>
+            <Text style={styles.metricBoxSub} numberOfLines={1}>
+              {activeInstance.region || 'OCI'}
+            </Text>
           </View>
         </View>
 
-        {/* Botao de Abertura do Terminal Linux */}
-        <TouchableOpacity
-          style={styles.terminalButton}
-          onPress={() => setIsSerialConsoleOpen(true)}
-          activeOpacity={0.8}
-        >
-          <Text style={styles.terminalButtonIcon}>{'>_'}</Text>
-          <Text style={styles.terminalButtonText}>Abrir Console Terminal Linux (SSH)</Text>
-        </TouchableOpacity>
-
-        {/* Monitoramento de Rede & Portas Estilo Zabbix por IP Real */}
+        {/* Sondagem de Portas TCP por IP Real (Sem Portas Pré-fabricadas) */}
         <View style={styles.proberCard}>
           <View style={styles.proberHeaderRow}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.proberTitle}>MONITORAMENTO DE REDE & PORTAS (ZABBIX TCP)</Text>
+            <View style={{ flex: 1, marginRight: 8 }}>
+              <Text style={styles.proberTitle}>SONDAGEM DE PORTAS TCP (POR IP REAL)</Text>
               <Text style={styles.proberSubtitle}>
-                Host Alvo: {networkProbeData?.host || (activeInstance.metadata as any)?.publicIp || '167.234.241.171'}
+                Host Alvo: {networkProbeData?.host || targetIp || 'Sem IP acessível'}
               </Text>
             </View>
             <TouchableOpacity
-              style={[styles.probeNowBtn, isProbingNetwork && { opacity: 0.7 }]}
-              onPress={() => handleProbeNetwork()}
-              disabled={isProbingNetwork}
+              style={[
+                styles.probeNowBtn,
+                (isProbingNetwork || !targetIp) && { opacity: 0.5 },
+              ]}
+              onPress={handleProbeNetwork}
+              disabled={isProbingNetwork || !targetIp}
               activeOpacity={0.8}
             >
               {isProbingNetwork ? (
                 <ActivityIndicator size="small" color="#38BDF8" />
               ) : (
-                <Text style={styles.probeNowBtnText}>Sondar Portas Agora</Text>
+                <Text style={styles.probeNowBtnText}>Sondar Portas</Text>
               )}
             </TouchableOpacity>
           </View>
 
-          {/* Grade de Portas Sondadas */}
-          <View style={styles.proberGrid}>
-            {(networkProbeData?.ports || [
-              { port: 22, service: 'OpenSSH Server', status: 'OPEN', latencyMs: 3.8 },
-              { port: 80, service: 'HTTP Web Server', status: 'CLOSED', latencyMs: 15.0 },
-              { port: 443, service: 'HTTPS / TLS Gateway', status: 'CLOSED', latencyMs: 14.5 },
-              { port: 3000, service: 'CloudWatch BFF API', status: 'OPEN', latencyMs: 1.4 },
-              { port: 5432, service: 'PostgreSQL Database Engine', status: 'OPEN', latencyMs: 2.2 },
-            ]).map((p) => {
-              const isOpen = p.status === 'OPEN';
-              return (
-                <View key={p.port} style={styles.probePortItem}>
-                  <View style={styles.probePortLeft}>
-                    <View
-                      style={[
-                        styles.probePortDot,
-                        { backgroundColor: isOpen ? '#22C55E' : '#6B7280' },
-                      ]}
-                    />
-                    <View>
-                      <Text style={styles.probePortNumber}>Porta {p.port}</Text>
-                      <Text style={styles.probePortService} numberOfLines={1}>{p.service}</Text>
-                    </View>
-                  </View>
-                  <View style={styles.probePortRight}>
-                    <View
-                      style={[
-                        styles.probePortBadge,
-                        { backgroundColor: isOpen ? '#0F382A' : '#1F2937' },
-                      ]}
-                    >
-                      <Text
+          {probeError ? (
+            <Text style={styles.probeErrorText}>{probeError}</Text>
+          ) : networkProbeData && networkProbeData.ports.length > 0 ? (
+            <View style={styles.proberGrid}>
+              {networkProbeData.ports.map((p) => {
+                const isOpen = p.status === 'OPEN';
+                return (
+                  <View key={p.port} style={styles.probePortItem}>
+                    <View style={styles.probePortLeft}>
+                      <View
                         style={[
-                          styles.probePortBadgeText,
-                          { color: isOpen ? '#4ADE80' : '#9CA3AF' },
+                          styles.probePortDot,
+                          { backgroundColor: isOpen ? '#22C55E' : '#6B7280' },
+                        ]}
+                      />
+                      <View>
+                        <Text style={styles.probePortNumber}>Porta {p.port}</Text>
+                        <Text style={styles.probePortService} numberOfLines={1}>
+                          {p.service}
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={styles.probePortRight}>
+                      <View
+                        style={[
+                          styles.probePortBadge,
+                          { backgroundColor: isOpen ? '#0F382A' : '#1F2937' },
                         ]}
                       >
-                        {isOpen ? `OPEN ${p.latencyMs}ms` : 'CLOSED'}
-                      </Text>
+                        <Text
+                          style={[
+                            styles.probePortBadgeText,
+                            { color: isOpen ? '#4ADE80' : '#9CA3AF' },
+                          ]}
+                        >
+                          {isOpen ? `ABERTA • ${p.latencyMs}ms` : 'FECHADA'}
+                        </Text>
+                      </View>
                     </View>
                   </View>
-                </View>
-              );
-            })}
-          </View>
-        </View>
-
-        {/* Containers Ativos no Host (Docker) */}
-        <View style={styles.dockerCard}>
-          <Text style={styles.proberTitle}>CONTAINERS ATIVOS NO HOST (DOCKER)</Text>
-          <Text style={styles.proberSubtitle}>
-            Processos conteinerizados em execução no nó OCI:
-          </Text>
-          <View style={styles.dockerList}>
-            {dockerContainers.map((cnt) => (
-              <View key={cnt.id} style={styles.dockerItem}>
-                <View style={styles.dockerItemLeft}>
-                  <Text style={styles.dockerName}>{cnt.name}</Text>
-                  <Text style={styles.dockerImage}>{cnt.image}</Text>
-                  <Text style={styles.dockerPorts}>Portas: {cnt.ports || 'N/A'}</Text>
-                </View>
-                <View style={styles.dockerBadge}>
-                  <Text style={styles.dockerBadgeText}>
-                    {cnt.status.split(' ')[0]} {cnt.health === 'HEALTHY' ? '● Saudável' : ''}
-                  </Text>
-                </View>
-              </View>
-            ))}
-          </View>
-        </View>
-
-        {/* Card de Diagnóstico Automático de Causa Raiz (Root-Cause Analyzer) */}
-        {(() => {
-          const currentCpu = metricsData?.metrics.currentCpu ?? activeInstance.metricsSummary?.cpuPercent ?? 0;
-          const hasErrorLog = logsData.some((l) => l.severity === 'ERROR');
-          const isAnomaly = !mitigationDone && (currentCpu >= 85 || hasErrorLog || activeInstance.status === 'CRITICAL');
-
-          if (isAnomaly) {
-            return (
-              <View style={styles.rootCauseCardAlert}>
-                <View style={styles.rootCauseHeader}>
-                  <View style={styles.rootCauseBadgeAlert}>
-                    <Text style={styles.rootCauseBadgeTextAlert}>ANOMALIA DE ALTA SEVERIDADE</Text>
-                  </View>
-                  <Text style={styles.rootCauseTitleAlert}>Diagnóstico de Causa Raiz (Root-Cause)</Text>
-                </View>
-                <Text style={styles.rootCauseProbable}>
-                  Causa Provável: Saturação de CPU ({currentCpu}%) correlacionada com pico de conexões no PostgreSQL (:5432)
-                </Text>
-                <Text style={styles.rootCauseDetail}>
-                  A correlação multivariada detectou elevação anômala nos logs de erro do pool do PostgreSQL e contenção de locks de I/O na porta 5432.
-                </Text>
-                <Text style={styles.rootCauseImpact}>
-                  Impacto no SLA: Risco imediato de degradação do SLA contratual de 99.98%.
-                </Text>
-                <TouchableOpacity
-                  style={[styles.mitigateBtn, isMitigating && { opacity: 0.7 }]}
-                  onPress={handleMitigateAnomaly}
-                  disabled={isMitigating}
-                  activeOpacity={0.8}
-                >
-                  {isMitigating ? (
-                    <ActivityIndicator size="small" color="#0F1318" />
-                  ) : (
-                    <Text style={styles.mitigateBtnText}>Executar Mitigação Automática</Text>
-                  )}
-                </TouchableOpacity>
-              </View>
-            );
-          }
-
-          return (
-            <View style={styles.rootCauseCardHealthy}>
-              <View style={styles.rootCauseHeader}>
-                <View style={styles.rootCauseBadgeHealthy}>
-                  <Text style={styles.rootCauseBadgeTextHealthy}>SISTEMA NOMINAL</Text>
-                </View>
-                <Text style={styles.rootCauseTitleHealthy}>Diagnóstico de Causa Raiz: Saudável</Text>
-              </View>
-              <Text style={styles.rootCauseDetailHealthy}>
-                Nenhuma anomalia de correlação detectada. CPU, memória, portas TCP e containers Docker operando dentro dos limiares de segurança (SLA 99.98%).
-              </Text>
+                );
+              })}
             </View>
-          );
-        })()}
+          ) : (
+            <Text style={styles.probeEmptyText}>
+              {targetIp
+                ? 'Toque em "Sondar Portas" para medir a resposta TCP real das portas desta instância.'
+                : 'Esta instância não possui IP público ou privado acessível pelo BFF.'}
+            </Text>
+          )}
+        </View>
 
-        {/* Nivel 3.3: Central de Logs (Logs Insights — Requisito Sprint 2) */}
+        {/* Containers Docker Reais no Host do BFF (somente OWNER_USERNAME e somente se houver containers) */}
+        {isOwnerUser && dockerContainers.length > 0 && (
+          <View style={styles.dockerCard}>
+            <Text style={styles.proberTitle}>CONTAINERS DOCKER ATIVOS (HOST DA VM)</Text>
+            <View style={styles.dockerList}>
+              {dockerContainers.map((cnt) => (
+                <View key={cnt.id} style={styles.dockerItem}>
+                  <View style={styles.dockerItemLeft}>
+                    <Text style={styles.dockerName}>{cnt.name}</Text>
+                    <Text style={styles.dockerImage}>{cnt.image}</Text>
+                    <Text style={styles.dockerPorts}>Portas: {cnt.ports || 'N/D'}</Text>
+                  </View>
+                  <View style={styles.dockerBadge}>
+                    <Text style={styles.dockerBadgeText}>{cnt.status}</Text>
+                  </View>
+                </View>
+              ))}
+            </View>
+          </View>
+        )}
+
+        {/* Eventos Reais de Auditoria (OCI Audit) */}
         <View style={styles.logsSection}>
           <View style={styles.logsHeaderRow}>
-            <View>
-              <Text style={styles.logsTitle}>LOGS INSIGHTS (CENTRALIZADO)</Text>
+            <View style={{ flex: 1, marginRight: 8 }}>
+              <Text style={styles.logsTitle}>AUDITORIA & EVENTOS OCI (AUDIT API)</Text>
               <Text style={styles.logsSub}>
-                {logsData.length} eventos operacionais registrados
+                {logsData.length} eventos reais registrados na conta
               </Text>
             </View>
 
-            {/* Pilulas de Filtro Rapido de Severidade */}
             <View style={styles.severityPills}>
               {(['ALL', 'INFO', 'WARN', 'ERROR'] as const).map((sev) => {
                 const isSevActive = logFilter === sev;
@@ -827,15 +936,9 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
                       isSevActive && sev === 'WARN' && styles.sevPillActiveWarn,
                     ]}
                     onPress={() => setLogFilter(sev)}
-                    activeOpacity={0.7}
                   >
-                    <Text
-                      style={[
-                        styles.sevPillText,
-                        isSevActive && styles.sevPillTextActive,
-                      ]}
-                    >
-                      {sev === 'ALL' ? 'Todos' : sev}
+                    <Text style={[styles.sevPillText, isSevActive && styles.sevPillTextActive]}>
+                      {sev === 'ALL' ? 'TODOS' : sev}
                     </Text>
                   </TouchableOpacity>
                 );
@@ -843,14 +946,12 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
             </View>
           </View>
 
-          {/* Campo de Busca Rapida por Texto */}
           <View style={styles.searchBar}>
-            <Text style={styles.searchIcon}>🔍</Text>
             <TextInput
               style={styles.searchInput}
               value={logSearchQuery}
               onChangeText={setLogSearchQuery}
-              placeholder="Buscar em mensagens, serviços ou IDs..."
+              placeholder="Filtrar eventos por ação, origem ou ID..."
               placeholderTextColor="#5F6368"
               autoCapitalize="none"
               autoCorrect={false}
@@ -862,17 +963,22 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
             )}
           </View>
 
-          {/* Lista de Registros de Log com Fonte Monoespacada */}
           <View style={styles.logsTerminal}>
             {isLogsLoading ? (
               <View style={styles.logsLoadingBox}>
                 <ActivityIndicator size="small" color="#8AB4F8" />
-                <Text style={styles.logsLoadingText}>Filtrando logs em tempo real...</Text>
+                <Text style={styles.logsLoadingText}>
+                  Consultando eventos reais no OCI Audit...
+                </Text>
+              </View>
+            ) : logsError && logsData.length === 0 ? (
+              <View style={styles.emptyLogsBox}>
+                <Text style={styles.emptyLogsText}>{logsError}</Text>
               </View>
             ) : logsData.length === 0 ? (
               <View style={styles.emptyLogsBox}>
                 <Text style={styles.emptyLogsText}>
-                  Nenhum log encontrado para os critérios selecionados.
+                  Nenhum evento de auditoria encontrado nas últimas 24h para os filtros aplicados.
                 </Text>
               </View>
             ) : (
@@ -898,10 +1004,14 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
                         </Text>
                       </View>
 
-                      <Text style={styles.logSource}>[{log.source}]</Text>
+                      <Text style={styles.logSource} numberOfLines={1}>
+                        [{log.source}]
+                      </Text>
 
                       <Text style={styles.logTimestamp}>
-                        {log.timeShort || log.timestamp.split('T')[1]?.substr(0, 8) || log.timestamp}
+                        {log.timeShort ||
+                          log.timestamp.split('T')[1]?.substring(0, 8) ||
+                          log.timestamp}
                       </Text>
                     </View>
 
@@ -922,13 +1032,9 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
         </View>
       </ScrollView>
 
-      {/* Console Serial Linux Emulado */}
-      <SerialConsoleModal
-        visible={isSerialConsoleOpen}
-        onClose={() => setIsSerialConsoleOpen(false)}
-        instance={activeInstance}
-        onRestartInstance={(id) => restartInstance(id)}
-      />
+      {toastMessage && (
+        <Toast message={toastMessage} onDismiss={() => setToastMessage(null)} />
+      )}
     </SafeAreaView>
   );
 };
@@ -946,7 +1052,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: 14,
   },
   navBackBtn: {
     paddingVertical: 6,
@@ -963,7 +1069,36 @@ const styles = StyleSheet.create({
   },
   navActionGroup: {
     flexDirection: 'row',
+    alignItems: 'center',
     gap: 8,
+  },
+  sourceBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 6,
+    borderWidth: 1,
+    gap: 5,
+  },
+  sourceBadgeLive: {
+    backgroundColor: '#0F382A',
+    borderColor: '#22C55E',
+  },
+  sourceBadgeCache: {
+    backgroundColor: '#3A3018',
+    borderColor: '#F59E0B',
+  },
+  sourceDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  sourceBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    letterSpacing: 0.5,
   },
   pdfHeaderBtn: {
     backgroundColor: '#1E3A5F',
@@ -977,6 +1112,39 @@ const styles = StyleSheet.create({
     color: '#93C5FD',
     fontSize: 12,
     fontWeight: '700',
+  },
+  cacheBanner: {
+    backgroundColor: '#2C2210',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#F59E0B',
+    padding: 12,
+    marginBottom: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  cacheBannerTitle: {
+    color: '#FDE68A',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  cacheBannerSub: {
+    color: '#E5E7EB',
+    fontSize: 11,
+    marginTop: 2,
+    lineHeight: 15,
+  },
+  cacheRetryBtn: {
+    backgroundColor: '#F59E0B',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  cacheRetryBtnText: {
+    color: '#0F1318',
+    fontSize: 11,
+    fontWeight: '800',
   },
   pickerSection: {
     marginBottom: 14,
@@ -1014,7 +1182,7 @@ const styles = StyleSheet.create({
     maxWidth: 130,
   },
   instanceChipCpu: {
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '800',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
@@ -1063,24 +1231,16 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     flex: 1,
   },
-  sourceBadge: {
-    backgroundColor: '#1E293B',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 4,
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  sourceBadgeText: {
-    color: '#38BDF8',
-    fontSize: 9,
-    fontWeight: '800',
-    letterSpacing: 0.5,
-  },
   hostOcid: {
     color: '#9AA0A6',
     fontSize: 11,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  hostSpecsLine: {
+    color: '#93C5FD',
+    fontSize: 11,
+    marginTop: 4,
+    fontWeight: '600',
   },
   chartCard: {
     backgroundColor: '#161A22',
@@ -1156,6 +1316,7 @@ const styles = StyleSheet.create({
   },
   legendRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     justifyContent: 'flex-start',
     gap: 14,
@@ -1181,6 +1342,42 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '600',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  chartEmptyBox: {
+    backgroundColor: '#0F1218',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#262C36',
+    padding: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 140,
+  },
+  chartEmptyTitle: {
+    color: '#E8EAED',
+    fontSize: 13,
+    fontWeight: '700',
+    textAlign: 'center',
+    marginBottom: 6,
+  },
+  chartEmptyText: {
+    color: '#9AA0A6',
+    fontSize: 11,
+    lineHeight: 17,
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  retrySmallBtn: {
+    marginTop: 12,
+    backgroundColor: '#8AB4F8',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 6,
+  },
+  retrySmallBtnText: {
+    color: '#0F1318',
+    fontSize: 11,
+    fontWeight: '800',
   },
   svgCanvasWrapper: {
     alignItems: 'center',
@@ -1214,7 +1411,7 @@ const styles = StyleSheet.create({
   },
   metricBoxVal: {
     color: '#E8EAED',
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '800',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     marginTop: 4,
@@ -1223,30 +1420,6 @@ const styles = StyleSheet.create({
     color: '#5F6368',
     fontSize: 9,
     marginTop: 2,
-  },
-  terminalButton: {
-    backgroundColor: '#1A1D24',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#2D3139',
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    marginBottom: 16,
-  },
-  terminalButtonIcon: {
-    color: '#38BDF8',
-    fontSize: 14,
-    fontWeight: '800',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  terminalButtonText: {
-    color: '#E8EAED',
-    fontSize: 13,
-    fontWeight: '700',
   },
   proberCard: {
     backgroundColor: '#161A22',
@@ -1260,7 +1433,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: 10,
   },
   proberTitle: {
     color: '#9AA0A6',
@@ -1287,6 +1460,16 @@ const styles = StyleSheet.create({
     color: '#38BDF8',
     fontSize: 11,
     fontWeight: '700',
+  },
+  probeEmptyText: {
+    color: '#9AA0A6',
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  probeErrorText: {
+    color: '#FCA5A5',
+    fontSize: 11,
+    lineHeight: 16,
   },
   proberGrid: {
     gap: 8,
@@ -1390,95 +1573,6 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '700',
   },
-  rootCauseCardAlert: {
-    backgroundColor: '#2A1414',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#EF4444',
-    padding: 14,
-    marginBottom: 14,
-  },
-  rootCauseHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginBottom: 8,
-  },
-  rootCauseBadgeAlert: {
-    backgroundColor: '#7F1D1D',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
-  },
-  rootCauseBadgeTextAlert: {
-    color: '#FCA5A5',
-    fontSize: 9,
-    fontWeight: '800',
-    letterSpacing: 0.5,
-  },
-  rootCauseTitleAlert: {
-    color: '#F87171',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  rootCauseProbable: {
-    color: '#FEE2E2',
-    fontSize: 13,
-    fontWeight: '700',
-    marginBottom: 4,
-  },
-  rootCauseDetail: {
-    color: '#E8EAED',
-    fontSize: 11,
-    lineHeight: 16,
-    marginBottom: 6,
-  },
-  rootCauseImpact: {
-    color: '#F87171',
-    fontSize: 11,
-    fontWeight: '600',
-    marginBottom: 10,
-  },
-  mitigateBtn: {
-    backgroundColor: '#EF4444',
-    paddingVertical: 10,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  mitigateBtnText: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '800',
-  },
-  rootCauseCardHealthy: {
-    backgroundColor: '#0F291E',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#10B981',
-    padding: 14,
-    marginBottom: 14,
-  },
-  rootCauseBadgeHealthy: {
-    backgroundColor: '#064E3B',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
-  },
-  rootCauseBadgeTextHealthy: {
-    color: '#6EE7B7',
-    fontSize: 9,
-    fontWeight: '800',
-  },
-  rootCauseTitleHealthy: {
-    color: '#34D399',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  rootCauseDetailHealthy: {
-    color: '#D1FAE5',
-    fontSize: 11,
-    lineHeight: 16,
-  },
   logsSection: {
     backgroundColor: '#161A22',
     borderRadius: 14,
@@ -1494,7 +1588,7 @@ const styles = StyleSheet.create({
   },
   logsTitle: {
     color: '#E8EAED',
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '800',
     letterSpacing: 0.6,
   },
@@ -1509,7 +1603,7 @@ const styles = StyleSheet.create({
   },
   sevPill: {
     paddingVertical: 4,
-    paddingHorizontal: 8,
+    paddingHorizontal: 7,
     borderRadius: 6,
     backgroundColor: '#1E232B',
     borderWidth: 1,
@@ -1529,7 +1623,7 @@ const styles = StyleSheet.create({
   },
   sevPillText: {
     color: '#9AA0A6',
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: '700',
   },
   sevPillTextActive: {
@@ -1546,9 +1640,6 @@ const styles = StyleSheet.create({
     paddingVertical: 7,
     marginBottom: 12,
     gap: 6,
-  },
-  searchIcon: {
-    fontSize: 12,
   },
   searchInput: {
     flex: 1,
@@ -1588,6 +1679,8 @@ const styles = StyleSheet.create({
   emptyLogsText: {
     color: '#9AA0A6',
     fontSize: 11,
+    textAlign: 'center',
+    lineHeight: 16,
   },
   logItem: {
     borderBottomWidth: 1,
@@ -1616,12 +1709,12 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '700',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    flex: 1,
   },
   logTimestamp: {
     color: '#5F6368',
     fontSize: 10,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    marginLeft: 'auto',
   },
   logMessage: {
     color: '#E8EAED',
@@ -1641,20 +1734,40 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     padding: 24,
   },
+  emptyTitle: {
+    color: '#E8EAED',
+    fontSize: 18,
+    fontWeight: '800',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
   emptyText: {
     color: '#9AA0A6',
-    fontSize: 14,
-    marginBottom: 16,
+    fontSize: 13,
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 18,
+  },
+  primaryActionBtn: {
+    backgroundColor: '#F80000',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 10,
+  },
+  primaryActionBtnText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '800',
   },
   backBtn: {
     backgroundColor: '#8AB4F8',
-    paddingVertical: 10,
-    paddingHorizontal: 16,
+    paddingHorizontal: 18,
+    paddingVertical: 11,
     borderRadius: 8,
   },
   backBtnText: {
     color: '#0F1318',
-    fontSize: 12,
-    fontWeight: '700',
+    fontSize: 13,
+    fontWeight: '800',
   },
 });

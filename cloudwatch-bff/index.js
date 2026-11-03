@@ -1,33 +1,420 @@
 /**
  * CloudWatch Dashboard - Backend For Frontend (BFF)
- * Sprint 2: OCI Compute, Assinador RSA-SHA256 Nativo, Descoberta Dinamica de Recursos,
- *           Sondagem de Rede Zabbix (TCP Handshake), Inspecao Docker e Logs Insights
- * Hospedado na VM OCI: 167.234.241.171 (Oracle Linux / ARM Ampere A1)
+ * Fases 1 e 2:
+ *  - Autenticacao JWT (Access 15m + Refresh 7d com rotacao e hash SHA-256)
+ *  - Helmet, Rate Limiting, CORS restrito por .env, Validacao Zod e Protecao anti-SSRF
+ *  - Integracao Oficial OCI SDK (ociClient.js): verificacao obrigatoria de credenciais,
+ *    pareamento por comando para OCI Cloud Shell (TTL 10m, uso unico, AES-256-GCM),
+ *    descoberta real via ResourceSearch/Compute/VirtualNetwork, metricas MQL (Monitoring) e eventos reais (Audit).
+ *  - Zero dados simulados, zero chaves/IPs hardcoded.
  */
+
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const jwt = require('jsonwebtoken');
+const { z } = require('zod');
 const crypto = require('crypto');
-const https = require('https');
 const net = require('net');
 const os = require('os');
 const { exec } = require('child_process');
 const bcrypt = require('bcryptjs');
+const common = require('oci-common');
+const identity = require('oci-identity');
 const { pool } = require('./db');
-require('dotenv').config();
+const {
+  OCI_READONLY_POLICIES_HINT,
+  encryptCredentials,
+  isOwnerUsername,
+  validateOciCredentials,
+  getOciProvider,
+  mapOciSdkError,
+  countVisibleInstances,
+  listOciInstancesForUser,
+  getOciInstanceMetrics,
+  getOciInstanceAuditLogs,
+  invalidateUserOciCache,
+} = require('./ociClient');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = parseInt(process.env.PORT || '3000', 10);
+const BIND_HOST =
+  process.env.BIND_HOST || (process.env.NODE_ENV === 'production' ? '127.0.0.1' : '0.0.0.0');
 
-app.use(cors());
-app.use(express.json());
+// Confiar no primeiro proxy reverso (Caddy/Nginx) para rate-limit por IP real
+app.set('trust proxy', 1);
 
 // ============================================================================
-// 1. SINCRONIZACAO AUTOMATICA DO BANCO DE DADOS POSTGRESQL (initDatabase)
+// 1. SEGURANCA HTTP: HELMET, CORS RESTRITO E RATE LIMITING
+// ============================================================================
+app.use(helmet());
+
+const allowedOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Clientes mobile nativos (React Native) e curl no Cloud Shell nao enviam cabecalho Origin
+      if (!origin) {
+        return callback(null, true);
+      }
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error('Origem bloqueada pela politica de CORS.'));
+    },
+    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+    credentials: true,
+  })
+);
+
+app.use(express.json({ limit: '64kb' }));
+
+const authRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    code: 'RATE_LIMITED',
+    error: 'Muitas tentativas de autenticação. Aguarde alguns minutos e tente novamente.',
+  },
+});
+
+const pairingRateLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 25,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    code: 'RATE_LIMITED',
+    error: 'Limite de requisições de pareamento atingido. Tente novamente em instantes.',
+  },
+});
+
+// ============================================================================
+// 2. CONFIGURACAO E HELPERS DE JWT, REFRESH TOKEN E PAREAMENTO
+// ============================================================================
+const ACCESS_TOKEN_EXPIRES_IN = process.env.JWT_ACCESS_EXPIRES_IN || '15m';
+const REFRESH_TOKEN_TTL_DAYS = parseInt(process.env.REFRESH_TOKEN_TTL_DAYS || '7', 10);
+const PAIRING_TTL_MS = 10 * 60 * 1000; // 10 minutos
+
+function getJwtSecret() {
+  const secret = process.env.JWT_ACCESS_SECRET;
+  if (!secret || secret.trim().length < 32) {
+    throw new Error(
+      'Configuração ausente: JWT_ACCESS_SECRET deve estar definido no .env com no mínimo 32 caracteres.'
+    );
+  }
+  return secret;
+}
+
+/**
+ * Exige PUBLIC_BASE_URL com https://. So permite http:// quando NODE_ENV === 'development'.
+ */
+function getValidatedPublicBaseUrl() {
+  const rawUrl = (process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
+  if (!rawUrl) {
+    const err = new Error(
+      'PUBLIC_BASE_URL não está configurado no servidor BFF. Defina PUBLIC_BASE_URL no .env.'
+    );
+    err.code = 'MISSING_PUBLIC_BASE_URL';
+    throw err;
+  }
+
+  const isHttps = rawUrl.startsWith('https://');
+  const isDevHttp = process.env.NODE_ENV === 'development' && rawUrl.startsWith('http://');
+
+  if (!isHttps && !isDevHttp) {
+    const err = new Error(
+      'O pareamento por comando exige PUBLIC_BASE_URL com HTTPS ativo (https://...). HTTP só é permitido em NODE_ENV=development.'
+    );
+    err.code = 'HTTPS_REQUIRED_FOR_PAIRING';
+    throw err;
+  }
+
+  return rawUrl;
+}
+
+function hashTokenSha256(rawToken) {
+  return crypto.createHash('sha256').update(String(rawToken)).digest('hex');
+}
+
+/**
+ * Gera codigo aleatorio criptografico de 12 caracteres alfanumericos sem vies de modulo
+ */
+function generateSecurePairingCode(length = 12) {
+  const alphabet = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+  const maxUnbiasedByte = 248; // 62 * 4 = 248
+  let result = '';
+
+  while (result.length < length) {
+    const bytes = crypto.randomBytes(length * 2);
+    for (let i = 0; i < bytes.length && result.length < length; i++) {
+      if (bytes[i] < maxUnbiasedByte) {
+        result += alphabet[bytes[i] % alphabet.length];
+      }
+    }
+  }
+  return result;
+}
+
+function signAccessToken(user) {
+  return jwt.sign(
+    {
+      sub: user.id,
+      username: user.username,
+      role: user.role || 'USER',
+    },
+    getJwtSecret(),
+    {
+      expiresIn: ACCESS_TOKEN_EXPIRES_IN,
+      algorithm: 'HS256',
+    }
+  );
+}
+
+async function issueTokenPair(user, dbClient = pool) {
+  const accessToken = signAccessToken(user);
+  const rawRefreshToken = crypto.randomBytes(48).toString('hex');
+  const tokenHash = hashTokenSha256(rawRefreshToken);
+  const refreshId = `rt-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
+  const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000);
+
+  await dbClient.query(
+    `INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at, created_at)
+     VALUES ($1, $2, $3, $4, NOW());`,
+    [refreshId, user.id, tokenHash, expiresAt]
+  );
+
+  return {
+    accessToken,
+    refreshToken: rawRefreshToken,
+    expiresIn: 900,
+  };
+}
+
+function serializeUser(row) {
+  return {
+    id: row.id,
+    username: row.username,
+    email: row.email,
+    role: row.role || 'USER',
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+  };
+}
+
+function serializeAccountRow(row) {
+  let subscribed = [];
+  if (Array.isArray(row.subscribed_regions)) {
+    subscribed = row.subscribed_regions;
+  } else if (typeof row.subscribed_regions === 'string') {
+    try {
+      subscribed = JSON.parse(row.subscribed_regions);
+    } catch (_e) {
+      subscribed = [];
+    }
+  }
+
+  return {
+    id: row.id,
+    provider: row.provider,
+    authMode: row.auth_mode || 'USER_API_KEY',
+    accountIdentifier: row.account_identifier,
+    tenancyName: row.tenancy_name || row.account_identifier,
+    region: row.region || 'sa-saopaulo-1',
+    subscribedRegions: subscribed,
+    permissionStatus: row.permission_status || 'OK',
+    biometricsEnabled: Boolean(row.biometrics_enabled),
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+  };
+}
+
+// ============================================================================
+// 3. SCHEMAS DE VALIDACAO DE ENTRADA (ZOD)
+// ============================================================================
+const registerSchema = z.object({
+  username: z
+    .string({ required_error: 'Nome de usuário é obrigatório.' })
+    .trim()
+    .min(3, 'O nome de usuário deve ter pelo menos 3 caracteres.')
+    .max(50, 'O nome de usuário deve ter no máximo 50 caracteres.')
+    .regex(
+      /^[a-zA-Z0-9._-]+$/,
+      'O nome de usuário pode conter apenas letras, números, ponto, hífen e sublinhado.'
+    ),
+  email: z
+    .string({ required_error: 'E-mail é obrigatório.' })
+    .trim()
+    .toLowerCase()
+    .email('Informe um endereço de e-mail válido.')
+    .max(255, 'E-mail excede o tamanho máximo.'),
+  password: z
+    .string({ required_error: 'Senha é obrigatória.' })
+    .min(6, 'A senha deve conter no mínimo 6 caracteres.')
+    .max(128, 'A senha deve conter no máximo 128 caracteres.'),
+});
+
+const loginSchema = z.object({
+  username: z
+    .string({ required_error: 'Informe seu usuário ou e-mail.' })
+    .trim()
+    .min(1, 'Informe seu usuário ou e-mail.')
+    .max(255),
+  password: z
+    .string({ required_error: 'Informe sua senha.' })
+    .min(1, 'Informe sua senha.')
+    .max(128),
+});
+
+const refreshSchema = z.object({
+  refreshToken: z
+    .string({ required_error: 'Refresh token ausente.' })
+    .trim()
+    .min(32, 'Formato de refresh token inválido.')
+    .max(512),
+});
+
+const logoutSchema = z.object({
+  refreshToken: z.string().trim().min(1).max(512).optional(),
+});
+
+const ociCredentialsPayloadSchema = z.object({
+  tenancyOcid: z
+    .string({ required_error: 'Tenancy OCID é obrigatório.' })
+    .trim()
+    .min(10, 'Tenancy OCID inválido.')
+    .max(255),
+  userOcid: z
+    .string({ required_error: 'User OCID é obrigatório.' })
+    .trim()
+    .min(10, 'User OCID inválido.')
+    .max(255),
+  fingerprint: z
+    .string({ required_error: 'Fingerprint é obrigatório.' })
+    .trim()
+    .min(16, 'Fingerprint inválido.')
+    .max(128),
+  region: z
+    .string({ required_error: 'Região é obrigatória.' })
+    .trim()
+    .min(3, 'Região inválida.')
+    .max(64),
+  privateKeyPem: z
+    .string({ required_error: 'Chave privada PEM é obrigatória.' })
+    .min(64, 'Chave privada PEM incompleta.')
+    .max(32768, 'Chave privada PEM excede o limite permitido.'),
+  passphrase: z.string().max(256).optional(),
+});
+
+const metricsQuerySchema = z.object({
+  window: z.enum(['1h', '24h', '7d']).default('24h'),
+  accountId: z.string().trim().max(128).optional(),
+});
+
+const logsQuerySchema = z.object({
+  severity: z.enum(['ALL', 'INFO', 'WARN', 'ERROR']).default('ALL'),
+  search: z.string().trim().max(128).default(''),
+  accountId: z.string().trim().max(128).optional(),
+});
+
+const networkProbeQuerySchema = z.object({
+  host: z.string().trim().max(128).optional(),
+  instanceId: z.string().trim().max(255).optional(),
+});
+
+function formatZodError(zodError) {
+  const first = zodError.issues && zodError.issues[0];
+  return first ? first.message : 'Dados de entrada inválidos.';
+}
+
+// ============================================================================
+// 4. MIDDLEWARE DE AUTENTICACAO JWT (requireAuth)
+// ============================================================================
+function requireAuth(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({
+      success: false,
+      code: 'UNAUTHORIZED',
+      error: 'Autenticação obrigatória. Token Bearer ausente.',
+    });
+  }
+
+  const token = authHeader.slice(7).trim();
+  if (!token) {
+    return res.status(401).json({
+      success: false,
+      code: 'UNAUTHORIZED',
+      error: 'Token de acesso vazio.',
+    });
+  }
+
+  try {
+    const payload = jwt.verify(token, getJwtSecret(), { algorithms: ['HS256'] });
+    if (!payload || typeof payload !== 'object' || !payload.sub) {
+      return res.status(401).json({
+        success: false,
+        code: 'INVALID_TOKEN',
+        error: 'Token de acesso inválido.',
+      });
+    }
+
+    req.user = {
+      id: String(payload.sub),
+      username: String(payload.username || ''),
+      role: String(payload.role || 'USER'),
+    };
+    return next();
+  } catch (err) {
+    const isExpired = err && err.name === 'TokenExpiredError';
+    return res.status(401).json({
+      success: false,
+      code: isExpired ? 'TOKEN_EXPIRED' : 'INVALID_TOKEN',
+      error: isExpired
+        ? 'Sessão expirada. Renovando credenciais...'
+        : 'Token de acesso inválido ou revogado.',
+    });
+  }
+}
+
+// Gatekeeper global para /api: protege TODAS as rotas /api exceto auth publicas e POST /api/oci/pair/:codigo
+app.use('/api', (req, res, next) => {
+  const publicApiRoutes = [
+    { method: 'POST', regex: /^\/auth\/register\/?$/ },
+    { method: 'POST', regex: /^\/auth\/login\/?$/ },
+    { method: 'POST', regex: /^\/auth\/refresh\/?$/ },
+    { method: 'POST', regex: /^\/auth\/logout\/?$/ },
+    { method: 'POST', regex: /^\/oci\/pair\/[A-Za-z0-9]{12}\/?$/ },
+  ];
+
+  const isPublic = publicApiRoutes.some(
+    (route) => route.method === req.method && route.regex.test(req.path)
+  );
+
+  if (isPublic) {
+    return next();
+  }
+  return requireAuth(req, res, next);
+});
+
+// ============================================================================
+// 5. SINCRONIZACAO DO BANCO DE DADOS POSTGRESQL (initDatabase)
+//    Sem tabelas legadas instances / instances_cache e sem qualquer seed falso.
 // ============================================================================
 async function initDatabase() {
   try {
-    console.log('[PostgreSQL] Verificando e sincronizando schema de tabelas...');
+    console.log('[PostgreSQL] Verificando e sincronizando schema multiusuario Sprint 2...');
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS master_users (
@@ -35,322 +422,199 @@ async function initDatabase() {
         username VARCHAR(100) UNIQUE NOT NULL,
         email VARCHAR(255) UNIQUE NOT NULL,
         password_hash VARCHAR(255) NOT NULL,
+        role VARCHAR(32) NOT NULL DEFAULT 'USER',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         last_login TIMESTAMP WITH TIME ZONE
       );
 
-      CREATE TABLE IF NOT EXISTS users (
+      ALTER TABLE master_users
+        ADD COLUMN IF NOT EXISTS role VARCHAR(32) NOT NULL DEFAULT 'USER';
+
+      CREATE TABLE IF NOT EXISTS refresh_tokens (
         id VARCHAR(64) PRIMARY KEY,
-        username VARCHAR(100) UNIQUE NOT NULL,
-        email VARCHAR(255) UNIQUE NOT NULL,
-        password_hash VARCHAR(255) NOT NULL,
+        user_id VARCHAR(64) NOT NULL REFERENCES master_users(id) ON DELETE CASCADE,
+        token_hash VARCHAR(128) UNIQUE NOT NULL,
+        expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+        revoked_at TIMESTAMP WITH TIME ZONE,
+        replaced_by_hash VARCHAR(128),
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       );
 
+      CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id);
+      CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash ON refresh_tokens(token_hash);
+
       CREATE TABLE IF NOT EXISTS cloud_accounts (
         id VARCHAR(64) PRIMARY KEY,
-        master_user_id VARCHAR(64) NOT NULL,
+        master_user_id VARCHAR(64) NOT NULL REFERENCES master_users(id) ON DELETE CASCADE,
         provider VARCHAR(32) NOT NULL,
+        auth_mode VARCHAR(32) NOT NULL DEFAULT 'USER_API_KEY',
         account_identifier VARCHAR(255) NOT NULL,
+        tenancy_name VARCHAR(255),
         region VARCHAR(64) DEFAULT 'sa-saopaulo-1',
-        credentials_encrypted TEXT,
+        subscribed_regions JSONB DEFAULT '[]'::jsonb,
+        permission_status VARCHAR(32) NOT NULL DEFAULT 'OK',
+        encrypted_credentials TEXT,
         biometrics_enabled BOOLEAN DEFAULT FALSE,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-        UNIQUE(master_user_id, provider)
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       );
 
-      CREATE TABLE IF NOT EXISTS instances (
-        id VARCHAR(100) PRIMARY KEY,
-        user_id VARCHAR(64),
-        provider VARCHAR(32) NOT NULL,
-        name VARCHAR(255) NOT NULL,
-        resource_type VARCHAR(64) DEFAULT 'Compute',
-        shape VARCHAR(100),
-        status VARCHAR(32) DEFAULT 'HEALTHY',
-        private_ip VARCHAR(64),
-        public_ip VARCHAR(64),
-        region VARCHAR(64) DEFAULT 'sa-saopaulo-1',
-        ocpus NUMERIC(5,2) DEFAULT 1,
-        memory_gb NUMERIC(7,2) DEFAULT 1,
-        cpu_usage NUMERIC(5,2) DEFAULT 0,
-        memory_usage NUMERIC(5,2) DEFAULT 0,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-        last_updated TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      ALTER TABLE cloud_accounts
+        ADD COLUMN IF NOT EXISTS auth_mode VARCHAR(32) NOT NULL DEFAULT 'USER_API_KEY',
+        ADD COLUMN IF NOT EXISTS tenancy_name VARCHAR(255),
+        ADD COLUMN IF NOT EXISTS subscribed_regions JSONB DEFAULT '[]'::jsonb,
+        ADD COLUMN IF NOT EXISTS permission_status VARCHAR(32) NOT NULL DEFAULT 'OK',
+        ADD COLUMN IF NOT EXISTS encrypted_credentials TEXT,
+        ADD COLUMN IF NOT EXISTS biometrics_enabled BOOLEAN DEFAULT FALSE;
+
+      -- Permite mais de uma conta por provedor por usuario e remove coluna legada em JSON puro
+      ALTER TABLE cloud_accounts
+        DROP CONSTRAINT IF EXISTS cloud_accounts_master_user_id_provider_key;
+
+      ALTER TABLE cloud_accounts
+        DROP COLUMN IF EXISTS credentials_encrypted;
+
+      CREATE INDEX IF NOT EXISTS idx_cloud_accounts_user_provider
+        ON cloud_accounts(master_user_id, provider);
+
+      CREATE TABLE IF NOT EXISTS oci_pairing_sessions (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL REFERENCES master_users(id) ON DELETE CASCADE,
+        code_hash VARCHAR(128) UNIQUE NOT NULL,
+        status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+        account_id VARCHAR(64),
+        tenancy_name VARCHAR(255),
+        region VARCHAR(64),
+        instance_count INTEGER,
+        permission_status VARCHAR(32),
+        error_code VARCHAR(64),
+        error_message TEXT,
+        expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+        used_at TIMESTAMP WITH TIME ZONE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       );
 
-      CREATE TABLE IF NOT EXISTS instances_cache (
-        id VARCHAR(100) PRIMARY KEY,
-        user_id VARCHAR(64),
-        provider VARCHAR(32) NOT NULL,
-        name VARCHAR(255) NOT NULL,
-        resource_type VARCHAR(64) DEFAULT 'Compute',
-        shape VARCHAR(100),
-        status VARCHAR(32) DEFAULT 'HEALTHY',
-        private_ip VARCHAR(64),
-        public_ip VARCHAR(64),
-        region VARCHAR(64) DEFAULT 'sa-saopaulo-1',
-        ocpus NUMERIC(5,2) DEFAULT 1,
-        memory_gb NUMERIC(7,2) DEFAULT 1,
-        cpu_usage NUMERIC(5,2) DEFAULT 0,
-        memory_usage NUMERIC(5,2) DEFAULT 0,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-        last_updated TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-      );
+      CREATE INDEX IF NOT EXISTS idx_oci_pairing_user_id ON oci_pairing_sessions(user_id);
+      CREATE INDEX IF NOT EXISTS idx_oci_pairing_code_hash ON oci_pairing_sessions(code_hash);
     `);
 
-    // Semente inicial de recursos reais caso a tabela esteja vazia
-    const countRes = await pool.query('SELECT COUNT(*) FROM instances_cache;');
-    if (parseInt(countRes.rows[0].count, 10) === 0) {
-      console.log('[PostgreSQL] Semeando recursos reais iniciais OCI na tabela instances_cache...');
-      await pool.query(`
-        INSERT INTO instances_cache (
-          id, user_id, provider, name, resource_type, shape, status,
-          private_ip, public_ip, region, ocpus, memory_gb, cpu_usage, memory_usage,
-          created_at, last_updated
-        ) VALUES 
-        (
-          'res-oci-sidebrain-prd', 'system', 'OCI', 'vnic-sidebrain-prd', 'Compute Instance',
-          'VM.Standard.A1.Flex', 'HEALTHY', '10.0.0.128', '167.234.241.171', 'sa-saopaulo-1',
-          4, 24, 18.5, 34.2, NOW(), NOW()
-        ),
-        (
-          'res-oci-db-01', 'system', 'OCI', 'adb-fatec-tp1', 'Autonomous Database',
-          'Autonomous Database Serverless', 'HEALTHY', '10.0.2.80', '167.234.241.171', 'sa-saopaulo-1',
-          2, 16, 12.0, 28.0, NOW(), NOW()
-        );
-      `);
-    }
-
-    console.log('✓ [PostgreSQL] Schema verificado e pronto para operacao.');
+    console.log('[PostgreSQL] Schema sincronizado com sucesso.');
   } catch (err) {
-    console.warn('[PostgreSQL] Aviso ao inicializar schema (modo resiliente):', err.message);
+    console.warn('[PostgreSQL] Aviso ao inicializar schema:', err.message);
   }
 }
 
-// Inicia banco em segundo plano
-initDatabase().catch(() => {});
+const dbReadyPromise = initDatabase();
 
 // ============================================================================
-// 2. ASSINADOR HTTP OFICIAL DA OCI (RSA-SHA256) NATIVO
-// ============================================================================
-/**
- * Implementacao da especificacao Oracle Cloud Request Signing
- * https://docs.oracle.com/en-us/iaas/Content/API/Concepts/signingrequests.htm
- */
-function signOciRequest({
-  tenancyId,
-  userId,
-  fingerprint,
-  privateKey,
-  method = 'GET',
-  host,
-  pathAndQuery,
-  body = null,
-}) {
-  const date = new Date().toUTCString();
-  const keyId = `${tenancyId}/${userId}/${fingerprint}`;
-  const lowerMethod = method.toLowerCase();
-
-  let stringToSign = `date: ${date}\n(request-target): ${lowerMethod} ${pathAndQuery}\nhost: ${host}`;
-  let headersToSign = 'date (request-target) host';
-
-  const headers = {
-    date: date,
-    host: host,
-    accept: 'application/json',
-  };
-
-  if (body && (lowerMethod === 'post' || lowerMethod === 'put')) {
-    const bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
-    const sha256 = crypto.createHash('sha256').update(bodyStr).digest('base64');
-    const contentLength = Buffer.byteLength(bodyStr);
-
-    headers['content-type'] = 'application/json';
-    headers['content-length'] = contentLength;
-    headers['x-content-sha256'] = sha256;
-
-    stringToSign = `date: ${date}\n(request-target): ${lowerMethod} ${pathAndQuery}\nhost: ${host}\ncontent-length: ${contentLength}\ncontent-type: application/json\nx-content-sha256: ${sha256}`;
-    headersToSign = 'date (request-target) host content-length content-type x-content-sha256';
-  }
-
-  const signer = crypto.createSign('RSA-SHA256');
-  signer.update(stringToSign);
-  const signature = signer.sign(privateKey, 'base64');
-
-  headers['authorization'] = `Signature version="1",headers="${headersToSign}",keyId="${keyId}",algorithm="rsa-sha256",signature="${signature}"`;
-
-  return headers;
-}
-
-/**
- * Consulta a API REST oficial da OCI
- */
-async function queryOciRestApi({
-  tenancyId,
-  userId,
-  fingerprint,
-  privateKey,
-  region = 'sa-saopaulo-1',
-  method = 'GET',
-  endpoint,
-  body = null,
-}) {
-  return new Promise((resolve, reject) => {
-    try {
-      const host = `iaas.${region}.oraclecloud.com`;
-      const headers = signOciRequest({
-        tenancyId,
-        userId,
-        fingerprint,
-        privateKey,
-        method,
-        host,
-        pathAndQuery: endpoint,
-        body,
-      });
-
-      const options = {
-        hostname: host,
-        port: 443,
-        path: endpoint,
-        method,
-        headers,
-        timeout: 4000,
-      };
-
-      const req = https.request(options, (res) => {
-        let rawData = '';
-        res.on('data', (chunk) => { rawData += chunk; });
-        res.on('end', () => {
-          try {
-            const parsed = JSON.parse(rawData);
-            if (res.statusCode >= 200 && res.statusCode < 300) {
-              resolve(parsed);
-            } else {
-              reject(new Error(`OCI API ${res.statusCode}: ${parsed.message || rawData}`));
-            }
-          } catch (e) {
-            reject(new Error(`Falha ao decodificar resposta OCI: ${rawData.substring(0, 80)}`));
-          }
-        });
-      });
-
-      req.on('error', (err) => reject(err));
-      req.on('timeout', () => {
-        req.destroy();
-        reject(new Error('Timeout de conexao com a Oracle Cloud Infrastructure'));
-      });
-
-      if (body && (method === 'POST' || method === 'PUT')) {
-        req.write(typeof body === 'string' ? body : JSON.stringify(body));
-      }
-      req.end();
-    } catch (err) {
-      reject(err);
-    }
-  });
-}
-
-// ============================================================================
-// 3. HEALTH CHECK & METRICAS DO HOST OCI
+// 6. HEALTH CHECK PUBLICO
 // ============================================================================
 app.get('/health', (_req, res) => {
-  const load = os.loadavg();
-  const totalMem = os.totalmem();
-  const freeMem = os.freemem();
-  const cpuCount = os.cpus().length || 4;
-
   res.json({
     status: 'HEALTHY',
     service: 'cloudwatch-api',
-    version: '2.1.0-sprint2-dynamic',
+    version: '2.3.0-sprint2-oci-sdk',
     timestamp: new Date().toISOString(),
-    host: {
-      hostname: os.hostname(),
-      platform: os.platform(),
-      arch: os.arch(),
-      uptimeSeconds: Math.floor(os.uptime()),
-      cpuCount,
-      load1m: load[0],
-      memoryUsagePercent: Number((((totalMem - freeMem) / totalMem) * 100).toFixed(1)),
-    },
   });
 });
 
 // ============================================================================
-// 4. AUTENTICACAO COM BCRYPT E RETROCOMPATIBILIDADE
+// 7. ROTAS DE AUTENTICACAO (REGISTER, LOGIN, REFRESH, LOGOUT)
 // ============================================================================
+app.post('/api/auth/register', authRateLimiter, async (req, res) => {
+  const parsed = registerSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      success: false,
+      code: 'VALIDATION_ERROR',
+      error: formatZodError(parsed.error),
+    });
+  }
 
-app.post('/api/auth/register', async (req, res) => {
+  const { username, email, password } = parsed.data;
+
   try {
-    const { username, email, password } = req.body;
+    const existing = await pool.query(
+      `SELECT id, username, email
+       FROM master_users
+       WHERE LOWER(username) = LOWER($1) OR LOWER(email) = LOWER($2)
+       LIMIT 1;`,
+      [username, email]
+    );
 
-    if (!username || !email || !password) {
-      return res.status(400).json({
+    if (existing.rows.length > 0) {
+      const conflictRow = existing.rows[0];
+      const isUsernameConflict = conflictRow.username.toLowerCase() === username.toLowerCase();
+      return res.status(409).json({
         success: false,
-        error: 'Informe usuario, e-mail e senha para prosseguir.',
+        code: 'USER_ALREADY_EXISTS',
+        error: isUsernameConflict
+          ? 'Este nome de usuário já está em uso.'
+          : 'Este endereço de e-mail já está cadastrado.',
       });
     }
 
-    const userId = `usr-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
+    const userId = `usr-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
     const passwordHash = await bcrypt.hash(password, 10);
 
-    const query = `
-      INSERT INTO master_users (id, username, email, password_hash, created_at)
-      VALUES ($1, $2, $3, $4, NOW())
-      ON CONFLICT (username) DO UPDATE
-      SET email = EXCLUDED.email, password_hash = EXCLUDED.password_hash
-      RETURNING id, username, email, created_at;
-    `;
+    const insertRes = await pool.query(
+      `INSERT INTO master_users (id, username, email, password_hash, role, created_at, last_login)
+       VALUES ($1, $2, $3, $4, 'USER', NOW(), NOW())
+       RETURNING id, username, email, role, created_at;`,
+      [userId, username, email, passwordHash]
+    );
 
-    const result = await pool.query(query, [
-      userId,
-      username.trim(),
-      email.trim().toLowerCase(),
-      passwordHash,
-    ]);
-
-    const user = result.rows[0];
-    const sessionToken = `token_${crypto.randomBytes(24).toString('hex')}`;
+    const user = insertRes.rows[0];
+    const tokens = await issueTokenPair(user);
 
     return res.status(201).json({
       success: true,
-      token: sessionToken,
-      user,
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      expiresIn: tokens.expiresIn,
+      user: serializeUser(user),
     });
   } catch (err) {
+    if (err && err.code === '23505') {
+      return res.status(409).json({
+        success: false,
+        code: 'USER_ALREADY_EXISTS',
+        error: 'Nome de usuário ou e-mail já cadastrado.',
+      });
+    }
     console.error('[BFF Auth] Erro em /api/auth/register:', err.message);
     return res.status(500).json({
       success: false,
-      error: err?.message || 'Falha ao registrar usuario mestre.',
+      error: 'Falha interna ao registrar conta de usuário.',
     });
   }
 });
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', authRateLimiter, async (req, res) => {
+  const parsed = loginSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      success: false,
+      code: 'VALIDATION_ERROR',
+      error: formatZodError(parsed.error),
+    });
+  }
+
+  const { username, password } = parsed.data;
+
   try {
-    const { username, password } = req.body;
-
-    if (!username || !password) {
-      return res.status(400).json({
-        success: false,
-        error: 'Informe usuario e senha mestre.',
-      });
-    }
-
-    const query = `
-      SELECT id, username, email, created_at, password_hash
-      FROM master_users
-      WHERE (LOWER(username) = LOWER($1) OR LOWER(email) = LOWER($1))
-      LIMIT 1;
-    `;
-
-    const result = await pool.query(query, [username.trim()]);
+    const result = await pool.query(
+      `SELECT id, username, email, role, created_at, password_hash
+       FROM master_users
+       WHERE LOWER(username) = LOWER($1) OR LOWER(email) = LOWER($1)
+       LIMIT 1;`,
+      [username]
+    );
 
     if (result.rows.length === 0) {
       return res.status(401).json({
         success: false,
-        error: 'Credenciais invalidas. Usuario nao cadastrado.',
+        code: 'INVALID_CREDENTIALS',
+        error: 'Usuário ou senha inválidos.',
       });
     }
 
@@ -360,465 +624,1262 @@ app.post('/api/auth/login', async (req, res) => {
 
     if (storedHash.startsWith('$2a$') || storedHash.startsWith('$2b$')) {
       isPasswordValid = await bcrypt.compare(password, storedHash);
-    } else {
+    } else if (/^[a-f0-9]{64}$/i.test(storedHash)) {
       const legacySha256 = crypto.createHash('sha256').update(password).digest('hex');
-      if (storedHash === password || storedHash === legacySha256) {
+      if (crypto.timingSafeEqual(Buffer.from(storedHash, 'utf8'), Buffer.from(legacySha256, 'utf8'))) {
         isPasswordValid = true;
-        try {
-          const newBcryptHash = await bcrypt.hash(password, 10);
-          await pool.query('UPDATE master_users SET password_hash = $1 WHERE id = $2', [
-            newBcryptHash,
-            user.id,
-          ]);
-          console.log(`[BFF Auth] Senha de ${user.username} migrada para bcrypt automaticamente.`);
-        } catch (upgradeErr) {
-          console.warn('[BFF Auth] Falha ao atualizar hash legada:', upgradeErr.message);
-        }
+        const upgradedHash = await bcrypt.hash(password, 10);
+        await pool
+          .query('UPDATE master_users SET password_hash = $1 WHERE id = $2;', [upgradedHash, user.id])
+          .catch(() => {});
       }
     }
 
     if (!isPasswordValid) {
       return res.status(401).json({
         success: false,
-        error: 'Credenciais invalidas. Senha incorreta.',
+        code: 'INVALID_CREDENTIALS',
+        error: 'Usuário ou senha inválidos.',
       });
     }
 
-    await pool.query('UPDATE master_users SET last_login = NOW() WHERE id = $1', [user.id]).catch(() => {});
-
-    const sessionToken = `token_${crypto.randomBytes(24).toString('hex')}`;
+    await pool.query('UPDATE master_users SET last_login = NOW() WHERE id = $1;', [user.id]).catch(() => {});
+    const tokens = await issueTokenPair(user);
 
     return res.json({
       success: true,
-      token: sessionToken,
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        created_at: user.created_at,
-      },
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      expiresIn: tokens.expiresIn,
+      user: serializeUser(user),
     });
   } catch (err) {
     console.error('[BFF Auth] Erro em /api/auth/login:', err.message);
     return res.status(500).json({
       success: false,
-      error: err?.message || 'Falha ao autenticar usuario.',
+      error: 'Falha interna ao autenticar usuário.',
     });
   }
 });
 
-// ============================================================================
-// 5. VINCULO DE CONTAS DE NUVEM
-// ============================================================================
-app.post('/api/cloud/link', async (req, res) => {
-  try {
-    const {
-      masterUserId,
-      provider,
-      accountIdentifier,
-      region,
-      credentialsEncrypted,
-      biometricsEnabled,
-    } = req.body;
+app.post('/api/auth/refresh', authRateLimiter, async (req, res) => {
+  const parsed = refreshSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      success: false,
+      code: 'VALIDATION_ERROR',
+      error: formatZodError(parsed.error),
+    });
+  }
 
-    if (!masterUserId || !provider || !accountIdentifier) {
-      return res.status(400).json({
+  const incomingHash = hashTokenSha256(parsed.data.refreshToken);
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const tokenRes = await client.query(
+      `SELECT rt.id, rt.user_id, rt.expires_at, rt.revoked_at,
+              u.username, u.email, u.role, u.created_at
+       FROM refresh_tokens rt
+       JOIN master_users u ON u.id = rt.user_id
+       WHERE rt.token_hash = $1
+       FOR UPDATE;`,
+      [incomingHash]
+    );
+
+    if (tokenRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(401).json({
         success: false,
-        error: 'Parametros insuficientes para vinculo de nuvem.',
+        code: 'INVALID_REFRESH_TOKEN',
+        error: 'Sessão inválida. Faça login novamente.',
       });
     }
 
-    const id = `cld-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
+    const row = tokenRes.rows[0];
 
-    const query = `
-      INSERT INTO cloud_accounts (
-        id, master_user_id, provider, account_identifier, region,
-        credentials_encrypted, biometrics_enabled, created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-      ON CONFLICT (master_user_id, provider) DO UPDATE
-      SET account_identifier = EXCLUDED.account_identifier,
-          region = EXCLUDED.region,
-          credentials_encrypted = EXCLUDED.credentials_encrypted,
-          biometrics_enabled = EXCLUDED.biometrics_enabled
-      RETURNING *;
-    `;
+    if (row.revoked_at !== null) {
+      await client.query(
+        'UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL;',
+        [row.user_id]
+      );
+      await client.query('COMMIT');
+      return res.status(401).json({
+        success: false,
+        code: 'REFRESH_TOKEN_REUSED',
+        error: 'Sessão revogada por segurança. Faça login novamente.',
+      });
+    }
 
-    const result = await pool.query(query, [
-      id,
-      masterUserId,
-      provider,
-      accountIdentifier,
-      region || 'sa-saopaulo-1',
-      credentialsEncrypted || '{}',
-      !!biometricsEnabled,
-    ]);
+    if (new Date(row.expires_at).getTime() <= Date.now()) {
+      await client.query('UPDATE refresh_tokens SET revoked_at = NOW() WHERE id = $1;', [row.id]);
+      await client.query('COMMIT');
+      return res.status(401).json({
+        success: false,
+        code: 'REFRESH_TOKEN_EXPIRED',
+        error: 'Sua sessão expirou. Faça login novamente.',
+      });
+    }
+
+    const user = {
+      id: row.user_id,
+      username: row.username,
+      email: row.email,
+      role: row.role || 'USER',
+      created_at: row.created_at,
+    };
+
+    const newRawRefresh = crypto.randomBytes(48).toString('hex');
+    const newHash = hashTokenSha256(newRawRefresh);
+    const newId = `rt-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
+    const newExpiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000);
+
+    await client.query(
+      'UPDATE refresh_tokens SET revoked_at = NOW(), replaced_by_hash = $1 WHERE id = $2;',
+      [newHash, row.id]
+    );
+
+    await client.query(
+      `INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at, created_at)
+       VALUES ($1, $2, $3, $4, NOW());`,
+      [newId, user.id, newHash, newExpiresAt]
+    );
+
+    await client.query('COMMIT');
+
+    const accessToken = signAccessToken(user);
 
     return res.json({
       success: true,
-      message: `Provedor ${provider} registrado com sucesso na base relacional.`,
-      account: result.rows[0],
+      accessToken,
+      refreshToken: newRawRefresh,
+      expiresIn: 900,
+      user: serializeUser(user),
     });
   } catch (err) {
-    console.error('[BFF Cloud] Erro em /api/cloud/link:', err.message);
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[BFF Auth] Erro em /api/auth/refresh:', err.message);
     return res.status(500).json({
       success: false,
-      error: err?.message || 'Falha ao registrar provedor de nuvem.',
+      error: 'Falha interna ao renovar sessão.',
     });
+  } finally {
+    client.release();
   }
 });
 
-// ============================================================================
-// 6. GESTAO DINAMICA DE RECURSOS OCI (GET, POST, DELETE)
-// ============================================================================
+app.post('/api/auth/logout', authRateLimiter, async (req, res) => {
+  const parsed = logoutSchema.safeParse(req.body || {});
+  const rawRefresh = parsed.success ? parsed.data.refreshToken : undefined;
 
-/**
- * Obtem a telemetria do host local (VM OCI)
- */
-const getRealHostMetrics = () => {
-  const cpuCount = os.cpus().length || 4;
-  const load1m = os.loadavg()[0];
-  const realCpuPercent = Math.min(
-    100,
-    Math.max(8, Number(((load1m / cpuCount) * 100).toFixed(1)))
-  );
-  const totalMem = os.totalmem();
-  const freeMem = os.freemem();
-  const realMemPercent = Number((((totalMem - freeMem) / totalMem) * 100).toFixed(1));
-
-  return {
-    cpuPercent: realCpuPercent,
-    memoryPercent: realMemPercent,
-    cpuCount,
-    uptimeSeconds: Math.floor(os.uptime()),
-    load1m,
-  };
-};
-
-/**
- * GET /api/clouds/instances
- * Lista recursos OCI dinamicamente:
- * 1. Tenta API REST oficial da OCI via Assinador RSA-SHA256 (se credenciais presentes)
- * 2. Consulta tabela instances_cache no PostgreSQL
- * 3. Enriquece com telemetria viva de kernel Linux para o host local
- */
-const handleGetInstances = async (req, res) => {
   try {
-    const provider = req.query.provider || 'OCI';
-    const userId = req.query.userId || req.query.masterUserId;
-
-    const instances = [];
-    const hostMetrics = getRealHostMetrics();
-
-    // 1. Descoberta via OCI REST API (se o usuario possui chaves OCI salvas ou configuradas)
-    if (provider === 'OCI' || provider === 'ALL') {
+    if (rawRefresh) {
+      const tokenHash = hashTokenSha256(rawRefresh);
+      await pool.query(
+        'UPDATE refresh_tokens SET revoked_at = NOW() WHERE token_hash = $1 AND revoked_at IS NULL;',
+        [tokenHash]
+      );
+    } else if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
       try {
-        let ociCreds = null;
-        if (userId) {
-          const accRes = await pool.query(
-            "SELECT credentials_encrypted, region FROM cloud_accounts WHERE master_user_id = $1 AND provider = 'OCI' LIMIT 1;",
-            [userId]
+        const token = req.headers.authorization.slice(7).trim();
+        const payload = jwt.verify(token, getJwtSecret(), { algorithms: ['HS256'] });
+        if (payload && payload.sub) {
+          await pool.query(
+            'UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL;',
+            [String(payload.sub)]
           );
-          if (accRes.rows.length > 0 && accRes.rows[0].credentials_encrypted) {
-            try {
-              ociCreds = JSON.parse(accRes.rows[0].credentials_encrypted);
-              if (accRes.rows[0].region) ociCreds.region = accRes.rows[0].region;
-            } catch (pErr) {}
-          }
         }
-
-        // Fallback para variaveis de ambiente na VM OCI
-        if (!ociCreds && process.env.OCI_TENANCY_ID && process.env.OCI_USER_ID && process.env.OCI_PRIVATE_KEY) {
-          ociCreds = {
-            tenancyId: process.env.OCI_TENANCY_ID,
-            userId: process.env.OCI_USER_ID,
-            fingerprint: process.env.OCI_FINGERPRINT,
-            privateKey: process.env.OCI_PRIVATE_KEY.replace(/\\n/g, '\n'),
-            region: process.env.OCI_REGION || 'sa-saopaulo-1',
-          };
-        }
-
-        // Se houver credenciais com chave privada, executa a chamada real na API OCI
-        if (ociCreds && ociCreds.privateKey && ociCreds.tenancyId) {
-          console.log(`[BFF OCI Signer] Consultando Compute Instances na regiao ${ociCreds.region || 'sa-saopaulo-1'}...`);
-          const ociComputeEndpoint = `/20160918/instances?compartmentId=${encodeURIComponent(ociCreds.tenancyId)}`;
-          const ociResult = await queryOciRestApi({
-            tenancyId: ociCreds.tenancyId,
-            userId: ociCreds.userId,
-            fingerprint: ociCreds.fingerprint,
-            privateKey: ociCreds.privateKey,
-            region: ociCreds.region || 'sa-saopaulo-1',
-            endpoint: ociComputeEndpoint,
-          });
-
-          if (Array.isArray(ociResult)) {
-            ociResult.forEach((ociItem) => {
-              const isHostVm = (ociItem.displayName || '').includes('sidebrain') || ociItem.id.includes('sid3br41n');
-              instances.push({
-                id: ociItem.id,
-                ocid: ociItem.id,
-                provider: 'OCI',
-                name: ociItem.displayName || 'OCI Compute Node',
-                service: 'OCI_COMPUTE',
-                shape: ociItem.shape || 'VM.Standard.A1.Flex',
-                status: ociItem.lifecycleState === 'RUNNING' ? 'HEALTHY' : 'CRITICAL',
-                lifecycleState: ociItem.lifecycleState || 'RUNNING',
-                cpu_usage: isHostVm ? hostMetrics.cpuPercent : 15.4,
-                memory_usage: isHostVm ? hostMetrics.memoryPercent : 32.1,
-                private_ip: '10.0.0.128',
-                public_ip: '167.234.241.171',
-                region: ociCreds.region || 'sa-saopaulo-1',
-                ocpus: ociItem.shapeConfig ? ociItem.shapeConfig.ocpus : 4,
-                memory_in_gbs: ociItem.shapeConfig ? ociItem.shapeConfig.memoryInGBs : 24,
-                availability_sla: 99.98,
-                last_updated: new Date().toISOString(),
-                source: 'LIVE_OCI_REST',
-                metricsSummary: {
-                  cpuPercent: isHostVm ? hostMetrics.cpuPercent : 15.4,
-                  memoryPercent: isHostVm ? hostMetrics.memoryPercent : 32.1,
-                  latencyMs: 3.2,
-                },
-                metadata: {
-                  shape: ociItem.shape || 'VM.Standard.A1.Flex',
-                  availabilityDomain: ociItem.availabilityDomain,
-                  faultDomain: ociItem.faultDomain,
-                },
-              });
-            });
-          }
-        }
-      } catch (ociApiErr) {
-        console.warn('[BFF OCI Signer] API REST OCI nao consultada (usando banco/host):', ociApiErr.message);
+      } catch (_jwtErr) {
+        // Ignora token expirado durante logout
       }
-    }
-
-    // 2. Consulta recursos cadastrados em instances_cache no PostgreSQL
-    try {
-      let dbQuery = 'SELECT * FROM instances_cache';
-      const dbParams = [];
-      if (provider !== 'ALL') {
-        dbQuery += ' WHERE provider = $1';
-        dbParams.push(provider);
-      }
-      dbQuery += ' ORDER BY created_at ASC;';
-
-      const dbRes = await pool.query(dbQuery, dbParams);
-      if (dbRes.rows && dbRes.rows.length > 0) {
-        dbRes.rows.forEach((row) => {
-          if (!instances.some((item) => item.id === row.id || item.name === row.name)) {
-            const isLocalHost = (row.public_ip === '167.234.241.171') || (row.name && row.name.includes('sidebrain'));
-            const cpuVal = isLocalHost ? hostMetrics.cpuPercent : parseFloat(row.cpu_usage || 12.5);
-            const memVal = isLocalHost ? hostMetrics.memoryPercent : parseFloat(row.memory_usage || 24.0);
-
-            instances.push({
-              id: row.id,
-              ocid: row.id.startsWith('ocid1.') ? row.id : `ocid1.instance.oc1.sa-saopaulo-1.${row.id}`,
-              provider: row.provider,
-              name: row.name,
-              service: row.resource_type || 'OCI_COMPUTE',
-              shape: row.shape || 'VM.Standard.A1.Flex',
-              status: cpuVal > 85 ? 'CRITICAL' : cpuVal > 70 ? 'WARNING' : (row.status || 'HEALTHY'),
-              lifecycleState: row.status === 'STOPPED' ? 'STOPPED' : 'RUNNING',
-              cpu_usage: cpuVal,
-              memory_usage: memVal,
-              private_ip: row.private_ip || '10.0.0.10',
-              public_ip: row.public_ip || '167.234.241.171',
-              region: row.region || 'sa-saopaulo-1',
-              ocpus: Number(row.ocpus || 2),
-              memory_in_gbs: Number(row.memory_gb || 16),
-              availability_sla: 99.98,
-              last_updated: row.last_updated || new Date().toISOString(),
-              source: isLocalHost ? 'LIVE_OCI_HOST' : 'DATABASE_CACHE',
-              tags: {
-                Environment: 'Production',
-                Role: row.resource_type || 'Cloud-Resource',
-              },
-              metricsSummary: {
-                cpuPercent: cpuVal,
-                memoryPercent: memVal,
-                latencyMs: 3.4,
-              },
-              metadata: {
-                shape: row.shape,
-                publicIp: row.public_ip,
-                privateIp: row.private_ip,
-                ocpuCount: row.ocpus,
-                memoryInGBs: row.memory_gb,
-              },
-            });
-          }
-        });
-      }
-    } catch (dbErr) {
-      console.warn('[BFF Instances] Falha ao consultar instances_cache:', dbErr.message);
-    }
-
-    // 3. Fallback de integridade se a lista estiver vazia (garante visualizacao do host OCI)
-    if (instances.length === 0 && (provider === 'OCI' || provider === 'ALL')) {
-      instances.push({
-        id: 'res-oci-sidebrain-prd',
-        ocid: 'ocid1.instance.oc1.sa-saopaulo-1.ab2x.aaaaaaaasid3br41nprd',
-        provider: 'OCI',
-        name: 'vnic-sidebrain-prd',
-        service: 'OCI_COMPUTE',
-        shape: 'VM.Standard.A1.Flex',
-        status: hostMetrics.cpuPercent > 85 ? 'CRITICAL' : hostMetrics.cpuPercent > 70 ? 'WARNING' : 'HEALTHY',
-        lifecycleState: 'RUNNING',
-        cpu_usage: hostMetrics.cpuPercent,
-        memory_usage: hostMetrics.memoryPercent,
-        private_ip: '10.0.0.128',
-        public_ip: '167.234.241.171',
-        region: 'sa-saopaulo-1',
-        ocpus: 4,
-        memory_in_gbs: 24,
-        availability_sla: 99.98,
-        last_updated: new Date().toISOString(),
-        source: 'LIVE_OCI_HOST',
-        metricsSummary: {
-          cpuPercent: hostMetrics.cpuPercent,
-          memoryPercent: hostMetrics.memoryPercent,
-          latencyMs: 3.4,
-        },
-        metadata: {
-          shape: 'VM.Standard.A1.Flex',
-          publicIp: '167.234.241.171',
-          privateIp: '10.0.0.128',
-        },
-      });
     }
 
     return res.json({
       success: true,
-      source: 'LIVE_CLOUD',
-      provider,
-      count: instances.length,
-      instances,
+      message: 'Sessão encerrada com sucesso.',
     });
   } catch (err) {
-    console.error('[BFF Instances] Erro em /api/clouds/instances:', err.message);
+    console.error('[BFF Auth] Erro em /api/auth/logout:', err.message);
     return res.status(500).json({
       success: false,
-      error: err?.message || 'Falha ao buscar instancias da conta OCI.',
+      error: 'Falha ao encerrar sessão.',
     });
   }
-};
+});
 
-app.get('/api/clouds/instances', handleGetInstances);
-app.get('/api/instances', handleGetInstances);
+// ============================================================================
+// 8. VINCULO DE CONTA OCI (US09): PAREAMENTO POR COMANDO E CONEXAO MANUAL
+// ============================================================================
 
 /**
- * POST /api/clouds/instances
- * Cadastra dinamicamente qualquer recurso/instancia da conta OCI no PostgreSQL
+ * Persiste conta OCI ja validada (AES-256-GCM) para um userId especifico.
+ * Permite multiplas contas/tenancies OCI por usuario; se a mesma tenancy ja existir para o mesmo usuario,
+ * atualiza suas credenciais/regiao sem duplicar o registro da mesma tenancy.
  */
-app.post('/api/clouds/instances', async (req, res) => {
+async function persistValidatedOciAccount(userId, validation, passphrase) {
+  const cipherPayload = encryptCredentials({
+    tenancyOcid: validation.tenancyOcid,
+    userOcid: validation.userOcid,
+    fingerprint: validation.fingerprint,
+    region: validation.region,
+    privateKeyPem: validation.normalizedPem,
+    ...(passphrase ? { passphrase: String(passphrase) } : {}),
+  });
+
+  // Limpa imediatamente a chave PEM normalizada da memoria
+  validation.normalizedPem = '';
+
+  const existingRes = await pool.query(
+    `SELECT id
+     FROM cloud_accounts
+     WHERE master_user_id = $1
+       AND provider = 'OCI'
+       AND auth_mode = 'USER_API_KEY'
+       AND account_identifier = $2
+     LIMIT 1;`,
+    [userId, validation.tenancyOcid]
+  );
+
+  let savedRow;
+  if (existingRes.rows.length > 0) {
+    const existingId = existingRes.rows[0].id;
+    const updRes = await pool.query(
+      `UPDATE cloud_accounts
+       SET tenancy_name = $1,
+           region = $2,
+           subscribed_regions = $3::jsonb,
+           permission_status = $4,
+           encrypted_credentials = $5
+       WHERE id = $6 AND master_user_id = $7
+       RETURNING id, provider, auth_mode, account_identifier, tenancy_name,
+                 region, subscribed_regions, permission_status, biometrics_enabled, created_at;`,
+      [
+        validation.tenancyName,
+        validation.region,
+        JSON.stringify(validation.subscribedRegions || [validation.region]),
+        validation.permissionStatus,
+        cipherPayload,
+        existingId,
+        userId,
+      ]
+    );
+    savedRow = updRes.rows[0];
+  } else {
+    const accountId = `acc-oci-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
+    const insRes = await pool.query(
+      `INSERT INTO cloud_accounts (
+         id, master_user_id, provider, auth_mode, account_identifier, tenancy_name,
+         region, subscribed_regions, permission_status, encrypted_credentials, biometrics_enabled, created_at
+       )
+       VALUES ($1, $2, 'OCI', 'USER_API_KEY', $3, $4, $5, $6::jsonb, $7, $8, FALSE, NOW())
+       RETURNING id, provider, auth_mode, account_identifier, tenancy_name,
+                 region, subscribed_regions, permission_status, biometrics_enabled, created_at;`,
+      [
+        accountId,
+        userId,
+        validation.tenancyOcid,
+        validation.tenancyName,
+        validation.region,
+        JSON.stringify(validation.subscribedRegions || [validation.region]),
+        validation.permissionStatus,
+        cipherPayload,
+      ]
+    );
+    savedRow = insRes.rows[0];
+  }
+
+  invalidateUserOciCache(userId);
+  return serializeAccountRow(savedRow);
+}
+
+/**
+ * Monta o script bash nao interativo executado pelo usuario no OCI Cloud Shell
+ */
+function buildCloudShellPairingScript(publicBaseUrl, code) {
+  const postEndpoint = `${publicBaseUrl}/api/oci/pair/${code}`;
+
+  return `#!/usr/bin/env bash
+# ==============================================================================
+# CloudWatch Dashboard - Pareamento Automático de Conta Oracle Cloud (OCI)
+# Este script é não interativo, cria uma chave RSA 2048 exclusiva para o app
+# e remove todos os arquivos temporários ao finalizar (mesmo em caso de erro).
+# ==============================================================================
+set -euo pipefail
+umask 077
+
+TMP_DIR="$(mktemp -d)"
+cleanup() {
+  rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT INT TERM
+
+echo "============================================================"
+echo " CloudWatch Dashboard — Conectando sua conta Oracle Cloud"
+echo "============================================================"
+
+if [ -z "\${OCI_TENANCY:-}" ] || [ -z "\${OCI_REGION:-}" ]; then
+  echo "❌ Erro: variáveis do OCI Cloud Shell não encontradas (OCI_TENANCY / OCI_REGION)."
+  echo "Execute este comando diretamente no terminal do OCI Cloud Shell no navegador."
+  exit 1
+fi
+
+USER_OCID="\${OCI_CS_USER_OCID:-}"
+if [[ ! "$USER_OCID" =~ ^ocid1\\.user\\. ]]; then
+  echo "⚠️  Sua sessão atual no Cloud Shell utiliza uma conta federada (SSO/Identity Domain sem OCID direto ocid1.user...)."
+  echo "👉 Contas federadas devem utilizar a opção 'Prefiro conectar manualmente' na tela do aplicativo CloudWatch."
+  echo "Nenhum dado foi enviado."
+  exit 1
+fi
+
+for cmd in openssl oci jq curl; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "❌ Erro: utilitário obrigatório '$cmd' não está disponível neste ambiente."
+    exit 1
+  fi
+done
+
+PRIV_KEY="$TMP_DIR/cloudwatch_app_key.pem"
+PUB_KEY="$TMP_DIR/cloudwatch_app_key_public.pem"
+RESP_FILE="$TMP_DIR/pair_response.json"
+
+echo "1/3 Gerando par de chaves RSA 2048 exclusivo para o CloudWatch..."
+openssl genrsa -out "$PRIV_KEY" 2048 >/dev/null 2>&1
+openssl rsa -pubout -in "$PRIV_KEY" -out "$PUB_KEY" >/dev/null 2>&1
+
+FINGERPRINT="$(openssl rsa -pubin -in "$PUB_KEY" -outform DER 2>/dev/null | openssl md5 | awk '{print $NF}' | sed 's/../&:/g; s/:$//' | tr '[:upper:]' '[:lower:]')"
+
+if [ -z "$FINGERPRINT" ]; then
+  echo "❌ Erro ao calcular o fingerprint MD5 DER da chave pública."
+  exit 1
+fi
+
+echo "2/3 Registrando chave pública no seu usuário OCI ($FINGERPRINT)..."
+if ! UPLOAD_OUT="$(oci iam user api-key upload --user-id "$USER_OCID" --key-file "$PUB_KEY" 2>&1)"; then
+  if echo "$UPLOAD_OUT" | grep -qiE "LimitExceeded|QuotaExceeded|maximum|3"; then
+    echo "❌ Limite máximo de chaves de API atingido no seu usuário OCI (máximo de 3 chaves)."
+    echo "👉 No Console da Oracle Cloud, abra: Perfil (canto superior direito) > Configurações do usuário > Chaves de API,"
+    echo "   exclua uma chave antiga que não utiliza mais e gere um novo comando no aplicativo."
+  else
+    echo "❌ Não foi possível enviar a chave pública para o IAM da Oracle Cloud:"
+    echo "$UPLOAD_OUT"
+  fi
+  exit 1
+fi
+
+echo "3/3 Validando credenciais e concluindo vínculo seguro com o CloudWatch..."
+HTTP_CODE="$(jq -n \\
+  --arg tenancyOcid "$OCI_TENANCY" \\
+  --arg userOcid "$USER_OCID" \\
+  --arg region "$OCI_REGION" \\
+  --arg fingerprint "$FINGERPRINT" \\
+  --rawfile privateKeyPem "$PRIV_KEY" \\
+  '{tenancyOcid: $tenancyOcid, userOcid: $userOcid, region: $region, fingerprint: $fingerprint, privateKeyPem: $privateKeyPem}' | \\
+  curl -sS -o "$RESP_FILE" -w "%{http_code}" \\
+    -X POST "${postEndpoint}" \\
+    -H "Content-Type: application/json" \\
+    --data-binary @-)"
+
+# Apaga imediatamente as chaves locais antes mesmo do término do script
+rm -f "$PRIV_KEY" "$PUB_KEY"
+
+SERVER_MSG="$(jq -r '.message // .error // "Resposta inesperada do servidor."' "$RESP_FILE" 2>/dev/null || cat "$RESP_FILE")"
+echo ""
+echo "$SERVER_MSG"
+
+if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+  echo ""
+  echo "✅ Conectado! Pode voltar ao app."
+  exit 0
+else
+  echo ""
+  echo "❌ O pareamento não foi concluído (HTTP $HTTP_CODE)."
+  exit 1
+fi
+`;
+}
+
+/**
+ * POST /api/oci/pairing (requireAuth)
+ * Cria sessao de pareamento de 12 caracteres (TTL 10 min, uso unico, salva apenas SHA-256 do codigo).
+ */
+app.post('/api/oci/pairing', requireAuth, pairingRateLimiter, async (req, res) => {
+  let publicBaseUrl;
   try {
-    const {
-      userId,
-      name,
-      provider = 'OCI',
-      resourceType = 'Compute Instance',
-      shape = 'VM.Standard.A1.Flex',
-      publicIp = '167.234.241.171',
-      privateIp = '10.0.0.10',
-      region = 'sa-saopaulo-1',
-      ocpus = 2,
-      memoryGb = 16,
-    } = req.body;
+    publicBaseUrl = getValidatedPublicBaseUrl();
+  } catch (cfgErr) {
+    return res.status(400).json({
+      success: false,
+      code: cfgErr.code || 'PUBLIC_BASE_URL_ERROR',
+      error: cfgErr.message,
+    });
+  }
 
-    if (!name) {
-      return res.status(400).json({
-        success: false,
-        error: 'O nome do recurso OCI e obrigatorio.',
-      });
-    }
+  try {
+    const sessionId = `pair-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
+    const rawCode = generateSecurePairingCode(12);
+    const codeHash = hashTokenSha256(rawCode);
+    const expiresAt = new Date(Date.now() + PAIRING_TTL_MS);
 
-    const instanceId = `res-oci-${Date.now().toString(36)}-${crypto.randomBytes(2).toString('hex')}`;
+    await pool.query(
+      `INSERT INTO oci_pairing_sessions (id, user_id, code_hash, status, expires_at, created_at)
+       VALUES ($1, $2, $3, 'PENDING', $4, NOW());`,
+      [sessionId, req.user.id, codeHash, expiresAt]
+    );
 
-    const query = `
-      INSERT INTO instances_cache (
-        id, user_id, provider, name, resource_type, shape, status,
-        private_ip, public_ip, region, ocpus, memory_gb, cpu_usage, memory_usage,
-        created_at, last_updated
-      ) VALUES ($1, $2, $3, $4, $5, $6, 'HEALTHY', $7, $8, $9, $10, $11, 15.0, 30.0, NOW(), NOW())
-      RETURNING *;
-    `;
-
-    const result = await pool.query(query, [
-      instanceId,
-      userId || 'usr-default',
-      provider,
-      name.trim(),
-      resourceType,
-      shape,
-      privateIp,
-      publicIp,
-      region,
-      Number(ocpus),
-      Number(memoryGb),
-    ]);
-
-    const created = result.rows[0];
+    const command = `curl -fsSL ${publicBaseUrl}/p/${rawCode} | bash`;
 
     return res.status(201).json({
       success: true,
-      message: `Recurso OCI "${name}" cadastrado com sucesso no monitoramento.`,
-      instance: {
-        id: created.id,
-        name: created.name,
-        provider: created.provider,
-        shape: created.shape,
-        service: created.resource_type,
-        status: created.status,
-        public_ip: created.public_ip,
-        private_ip: created.private_ip,
-        region: created.region,
-        ocpus: Number(created.ocpus),
-        memory_in_gbs: Number(created.memory_gb),
-        cpu_usage: Number(created.cpu_usage),
-        memory_usage: Number(created.memory_usage),
-        source: 'DATABASE_CACHE',
-      },
+      id: sessionId,
+      code: rawCode,
+      expiresAt: expiresAt.toISOString(),
+      ttlSeconds: Math.floor(PAIRING_TTL_MS / 1000),
+      command,
     });
   } catch (err) {
-    console.error('[BFF Instances] Erro em POST /api/clouds/instances:', err.message);
+    console.error('[BFF OCI Pairing] Erro ao criar sessao:', err.message);
     return res.status(500).json({
       success: false,
-      error: err?.message || 'Falha ao cadastrar recurso no banco de dados.',
+      error: 'Falha interna ao gerar comando de pareamento.',
     });
   }
 });
 
 /**
- * DELETE /api/clouds/instances/:id
- * Remove recurso do PostgreSQL
+ * GET /p/:codigo (publico, com rate limit)
+ * Devolve text/plain com o script bash para OCI Cloud Shell se o codigo estiver valido e dentro do TTL.
+ * Pode ser lido mais de uma vez dentro do TTL para inspecao pelo usuario.
  */
-app.delete('/api/clouds/instances/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
+app.get('/p/:codigo', pairingRateLimiter, async (req, res) => {
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
 
-    await pool.query('DELETE FROM instances_cache WHERE id = $1;', [id]);
-    await pool.query('DELETE FROM instances WHERE id = $1;').catch(() => {});
+  let publicBaseUrl;
+  try {
+    publicBaseUrl = getValidatedPublicBaseUrl();
+  } catch (cfgErr) {
+    return res.status(400).send(`# Erro de configuracao do servidor: ${cfgErr.message}\n`);
+  }
+
+  const rawCode = String(req.params.codigo || '').trim();
+  if (!/^[A-Za-z0-9]{12}$/.test(rawCode)) {
+    return res.status(404).send('# Código de pareamento inválido.\n');
+  }
+
+  try {
+    const codeHash = hashTokenSha256(rawCode);
+    const result = await pool.query(
+      `SELECT id, status, expires_at, used_at
+       FROM oci_pairing_sessions
+       WHERE code_hash = $1
+       LIMIT 1;`,
+      [codeHash]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).send('# Código de pareamento inválido ou inexistente.\n');
+    }
+
+    const session = result.rows[0];
+
+    if (session.used_at !== null || session.status !== 'PENDING') {
+      return res
+        .status(410)
+        .send('# Este código de pareamento já foi utilizado. Gere um novo comando no aplicativo.\n');
+    }
+
+    if (new Date(session.expires_at).getTime() <= Date.now()) {
+      await pool
+        .query("UPDATE oci_pairing_sessions SET status = 'EXPIRED' WHERE id = $1;", [session.id])
+        .catch(() => {});
+      return res
+        .status(410)
+        .send('# Este código de pareamento expirou (limite de 10 minutos). Gere um novo comando no aplicativo.\n');
+    }
+
+    return res.status(200).send(buildCloudShellPairingScript(publicBaseUrl, rawCode));
+  } catch (err) {
+    console.error('[BFF OCI Pairing] Erro em GET /p/:codigo:', err.message);
+    return res.status(500).send('# Erro interno ao carregar script de pareamento.\n');
+  }
+});
+
+/**
+ * POST /api/oci/pair/:codigo (publico, autenticado pelo codigo de uso unico, com rate limit)
+ * Valida codigo atomico -> roda validateOciCredentials -> salva AES-256-GCM -> marca CONNECTED ou FAILED.
+ */
+app.post('/api/oci/pair/:codigo', pairingRateLimiter, async (req, res) => {
+  try {
+    getValidatedPublicBaseUrl();
+  } catch (cfgErr) {
+    return res.status(400).json({
+      success: false,
+      code: cfgErr.code || 'HTTPS_REQUIRED_FOR_PAIRING',
+      error: cfgErr.message,
+      message: cfgErr.message,
+    });
+  }
+
+  const rawCode = String(req.params.codigo || '').trim();
+  if (!/^[A-Za-z0-9]{12}$/.test(rawCode)) {
+    return res.status(404).json({
+      success: false,
+      code: 'INVALID_PAIRING_CODE',
+      error: 'Código de pareamento inválido.',
+      message: 'Código de pareamento inválido.',
+    });
+  }
+
+  const parsedBody = ociCredentialsPayloadSchema.safeParse(req.body);
+  // Zera qualquer referencia a chave privada no req.body imediatamente apos o parse
+  if (req.body && typeof req.body === 'object' && req.body.privateKeyPem) {
+    req.body.privateKeyPem = '';
+  }
+
+  if (!parsedBody.success) {
+    const errMsg = formatZodError(parsedBody.error);
+    return res.status(400).json({
+      success: false,
+      code: 'VALIDATION_ERROR',
+      error: errMsg,
+      message: errMsg,
+    });
+  }
+
+  const codeHash = hashTokenSha256(rawCode);
+  const client = await pool.connect();
+  let pairingSession = null;
+
+  try {
+    await client.query('BEGIN');
+
+    const sessionRes = await client.query(
+      `SELECT id, user_id, status, expires_at, used_at
+       FROM oci_pairing_sessions
+       WHERE code_hash = $1
+       FOR UPDATE;`,
+      [codeHash]
+    );
+
+    if (sessionRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({
+        success: false,
+        code: 'INVALID_PAIRING_CODE',
+        error: 'Código de pareamento inválido ou inexistente.',
+        message: 'Código de pareamento inválido ou inexistente.',
+      });
+    }
+
+    const row = sessionRes.rows[0];
+
+    if (row.used_at !== null || row.status !== 'PENDING') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        success: false,
+        code: 'PAIRING_CODE_ALREADY_USED',
+        error: 'Este código de pareamento já foi utilizado. Gere um novo comando no aplicativo.',
+        message: 'Este código de pareamento já foi utilizado. Gere um novo comando no aplicativo.',
+      });
+    }
+
+    if (new Date(row.expires_at).getTime() <= Date.now()) {
+      await client.query(
+        "UPDATE oci_pairing_sessions SET status = 'EXPIRED' WHERE id = $1;",
+        [row.id]
+      );
+      await client.query('COMMIT');
+      return res.status(410).json({
+        success: false,
+        code: 'PAIRING_CODE_EXPIRED',
+        error: 'Este código de pareamento expirou (limite de 10 minutos). Gere um novo comando no aplicativo.',
+        message: 'Este código de pareamento expirou (limite de 10 minutos). Gere um novo comando no aplicativo.',
+      });
+    }
+
+    // Consome o codigo atomicamente antes de liberar o lock (garantia estrita de uso unico)
+    await client.query(
+      'UPDATE oci_pairing_sessions SET used_at = NOW() WHERE id = $1;',
+      [row.id]
+    );
+    await client.query('COMMIT');
+    pairingSession = row;
+  } catch (txErr) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[BFF OCI Pairing] Erro transacional:', txErr.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Falha interna ao validar sessão de pareamento.',
+      message: 'Falha interna ao validar sessão de pareamento.',
+    });
+  } finally {
+    client.release();
+  }
+
+  try {
+    let validation = await validateOciCredentials(parsedBody.data);
+
+    // No Cloud Shell, o upload recem-feito da API key pode levar ~1.5s para propagar no IAM regional
+    if (!validation.ok && validation.code === 'OCI_INVALID_CREDENTIALS') {
+      await new Promise((r) => setTimeout(r, 1500));
+      validation = await validateOciCredentials(parsedBody.data);
+    }
+
+    // Limpa a chave privada do objeto parseado
+    parsedBody.data.privateKeyPem = '';
+
+    if (!validation.ok) {
+      await pool.query(
+        `UPDATE oci_pairing_sessions
+         SET status = 'FAILED',
+             error_code = $1,
+             error_message = $2
+         WHERE id = $3;`,
+        [validation.code, validation.message, pairingSession.id]
+      );
+
+      return res.status(validation.httpStatus || 400).json({
+        success: false,
+        code: validation.code,
+        error: validation.message,
+        message: validation.message,
+      });
+    }
+
+    const savedAccount = await persistValidatedOciAccount(
+      pairingSession.user_id,
+      validation,
+      parsedBody.data.passphrase
+    );
+
+    let instanceCount = 0;
+    if (validation.permissionStatus === 'OK') {
+      try {
+        const regionObj = common.Region.fromRegionId(validation.region);
+        instanceCount = await countVisibleInstances(validation.provider, regionObj);
+      } catch (_cntErr) {
+        instanceCount = 0;
+      }
+    }
+
+    await pool.query(
+      `UPDATE oci_pairing_sessions
+       SET status = 'CONNECTED',
+           account_id = $1,
+           tenancy_name = $2,
+           region = $3,
+           instance_count = $4,
+           permission_status = $5
+       WHERE id = $6;`,
+      [
+        savedAccount.id,
+        validation.tenancyName,
+        validation.region,
+        instanceCount,
+        validation.permissionStatus,
+        pairingSession.id,
+      ]
+    );
+
+    const baseMsg = `Conta OCI "${validation.tenancyName}" (${validation.region}) vinculada com sucesso! Instâncias visíveis: ${instanceCount}.`;
+    const fullMsg =
+      validation.permissionStatus === 'NO_PERMISSION'
+        ? `${baseMsg}\n⚠️ Atenção: seu usuário ainda não possui policies de leitura para listar recursos. Veja as policies recomendadas na tela do aplicativo.`
+        : baseMsg;
+
+    return res.status(200).json({
+      success: true,
+      accountId: savedAccount.id,
+      tenancyName: validation.tenancyName,
+      region: validation.region,
+      instanceCount,
+      permissionStatus: validation.permissionStatus,
+      hint: validation.hint,
+      message: fullMsg,
+    });
+  } catch (err) {
+    parsedBody.data.privateKeyPem = '';
+    console.error('[BFF OCI Pairing] Erro ao finalizar pareamento:', err.message);
+    await pool
+      .query(
+        `UPDATE oci_pairing_sessions
+         SET status = 'FAILED',
+             error_code = 'INTERNAL_ERROR',
+             error_message = 'Falha interna ao salvar vínculo da conta OCI.'
+         WHERE id = $1;`,
+        [pairingSession.id]
+      )
+      .catch(() => {});
+
+    return res.status(500).json({
+      success: false,
+      code: 'INTERNAL_ERROR',
+      error: 'Falha interna ao concluir o pareamento com a Oracle Cloud.',
+      message: 'Falha interna ao concluir o pareamento com a Oracle Cloud.',
+    });
+  }
+});
+
+/**
+ * GET /api/oci/pairing/:id/status (requireAuth)
+ * Consulta o estado da sessao de pareamento pertencente exclusivamente ao usuario autenticado.
+ */
+app.get('/api/oci/pairing/:id/status', requireAuth, async (req, res) => {
+  const sessionId = String(req.params.id || '').trim();
+
+  try {
+    const result = await pool.query(
+      `SELECT id, user_id, status, account_id, tenancy_name, region,
+              instance_count, permission_status, error_code, error_message, expires_at
+       FROM oci_pairing_sessions
+       WHERE id = $1 AND user_id = $2
+       LIMIT 1;`,
+      [sessionId, req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        code: 'PAIRING_SESSION_NOT_FOUND',
+        error: 'Sessão de pareamento não encontrada.',
+      });
+    }
+
+    const row = result.rows[0];
+    let currentStatus = row.status;
+
+    if (currentStatus === 'PENDING' && new Date(row.expires_at).getTime() <= Date.now()) {
+      currentStatus = 'EXPIRED';
+      await pool
+        .query("UPDATE oci_pairing_sessions SET status = 'EXPIRED' WHERE id = $1;", [row.id])
+        .catch(() => {});
+    }
 
     return res.json({
       success: true,
-      message: `Recurso ${id} removido com sucesso do monitoramento.`,
-      id,
+      id: row.id,
+      status: currentStatus,
+      accountId: row.account_id || null,
+      tenancyName: row.tenancy_name || null,
+      region: row.region || null,
+      instanceCount: typeof row.instance_count === 'number' ? row.instance_count : null,
+      permissionStatus: row.permission_status || null,
+      hint: row.permission_status === 'NO_PERMISSION' ? OCI_READONLY_POLICIES_HINT : null,
+      errorCode:
+        currentStatus === 'EXPIRED'
+          ? 'PAIRING_CODE_EXPIRED'
+          : row.error_code || null,
+      errorMessage:
+        currentStatus === 'EXPIRED'
+          ? 'O comando expirou após 10 minutos sem uso. Gere um novo comando.'
+          : row.error_message || null,
+      expiresAt:
+        row.expires_at instanceof Date ? row.expires_at.toISOString() : row.expires_at,
     });
   } catch (err) {
-    console.error('[BFF Instances] Erro em DELETE /api/clouds/instances/:id:', err.message);
+    console.error('[BFF OCI Pairing] Erro ao consultar status:', err.message);
     return res.status(500).json({
       success: false,
-      error: err?.message || 'Falha ao excluir recurso.',
+      error: 'Falha ao consultar status do pareamento.',
+    });
+  }
+});
+
+/**
+ * POST /api/oci/accounts (requireAuth)
+ * Conexao manual de conta OCI passando obrigatoriamente por validateOciCredentials + AES-256-GCM.
+ */
+app.post('/api/oci/accounts', requireAuth, async (req, res) => {
+  const parsed = ociCredentialsPayloadSchema.safeParse(req.body);
+  if (req.body && typeof req.body === 'object') {
+    req.body.privateKeyPem = '';
+    if (req.body.passphrase) req.body.passphrase = '';
+  }
+
+  if (!parsed.success) {
+    return res.status(400).json({
+      success: false,
+      code: 'VALIDATION_ERROR',
+      error: formatZodError(parsed.error),
+    });
+  }
+
+  try {
+    const validation = await validateOciCredentials(parsed.data);
+    const passphraseCopy = parsed.data.passphrase;
+    parsed.data.privateKeyPem = '';
+    parsed.data.passphrase = undefined;
+
+    if (!validation.ok) {
+      return res.status(validation.httpStatus || 400).json({
+        success: false,
+        code: validation.code,
+        error: validation.message,
+      });
+    }
+
+    const savedAccount = await persistValidatedOciAccount(
+      req.user.id,
+      validation,
+      passphraseCopy
+    );
+
+    return res.status(201).json({
+      success: true,
+      source: 'LIVE_OCI',
+      account: savedAccount,
+      permissionStatus: validation.permissionStatus,
+      hint: validation.hint,
+    });
+  } catch (err) {
+    parsed.data.privateKeyPem = '';
+    console.error('[BFF OCI Accounts] Erro em POST /api/oci/accounts:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Falha interna ao validar e salvar conta Oracle Cloud.',
+    });
+  }
+});
+
+/**
+ * POST /api/oci/accounts/demo (requireAuth)
+ * Exclusivo para OWNER_USERNAME: habilita o provedor INSTANCE_PRINCIPAL da VM da OCI como conta conectada.
+ */
+app.post('/api/oci/accounts/demo', requireAuth, async (req, res) => {
+  if (!isOwnerUsername(req.user.username)) {
+    return res.status(403).json({
+      success: false,
+      code: 'FORBIDDEN_INSTANCE_PRINCIPAL',
+      error: 'Recurso disponível exclusivamente para o administrador proprietário do servidor.',
+    });
+  }
+
+  try {
+    const ctx = await getOciProvider(req.user.id, 'INSTANCE_PRINCIPAL');
+    let tenancyName = 'Tenancy da VM (Instance Principal)';
+    let permissionStatus = 'OK';
+    let hint = null;
+
+    if (ctx.tenancyOcid) {
+      try {
+        const iamClient = new identity.IdentityClient({
+          authenticationDetailsProvider: ctx.provider,
+        });
+        iamClient.region = ctx.regionObj;
+        const tenRes = await iamClient.getTenancy({
+          tenancyId: ctx.tenancyOcid,
+          retryConfiguration: common.NoRetryConfigurationDetails,
+        });
+        if (tenRes && tenRes.tenancy && tenRes.tenancy.name) {
+          tenancyName = tenRes.tenancy.name;
+        }
+      } catch (_e) {
+        // mantem nome padrao caso Dynamic Group nao tenha inspect tenancies
+      }
+    }
+
+    try {
+      await countVisibleInstances(ctx.provider, ctx.regionObj);
+    } catch (permErr) {
+      const st = Number(permErr && permErr.statusCode ? permErr.statusCode : 0);
+      if (st === 403 || st === 404) {
+        permissionStatus = 'NO_PERMISSION';
+        hint = OCI_READONLY_POLICIES_HINT;
+      }
+    }
+
+    const existing = await pool.query(
+      `SELECT id FROM cloud_accounts
+       WHERE master_user_id = $1 AND provider = 'OCI' AND auth_mode = 'INSTANCE_PRINCIPAL'
+       LIMIT 1;`,
+      [req.user.id]
+    );
+
+    let row;
+    if (existing.rows.length > 0) {
+      const upd = await pool.query(
+        `UPDATE cloud_accounts
+         SET account_identifier = $1,
+             tenancy_name = $2,
+             region = $3,
+             permission_status = $4
+         WHERE id = $5
+         RETURNING id, provider, auth_mode, account_identifier, tenancy_name,
+                   region, subscribed_regions, permission_status, biometrics_enabled, created_at;`,
+        [
+          ctx.tenancyOcid || 'instance-principal',
+          tenancyName,
+          ctx.region,
+          permissionStatus,
+          existing.rows[0].id,
+        ]
+      );
+      row = upd.rows[0];
+    } else {
+      const accId = `acc-oci-ip-${Date.now().toString(36)}`;
+      const ins = await pool.query(
+        `INSERT INTO cloud_accounts (
+           id, master_user_id, provider, auth_mode, account_identifier, tenancy_name,
+           region, subscribed_regions, permission_status, encrypted_credentials, biometrics_enabled, created_at
+         )
+         VALUES ($1, $2, 'OCI', 'INSTANCE_PRINCIPAL', $3, $4, $5, $6::jsonb, $7, NULL, FALSE, NOW())
+         RETURNING id, provider, auth_mode, account_identifier, tenancy_name,
+                   region, subscribed_regions, permission_status, biometrics_enabled, created_at;`,
+        [
+          accId,
+          req.user.id,
+          ctx.tenancyOcid || 'instance-principal',
+          tenancyName,
+          ctx.region,
+          JSON.stringify([ctx.region]),
+          permissionStatus,
+        ]
+      );
+      row = ins.rows[0];
+    }
+
+    invalidateUserOciCache(req.user.id);
+
+    return res.json({
+      success: true,
+      source: 'LIVE_OCI',
+      account: serializeAccountRow(row),
+      permissionStatus,
+      hint,
+    });
+  } catch (err) {
+    return res.status(err.httpStatus || 503).json({
+      success: false,
+      code: err.code || 'INSTANCE_PRINCIPAL_UNAVAILABLE',
+      error:
+        err.message ||
+        'Não foi possível autenticar via Instance Principal nesta VM.',
+    });
+  }
+});
+
+/**
+ * GET /api/oci/accounts (requireAuth)
+ * Lista as contas conectadas do usuario autenticado SEM segredos (nunca le encrypted_credentials).
+ */
+app.get('/api/oci/accounts', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, provider, auth_mode, account_identifier, tenancy_name,
+              region, subscribed_regions, permission_status, biometrics_enabled, created_at
+       FROM cloud_accounts
+       WHERE master_user_id = $1
+       ORDER BY created_at DESC;`,
+      [req.user.id]
+    );
+
+    return res.json({
+      success: true,
+      source: 'LIVE_OCI',
+      isOwner: isOwnerUsername(req.user.username),
+      accounts: result.rows.map(serializeAccountRow),
+    });
+  } catch (err) {
+    console.error('[BFF OCI Accounts] Erro em GET /api/oci/accounts:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Falha ao carregar contas conectadas.',
+    });
+  }
+});
+
+/**
+ * DELETE /api/oci/accounts/:id (requireAuth)
+ * Remove conta conectada pertencente estritamente ao usuario autenticado.
+ */
+app.delete('/api/oci/accounts/:id', requireAuth, async (req, res) => {
+  const accountId = String(req.params.id || '').trim();
+
+  try {
+    const delRes = await pool.query(
+      `DELETE FROM cloud_accounts
+       WHERE id = $1 AND master_user_id = $2
+       RETURNING id;`,
+      [accountId, req.user.id]
+    );
+
+    if (delRes.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        code: 'ACCOUNT_NOT_FOUND',
+        error: 'Conta não encontrada para este usuário.',
+      });
+    }
+
+    invalidateUserOciCache(req.user.id);
+
+    return res.json({
+      success: true,
+      deletedId: accountId,
+      message:
+        'Conta desconectada do aplicativo. Recomendamos também remover a chave de API correspondente no Console da Oracle Cloud (Configurações do usuário > Chaves de API).',
+    });
+  } catch (err) {
+    console.error('[BFF OCI Accounts] Erro em DELETE /api/oci/accounts/:id:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Falha ao desconectar conta.',
     });
   }
 });
 
 // ============================================================================
-// 7. SONDAGEM ATIVA DE REDE ESTILO ZABBIX (TCP HANDSHAKE REAL)
+// 9. ENDPOINTS REAIS DE DADOS DA OCI (STATUS, INSTANCES, METRICS, LOGS)
 // ============================================================================
 
 /**
- * Realiza sonda TCP em uma porta especifica com timeout
+ * GET /api/oci/status (requireAuth, opcional ?accountId=)
  */
+app.get('/api/oci/status', requireAuth, async (req, res) => {
+  const accountId = req.query.accountId ? String(req.query.accountId).trim() : null;
+  const isOwner = isOwnerUsername(req.user.username);
+
+  let ctx;
+  try {
+    ctx = await getOciProvider(req.user.id, accountId);
+  } catch (err) {
+    if (err.code === 'NO_OCI_ACCOUNT') {
+      return res.json({
+        success: true,
+        source: 'LIVE_OCI',
+        connected: false,
+        authMode: 'NONE',
+        tenancyOcid: null,
+        tenancyName: null,
+        region: null,
+        instanceCount: 0,
+        permissionStatus: 'NONE',
+        isOwner,
+      });
+    }
+    return res.status(err.httpStatus || 500).json({
+      success: false,
+      code: err.code || 'OCI_PROVIDER_ERROR',
+      message: err.message,
+      error: err.message,
+      isOwner,
+    });
+  }
+
+  try {
+    const instanceCount = await countVisibleInstances(ctx.provider, ctx.regionObj);
+
+    if (ctx.accountId && ctx.accountId !== 'INSTANCE_PRINCIPAL' && ctx.permissionStatus !== 'OK') {
+      await pool
+        .query("UPDATE cloud_accounts SET permission_status = 'OK' WHERE id = $1 AND master_user_id = $2;", [
+          ctx.accountId,
+          req.user.id,
+        ])
+        .catch(() => {});
+    }
+
+    return res.json({
+      success: true,
+      source: 'LIVE_OCI',
+      connected: true,
+      accountId: ctx.accountId,
+      authMode: ctx.authMode,
+      tenancyOcid: ctx.tenancyOcid,
+      tenancyName: ctx.tenancyName,
+      region: ctx.region,
+      instanceCount,
+      permissionStatus: 'OK',
+      hint: null,
+      isOwner,
+    });
+  } catch (ociErr) {
+    const mapped = mapOciSdkError(ociErr);
+    const permStatus =
+      mapped.ociStatus === 403 || mapped.ociStatus === 404
+        ? 'NO_PERMISSION'
+        : mapped.ociStatus === 401
+        ? 'AUTH_FAILED'
+        : ctx.permissionStatus;
+
+    return res.status(mapped.httpStatus).json({
+      success: false,
+      source: 'LIVE_OCI',
+      connected: true,
+      accountId: ctx.accountId,
+      authMode: ctx.authMode,
+      tenancyOcid: ctx.tenancyOcid,
+      tenancyName: ctx.tenancyName,
+      region: ctx.region,
+      instanceCount: 0,
+      permissionStatus: permStatus,
+      code: mapped.code,
+      message: mapped.message,
+      error: mapped.message,
+      hint: mapped.hint,
+      isOwner,
+    });
+  }
+});
+
+/**
+ * GET /api/oci/instances (requireAuth, opcional ?accountId= & ?refresh=true)
+ */
+app.get('/api/oci/instances', requireAuth, async (req, res) => {
+  const accountId = req.query.accountId ? String(req.query.accountId).trim() : null;
+  const forceRefresh = req.query.refresh === 'true';
+
+  try {
+    const result = await listOciInstancesForUser(req.user.id, accountId, forceRefresh);
+    return res.json({
+      success: true,
+      ...result,
+    });
+  } catch (err) {
+    if (err.code === 'NO_OCI_ACCOUNT') {
+      return res.status(404).json({
+        success: false,
+        source: 'LIVE_OCI',
+        code: 'NO_OCI_ACCOUNT',
+        error: err.message,
+        instances: [],
+      });
+    }
+
+    const mapped = mapOciSdkError(err);
+    return res.status(mapped.httpStatus).json({
+      success: false,
+      source: 'LIVE_OCI',
+      code: mapped.code,
+      error: mapped.message,
+      message: mapped.message,
+      hint: mapped.hint,
+      instances: [],
+    });
+  }
+});
+
+/**
+ * GET /api/oci/instances/:ocid/metrics?window=1h|24h|7d
+ */
+app.get('/api/oci/instances/:ocid/metrics', requireAuth, async (req, res) => {
+  const instanceOcid = String(req.params.ocid || '').trim();
+  if (!instanceOcid.startsWith('ocid1.instance.')) {
+    return res.status(400).json({
+      success: false,
+      code: 'INVALID_INSTANCE_OCID',
+      error: 'OCID de instância inválido.',
+    });
+  }
+
+  const parsedQuery = metricsQuerySchema.safeParse(req.query);
+  if (!parsedQuery.success) {
+    return res.status(400).json({
+      success: false,
+      code: 'VALIDATION_ERROR',
+      error: formatZodError(parsedQuery.error),
+    });
+  }
+
+  try {
+    const result = await getOciInstanceMetrics(
+      req.user.id,
+      instanceOcid,
+      parsedQuery.data.window,
+      parsedQuery.data.accountId || null
+    );
+    return res.json({
+      success: true,
+      ...result,
+    });
+  } catch (err) {
+    if (err.code === 'NO_OCI_ACCOUNT') {
+      return res.status(404).json({
+        success: false,
+        code: 'NO_OCI_ACCOUNT',
+        error: err.message,
+      });
+    }
+    const mapped = mapOciSdkError(err);
+    return res.status(mapped.httpStatus).json({
+      success: false,
+      code: mapped.code,
+      error: mapped.message,
+      message: mapped.message,
+      hint: mapped.hint,
+    });
+  }
+});
+
+/**
+ * GET /api/oci/instances/:ocid/logs?severity=ALL|INFO|WARN|ERROR&search=...
+ */
+app.get('/api/oci/instances/:ocid/logs', requireAuth, async (req, res) => {
+  const instanceOcid = String(req.params.ocid || '').trim();
+  if (!instanceOcid.startsWith('ocid1.instance.')) {
+    return res.status(400).json({
+      success: false,
+      code: 'INVALID_INSTANCE_OCID',
+      error: 'OCID de instância inválido.',
+    });
+  }
+
+  const parsedQuery = logsQuerySchema.safeParse(req.query);
+  if (!parsedQuery.success) {
+    return res.status(400).json({
+      success: false,
+      code: 'VALIDATION_ERROR',
+      error: formatZodError(parsedQuery.error),
+    });
+  }
+
+  try {
+    const result = await getOciInstanceAuditLogs(req.user.id, instanceOcid, {
+      severity: parsedQuery.data.severity,
+      search: parsedQuery.data.search,
+      accountId: parsedQuery.data.accountId || null,
+    });
+    return res.json({
+      success: true,
+      ...result,
+    });
+  } catch (err) {
+    if (err.code === 'NO_OCI_ACCOUNT') {
+      return res.status(404).json({
+        success: false,
+        code: 'NO_OCI_ACCOUNT',
+        error: err.message,
+      });
+    }
+    const mapped = mapOciSdkError(err);
+    return res.status(mapped.httpStatus).json({
+      success: false,
+      code: mapped.code,
+      error: mapped.message,
+      message: mapped.message,
+      hint: mapped.hint,
+    });
+  }
+});
+
+// ============================================================================
+// 10. SONDAGEM DE REDE AUTENTICADA E PROTEGIDA CONTRA SSRF + DOCKER DO OWNER
+// ============================================================================
+function isForbiddenProbeIp(ip) {
+  if (!ip || net.isIP(ip) === 0) return true;
+  if (
+    ip === '0.0.0.0' ||
+    ip === '::1' ||
+    ip === '::' ||
+    ip.startsWith('127.') ||
+    ip.startsWith('169.254.') ||
+    ip.toLowerCase().startsWith('fe80:')
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function probeTcpPort(host, port, timeoutMs = 1500) {
   return new Promise((resolve) => {
     const startTime = Date.now();
@@ -832,11 +1893,7 @@ function probeTcpPort(host, port, timeoutMs = 1500) {
         resolved = true;
         const latencyMs = Math.max(1, Date.now() - startTime);
         socket.destroy();
-        resolve({
-          port,
-          status: 'OPEN',
-          latencyMs,
-        });
+        resolve({ port, status: 'OPEN', latencyMs });
       }
     });
 
@@ -848,7 +1905,7 @@ function probeTcpPort(host, port, timeoutMs = 1500) {
           port,
           status: 'CLOSED',
           latencyMs: timeoutMs,
-          reason: 'Timeout (porta filtrada ou inacessivel)',
+          reason: 'Timeout (porta filtrada ou inacessível)',
         });
       }
     });
@@ -861,7 +1918,7 @@ function probeTcpPort(host, port, timeoutMs = 1500) {
           port,
           status: 'CLOSED',
           latencyMs: Math.max(1, Date.now() - startTime),
-          reason: err.code || 'Conexao recusada',
+          reason: err.code || 'Conexão recusada',
         });
       }
     });
@@ -882,33 +1939,84 @@ function probeTcpPort(host, port, timeoutMs = 1500) {
   });
 }
 
-/**
- * GET /api/telemetry/network-probe?host=<IP>&instanceId=<ID>
- * Sonda as portas operacionais do IP alvo via handshake TCP ativo
- */
-app.get('/api/telemetry/network-probe', async (req, res) => {
+// Resolve os IPs reais das instancias pertencentes as contas OCI conectadas pelo usuario
+let resolveUserOwnedInstanceIps = async (user) => {
+  const ipMap = new Map();
   try {
-    let targetHost = req.query.host;
-    const instanceId = req.query.instanceId;
-
-    // Se o host nao foi passado, busca o IP pelo instanceId no banco
-    if (!targetHost && instanceId) {
+    const accountsRes = await pool.query(
+      "SELECT id FROM cloud_accounts WHERE master_user_id = $1 AND provider = 'OCI';",
+      [user.id]
+    );
+    for (const acc of accountsRes.rows) {
       try {
-        const rowRes = await pool.query(
-          'SELECT public_ip, private_ip FROM instances_cache WHERE id = $1 LIMIT 1;',
-          [instanceId]
-        );
-        if (rowRes.rows.length > 0) {
-          targetHost = rowRes.rows[0].public_ip || rowRes.rows[0].private_ip;
+        const listRes = await listOciInstancesForUser(user.id, acc.id, false);
+        for (const inst of listRes.instances || []) {
+          const ips = [inst.publicIp, inst.privateIp].filter(Boolean);
+          if (ips.length > 0) {
+            ipMap.set(inst.ocid || inst.id, ips);
+          }
         }
-      } catch (e) {}
+      } catch (_accErr) {
+        // Ignora conta sem permissao durante montagem de whitelist de IPs
+      }
+    }
+  } catch (_e) {
+    // Retorna mapa vazio em falha
+  }
+  return ipMap;
+};
+
+function setUserOwnedInstanceIpResolver(fn) {
+  resolveUserOwnedInstanceIps = fn;
+}
+
+/**
+ * GET /api/telemetry/network-probe
+ * Autenticada e restrita exclusivamente aos IPs pertencentes as instancias reais do usuario na OCI.
+ */
+app.get('/api/telemetry/network-probe', requireAuth, async (req, res) => {
+  const parsed = networkProbeQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({
+      success: false,
+      error: formatZodError(parsed.error),
+    });
+  }
+
+  try {
+    const { host, instanceId } = parsed.data;
+    const allowedIpsMap = await resolveUserOwnedInstanceIps(req.user);
+
+    let targetIp = host || '';
+    if (!targetIp && instanceId && allowedIpsMap.has(instanceId)) {
+      const ipsForInst = allowedIpsMap.get(instanceId);
+      targetIp = ipsForInst[0] || '';
     }
 
-    if (!targetHost) {
-      targetHost = '167.234.241.171';
+    if (!targetIp) {
+      return res.status(400).json({
+        success: false,
+        code: 'MISSING_TARGET_IP',
+        error: 'Esta instância não possui endereço IP acessível para sondagem.',
+      });
     }
 
-    // Definicao das portas essenciais para monitoramento
+    let belongsToUser = false;
+    for (const ips of allowedIpsMap.values()) {
+      if (ips.includes(targetIp)) {
+        belongsToUser = true;
+        break;
+      }
+    }
+
+    if (!belongsToUser || isForbiddenProbeIp(targetIp)) {
+      return res.status(403).json({
+        success: false,
+        code: 'FORBIDDEN_TARGET_HOST',
+        error: 'Operação negada: o endereço IP informado não pertence às instâncias da sua conta.',
+      });
+    }
+
     const portsToProbe = [
       { port: 22, service: 'OpenSSH Server' },
       { port: 80, service: 'HTTP Web Server' },
@@ -917,370 +2025,130 @@ app.get('/api/telemetry/network-probe', async (req, res) => {
       { port: 5432, service: 'PostgreSQL Database Engine' },
     ];
 
-    const probePromises = portsToProbe.map(async (item) => {
-      const probeResult = await probeTcpPort(targetHost, item.port, 1500);
-      return {
-        port: item.port,
-        service: item.service,
-        status: probeResult.status,
-        latencyMs: probeResult.latencyMs,
-        reason: probeResult.reason || undefined,
-      };
-    });
+    const ports = await Promise.all(
+      portsToProbe.map(async (item) => {
+        const result = await probeTcpPort(targetIp, item.port, 1500);
+        return {
+          port: item.port,
+          service: item.service,
+          status: result.status,
+          latencyMs: result.latencyMs,
+          reason: result.reason,
+        };
+      })
+    );
 
-    const probeResults = await Promise.all(probePromises);
-
-    const openCount = probeResults.filter((p) => p.status === 'OPEN').length;
+    const openCount = ports.filter((p) => p.status === 'OPEN').length;
 
     return res.json({
       success: true,
-      host: targetHost,
-      instanceId: instanceId || 'vnic-sidebrain-prd',
+      source: 'LIVE_OCI',
+      host: targetIp,
+      instanceId: instanceId || null,
       timestamp: new Date().toISOString(),
       summary: {
-        totalProbed: probeResults.length,
+        totalProbed: ports.length,
         openPorts: openCount,
-        closedPorts: probeResults.length - openCount,
-        overallStatus: openCount >= 2 ? 'HEALTHY' : 'DEGRADED',
+        closedPorts: ports.length - openCount,
+        overallStatus: openCount >= 1 ? 'HEALTHY' : 'DEGRADED',
       },
-      ports: probeResults,
+      ports,
     });
   } catch (err) {
-    console.error('[BFF Network Probe] Erro na sondagem de portas:', err.message);
+    console.error('[BFF Network Probe] Erro:', err.message);
     return res.status(500).json({
       success: false,
-      error: err?.message || 'Falha ao executar sondagem TCP no IP alvo.',
+      error: 'Falha ao executar sondagem TCP na instância.',
     });
   }
 });
 
-// ============================================================================
-// 8. INSPETOR DE CONTAINERS DOCKER REAIS DO HOST OCI
-// ============================================================================
 /**
  * GET /api/telemetry/containers
- * Retorna containers em execucao no host OCI via Docker CLI
+ * Mantido exclusivamente para OWNER_USERNAME na VM do BFF, sem containers falsos de fallback.
  */
-app.get('/api/telemetry/containers', (_req, res) => {
-  exec('docker ps --format "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}"', { timeout: 2500 }, (err, stdout) => {
-    if (!err && stdout && stdout.trim()) {
-      const lines = stdout.trim().split('\n');
-      const containers = lines.map((line) => {
-        const parts = line.split('|');
-        const statusStr = parts[3] || '';
-        return {
-          id: parts[0] || 'cnt',
-          name: parts[1] || 'container',
-          image: parts[2] || 'unknown',
-          status: statusStr,
-          ports: parts[4] || 'N/A',
-          state: statusStr.toLowerCase().includes('up') ? 'RUNNING' : 'STOPPED',
-          health: statusStr.toLowerCase().includes('healthy') ? 'HEALTHY' : 'RUNNING',
-        };
-      });
+app.get('/api/telemetry/containers', requireAuth, (req, res) => {
+  if (!isOwnerUsername(req.user.username)) {
+    return res.status(403).json({
+      success: false,
+      code: 'FORBIDDEN',
+      error: 'Inspeção local de containers disponível apenas para o administrador do host BFF.',
+    });
+  }
+
+  exec(
+    'docker ps --format "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}"',
+    { timeout: 2500 },
+    (err, stdout) => {
+      if (err || !stdout || !stdout.trim()) {
+        return res.json({
+          success: true,
+          source: 'LIVE_OCI',
+          count: 0,
+          containers: [],
+        });
+      }
+
+      const containers = stdout
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => {
+          const parts = line.split('|');
+          const statusStr = parts[3] || '';
+          return {
+            id: parts[0] || '',
+            name: parts[1] || '',
+            image: parts[2] || '',
+            status: statusStr,
+            ports: parts[4] || '',
+            state: statusStr.toLowerCase().includes('up') ? 'RUNNING' : 'STOPPED',
+            health: statusStr.toLowerCase().includes('healthy') ? 'HEALTHY' : 'RUNNING',
+          };
+        });
 
       return res.json({
         success: true,
-        source: 'LIVE_DOCKER_DAEMON',
+        source: 'LIVE_OCI',
         count: containers.length,
         containers,
       });
     }
-
-    // Fallback estruturado caso Docker nao responda ou precise de permissao sudo
-    const fallbackContainers = [
-      {
-        id: 'c1a89b72',
-        name: 'sidebrain_db',
-        image: 'postgres:16-alpine',
-        status: 'Up 3 days (healthy)',
-        ports: '0.0.0.0:5432->5432/tcp',
-        state: 'RUNNING',
-        health: 'HEALTHY',
-      },
-      {
-        id: 'f93d40e1',
-        name: 'sidebrain_back',
-        image: 'node:20-alpine',
-        status: 'Up 3 days',
-        ports: '0.0.0.0:8080->8080/tcp',
-        state: 'RUNNING',
-        health: 'RUNNING',
-      },
-      {
-        id: 'd827c13a',
-        name: 'cloudwatch_api_worker',
-        image: 'node:20-slim (PM2)',
-        status: 'Up 24 hours (healthy)',
-        ports: '0.0.0.0:3000->3000/tcp',
-        state: 'RUNNING',
-        health: 'HEALTHY',
-      },
-    ];
-
-    return res.json({
-      success: true,
-      source: 'LOCAL_HOST_DETECTION',
-      count: fallbackContainers.length,
-      containers: fallbackContainers,
-    });
-  });
+  );
 });
 
-// ============================================================================
-// 9. SERIES TEMPORAIS & CORRELACAO CPU × MEMORIA
-// ============================================================================
-app.get('/api/telemetry/metrics/:instanceId', (req, res) => {
-  try {
-    const { instanceId } = req.params;
-    const window = req.query.window || '24h';
-
-    const hostMetrics = getRealHostMetrics();
-    const baseCpu = hostMetrics.cpuPercent;
-    const baseMem = hostMetrics.memoryPercent;
-
-    let pointsCount = 24;
-    let stepMinutes = 60;
-
-    if (window === '1h') {
-      pointsCount = 12;
-      stepMinutes = 5;
-    } else if (window === '7d') {
-      pointsCount = 28;
-      stepMinutes = 360;
-    }
-
-    const now = Date.now();
-    const cpuSeries = [];
-    const memorySeries = [];
-    const latencySeries = [];
-
-    let sumCpu = 0;
-    let maxCpu = 0;
-    let sumMem = 0;
-    let maxMem = 0;
-
-    for (let i = pointsCount - 1; i >= 0; i--) {
-      const ptTime = new Date(now - i * stepMinutes * 60 * 1000);
-      let timeLabel = '';
-
-      if (window === '1h') {
-        const hh = String(ptTime.getHours()).padStart(2, '0');
-        const mm = String(ptTime.getMinutes()).padStart(2, '0');
-        timeLabel = `${hh}:${mm}`;
-      } else if (window === '24h') {
-        const hh = String(ptTime.getHours()).padStart(2, '0');
-        timeLabel = `${hh}:00`;
-      } else {
-        const days = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sab'];
-        const dayStr = days[ptTime.getDay()];
-        const hh = String(ptTime.getHours()).padStart(2, '0');
-        timeLabel = `${dayStr} ${hh}h`;
-      }
-
-      if (i === 0) {
-        cpuSeries.push({ timestamp: timeLabel, value: baseCpu });
-        memorySeries.push({ timestamp: timeLabel, value: baseMem });
-        latencySeries.push({ timestamp: timeLabel, value: 3.4 });
-        sumCpu += baseCpu;
-        sumMem += baseMem;
-        maxCpu = Math.max(maxCpu, baseCpu);
-        maxMem = Math.max(maxMem, baseMem);
-      } else {
-        const wave = Math.sin((i / pointsCount) * Math.PI * 2);
-        const noise = (Math.random() - 0.5) * 8;
-        const valCpu = Math.min(100, Math.max(5, Number((baseCpu + wave * 14 + noise).toFixed(1))));
-        const valMem = Math.min(100, Math.max(15, Number((baseMem + wave * 8 + noise * 0.4).toFixed(1))));
-        const valLat = Number((3.2 + (valCpu / 100) * 4.5 + Math.random() * 0.8).toFixed(1));
-
-        cpuSeries.push({ timestamp: timeLabel, value: valCpu });
-        memorySeries.push({ timestamp: timeLabel, value: valMem });
-        latencySeries.push({ timestamp: timeLabel, value: valLat });
-
-        sumCpu += valCpu;
-        sumMem += valMem;
-        maxCpu = Math.max(maxCpu, valCpu);
-        maxMem = Math.max(maxMem, valMem);
-      }
-    }
-
-    const avgCpu = Number((sumCpu / pointsCount).toFixed(1));
-    const avgMem = Number((sumMem / pointsCount).toFixed(1));
-
-    return res.json({
-      success: true,
-      instanceId,
-      window,
-      source: 'LIVE_CLOUD',
-      metrics: {
-        currentCpu: baseCpu,
-        avgCpu,
-        maxCpu,
-        currentMemory: baseMem,
-        avgMemory: avgMem,
-        maxMemory: maxMem,
-        currentLatency: 3.4,
-        slaThreshold: 85.0,
-        correlationCoefficient: 0.82,
-      },
-      cpuSeries,
-      memorySeries,
-      latencySeries,
-    });
-  } catch (err) {
-    console.error('[BFF Telemetry] Erro em /api/telemetry/metrics:', err.message);
-    return res.status(500).json({
+app.use((err, _req, res, next) => {
+  if (err && err.message === 'Origem bloqueada pela politica de CORS.') {
+    return res.status(403).json({
       success: false,
-      error: err?.message || 'Falha ao processar metricas temporais.',
+      code: 'CORS_FORBIDDEN',
+      error: err.message,
     });
   }
-});
-
-// ============================================================================
-// 10. CENTRAL DE LOGS & MITIGACAO AUTOMATICA
-// ============================================================================
-let simulatedMitigationApplied = false;
-
-app.get('/api/telemetry/logs/:instanceId', (req, res) => {
-  try {
-    const { instanceId } = req.params;
-    const severity = (req.query.severity || 'ALL').toUpperCase();
-    const search = (req.query.search || '').trim().toLowerCase();
-
-    const now = Date.now();
-    const rawLogs = [
-      {
-        id: 'log-01',
-        timestamp: new Date(now - 120000).toISOString(),
-        timeShort: 'Agora',
-        severity: 'INFO',
-        source: 'systemd[1]',
-        message: 'Started CloudWatch Mobile BFF Daemon (PM2 Worker #0) on port 3000.',
-      },
-      {
-        id: 'log-02',
-        timestamp: new Date(now - 300000).toISOString(),
-        timeShort: '5m atras',
-        severity: 'INFO',
-        source: 'kernel',
-        message: '[ sa-saopaulo-1 ] vnic-sidebrain-prd: Link is UP 10000 Mbps Full Duplex',
-      },
-      {
-        id: 'log-03',
-        timestamp: new Date(now - 750000).toISOString(),
-        timeShort: '12m atras',
-        severity: 'WARN',
-        source: 'postgresql[5432]',
-        message: 'LOG: checkpoint starting: time (24.2MB written in 1.4s, 16 buffers)',
-      },
-      {
-        id: 'log-04',
-        timestamp: new Date(now - 1200000).toISOString(),
-        timeShort: '20m atras',
-        severity: 'INFO',
-        source: 'sshd[28412]',
-        message: 'Accepted publickey for opc from 177.105.x.x port 51222 ssh2: RSA SHA256:...',
-      },
-      {
-        id: 'log-05',
-        timestamp: new Date(now - 1800000).toISOString(),
-        timeShort: '30m atras',
-        severity: 'INFO',
-        source: 'oci-agent',
-        message: 'Metric collection interval completed successfully for sa-saopaulo-1.',
-      },
-      {
-        id: 'log-06',
-        timestamp: new Date(now - 2700000).toISOString(),
-        timeShort: '45m atras',
-        severity: 'WARN',
-        source: 'vnic-sidebrain-prd',
-        message: 'I/O Wait exceeded baseline (12.4ms > 8.0ms) during DB compaction sync.',
-      },
-      {
-        id: 'log-07',
-        timestamp: new Date(now - 3600000).toISOString(),
-        timeShort: '1h atras',
-        severity: 'ERROR',
-        source: 'cloudwatch-api',
-        message: 'Connection pool warning: 85% clients active during load testing.',
-      },
-      {
-        id: 'log-08',
-        timestamp: new Date(now - 7200000).toISOString(),
-        timeShort: '2h atras',
-        severity: 'INFO',
-        source: 'docker[containerd]',
-        message: 'Container sidebrain_db: healthcheck passed (PostgreSQL 16 ready to accept connections).',
-      },
-    ];
-
-    if (simulatedMitigationApplied) {
-      rawLogs.unshift({
-        id: `mit-${Date.now().toString(36)}`,
-        timestamp: new Date().toISOString(),
-        timeShort: 'Agora',
-        severity: 'INFO',
-        source: 'root-cause-mitigator',
-        message: 'Mitigacao automatica executada: pool de conexoes reciclado e carga normalizada com sucesso.',
-      });
-    }
-
-    let filtered = rawLogs;
-
-    if (severity !== 'ALL') {
-      filtered = filtered.filter((l) => l.severity === severity);
-    }
-
-    if (search) {
-      filtered = filtered.filter(
-        (l) =>
-          l.message.toLowerCase().includes(search) ||
-          l.source.toLowerCase().includes(search) ||
-          l.id.toLowerCase().includes(search)
-      );
-    }
-
-    return res.json({
-      success: true,
-      instanceId,
-      severity,
-      search,
-      count: filtered.length,
-      logs: filtered,
-    });
-  } catch (err) {
-    console.error('[BFF Logs] Erro em /api/telemetry/logs:', err.message);
-    return res.status(500).json({
+  if (err instanceof SyntaxError && 'body' in err) {
+    return res.status(400).json({
       success: false,
-      error: err?.message || 'Falha ao buscar logs operacionais.',
+      code: 'INVALID_JSON',
+      error: 'Corpo JSON inválido.',
     });
   }
+  return next(err);
 });
 
-/**
- * POST /api/telemetry/mitigate/:instanceId
- * Dispara acao de mitigacao automatica da causa raiz
- */
-app.post('/api/telemetry/mitigate/:instanceId', (req, res) => {
-  simulatedMitigationApplied = true;
-  return res.json({
-    success: true,
-    message: 'Mitigacao executada com sucesso. Carga normalizada e log registrado.',
-    timestamp: new Date().toISOString(),
+if (require.main === module) {
+  app.listen(PORT, BIND_HOST, () => {
+    console.log('======================================================');
+    console.log(`CLOUDWATCH BFF RODANDO EM ${BIND_HOST}:${PORT}`);
+    console.log(`Host: ${os.hostname()} (${os.platform()} - ${os.arch()})`);
+    console.log('OCI SDK Oficial + JWT (15m/7d) + AES-256-GCM + RateLimit Ativos');
+    console.log('======================================================');
   });
-});
+}
 
-// ============================================================================
-// 11. INICIALIZACAO DO SERVIDOR
-// ============================================================================
-app.listen(PORT, () => {
-  console.log('======================================================');
-  console.log(`⚡ CLOUDWATCH API (BFF v2.1) RODANDO NA PORTA ${PORT}`);
-  console.log(`📍 Host: ${os.hostname()} (${os.platform()} - ${os.arch()})`);
-  console.log(`🛡️  Bcrypt Hash & Retrocompatibilidade Ativos`);
-  console.log(`🔑 Assinador Oficial OCI (RSA-SHA256) Nativo Ativo`);
-  console.log(`🌐 Sondagem Zabbix TCP (22, 80, 443, 3000, 5432) Ativa`);
-  console.log(`🐳 Inspecao Docker Host Pronta`);
-  console.log('======================================================');
-});
+module.exports = {
+  app,
+  dbReadyPromise,
+  requireAuth,
+  pairingRateLimiter,
+  setUserOwnedInstanceIpResolver,
+};

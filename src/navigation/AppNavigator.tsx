@@ -2,7 +2,7 @@ import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { Text, View, StyleSheet, Platform, Image } from 'react-native';
+import { View, StyleSheet, Platform, Image } from 'react-native';
 
 import { SplashScreen } from '../screens/SplashScreen';
 import { RegisterScreen } from '../screens/RegisterScreen';
@@ -10,6 +10,10 @@ import { LoginScreen } from '../screens/LoginScreen';
 import { DashboardScreen } from '../screens/DashboardScreen';
 import { MetricsDetailScreen } from '../screens/MetricsDetailScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
+import {
+  OciOnboardingScreen,
+  ConnectCloudsIntroScreen,
+} from '../screens/OciOnboardingScreen';
 import { NEUTRAL_THEME, CLOUD_PALETTES } from '../theme/tokens';
 import { useAuth } from '../context/AuthContext';
 import { DashboardIcon } from '../components/common/AppIcons';
@@ -18,8 +22,10 @@ const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
 
 const MainTabs: React.FC = () => {
-  const { activeProvider } = useAuth();
-  const activeColor = CLOUD_PALETTES[activeProvider]?.primary || '#8AB4F8';
+  const { activeProvider, hasConnectedClouds } = useAuth();
+  const activeColor = hasConnectedClouds
+    ? CLOUD_PALETTES[activeProvider]?.primary || '#8AB4F8'
+    : '#8AB4F8';
 
   return (
     <Tab.Navigator
@@ -37,7 +43,12 @@ const MainTabs: React.FC = () => {
         options={{
           tabBarLabel: 'PAINEL',
           tabBarIcon: ({ focused, color }) => (
-            <View style={[styles.tabIconBadge, focused && { borderColor: color, backgroundColor: '#20242C' }]}>
+            <View
+              style={[
+                styles.tabIconBadge,
+                focused && { borderColor: color, backgroundColor: '#20242C' },
+              ]}
+            >
               <DashboardIcon size={18} color={color} focused={focused} />
             </View>
           ),
@@ -47,9 +58,14 @@ const MainTabs: React.FC = () => {
         name="MetricsDetail"
         component={MetricsDetailScreen}
         options={{
-          tabBarLabel: 'METRICAS',
+          tabBarLabel: 'MÉTRICAS',
           tabBarIcon: ({ focused, color }) => (
-            <View style={[styles.tabIconBadge, focused && { borderColor: color, backgroundColor: '#20242C' }]}>
+            <View
+              style={[
+                styles.tabIconBadge,
+                focused && { borderColor: color, backgroundColor: '#20242C' },
+              ]}
+            >
               <Image
                 source={require('../assets/images/analytics-2-512.png')}
                 style={{ width: 18, height: 18, tintColor: color, resizeMode: 'contain' }}
@@ -62,9 +78,14 @@ const MainTabs: React.FC = () => {
         name="Settings"
         component={SettingsScreen}
         options={{
-          tabBarLabel: 'GOVERNANCA',
+          tabBarLabel: 'CONTA & NUVENS',
           tabBarIcon: ({ focused, color }) => (
-            <View style={[styles.tabIconBadge, focused && { borderColor: color, backgroundColor: '#20242C' }]}>
+            <View
+              style={[
+                styles.tabIconBadge,
+                focused && { borderColor: color, backgroundColor: '#20242C' },
+              ]}
+            >
               <Image
                 source={require('../assets/images/settings-4-512.png')}
                 style={{ width: 18, height: 18, tintColor: color, resizeMode: 'contain' }}
@@ -78,7 +99,7 @@ const MainTabs: React.FC = () => {
 };
 
 export const AppNavigator: React.FC = () => {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, justRegistered } = useAuth();
 
   return (
     <NavigationContainer>
@@ -90,12 +111,25 @@ export const AppNavigator: React.FC = () => {
         }}
       >
         {isAuthenticated ? (
-          <>
-            <Stack.Screen name="MainTabs" component={MainTabs} />
-            <Stack.Screen name="Main" component={MainTabs} />
-            <Stack.Screen name="Dashboard" component={DashboardScreen} />
-            <Stack.Screen name="MetricsDetailModal" component={MetricsDetailScreen} />
-          </>
+          justRegistered ? (
+            <>
+              <Stack.Screen name="ConnectCloudsIntro" component={ConnectCloudsIntroScreen} />
+              <Stack.Screen name="OciOnboarding" component={OciOnboardingScreen} />
+              <Stack.Screen name="MainTabs" component={MainTabs} />
+              <Stack.Screen name="Main" component={MainTabs} />
+              <Stack.Screen name="Dashboard" component={DashboardScreen} />
+              <Stack.Screen name="MetricsDetailModal" component={MetricsDetailScreen} />
+            </>
+          ) : (
+            <>
+              <Stack.Screen name="MainTabs" component={MainTabs} />
+              <Stack.Screen name="Main" component={MainTabs} />
+              <Stack.Screen name="OciOnboarding" component={OciOnboardingScreen} />
+              <Stack.Screen name="ConnectCloudsIntro" component={ConnectCloudsIntroScreen} />
+              <Stack.Screen name="Dashboard" component={DashboardScreen} />
+              <Stack.Screen name="MetricsDetailModal" component={MetricsDetailScreen} />
+            </>
+          )
         ) : (
           <>
             <Stack.Screen name="Splash" component={SplashScreen} />
@@ -132,11 +166,5 @@ const styles = StyleSheet.create({
     borderColor: 'transparent',
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  tabIconText: {
-    fontSize: 10,
-    fontWeight: '800',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    letterSpacing: 0.5,
   },
 });

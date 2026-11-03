@@ -114,26 +114,26 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
             <View style={styles.dividerLine} />
           </View>
 
-          {/* Formulario de Contingencia */}
+          {/* Formulario de Login com Senha */}
           <View style={styles.formGroup}>
-            <Text style={styles.label}>USUARIO OU E-MAIL</Text>
+            <Text style={styles.label}>USUÁRIO OU E-MAIL</Text>
             <TextInput
               style={styles.input}
               value={username}
               onChangeText={setUsername}
-              placeholder="ex: joao.guimaraes"
+              placeholder="ex: seu.usuario ou nome@empresa.com"
               placeholderTextColor="#5F6368"
               autoCapitalize="none"
             />
           </View>
 
           <View style={styles.formGroup}>
-            <Text style={styles.label}>SENHA MESTRE</Text>
+            <Text style={styles.label}>SENHA</Text>
             <TextInput
               style={styles.input}
               value={password}
               onChangeText={setPassword}
-              placeholder="Senha do aplicativo"
+              placeholder="Senha da sua conta"
               placeholderTextColor="#5F6368"
               secureTextEntry
             />

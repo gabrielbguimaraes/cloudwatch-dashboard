@@ -1,7 +1,7 @@
 // src/context/AuthContext.tsx
 
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { LayoutAnimation, Platform } from 'react-native';
+import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import { LayoutAnimation } from 'react-native';
 import * as Keychain from 'react-native-keychain';
 import EncryptedStorage from 'react-native-encrypted-storage';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -9,16 +9,42 @@ import type {
   SupportedCloud,
   MasterProfile,
   CloudCredentialConfig,
-  UserSessionState,
 } from '../types/auth';
 import type { UserSession, CloudProvider } from '../types';
 import { apiService } from '../services/api';
+import apiClient, {
+  saveAuthTokens,
+  getAuthTokens,
+  clearAuthTokens,
+  setUnauthorizedHandler,
+} from '../services/apiClient';
 import { BIOMETRIC_REAUTH_WINDOW_MS } from '../config/env';
+
+export interface OciAccountSummary {
+  id: string;
+  provider: 'OCI';
+  accountIdentifier: string;
+  tenancyName?: string;
+  region: string;
+  subscribedRegions?: string[];
+  permissionStatus: 'OK' | 'NO_PERMISSION' | 'UNKNOWN';
+  authMode: 'USER_API_KEY' | 'INSTANCE_PRINCIPAL';
+  biometricsEnabled?: boolean;
+  createdAt?: string;
+}
 
 interface AuthContextData {
   masterUser: MasterProfile | null;
   cloudAccounts: Record<SupportedCloud, CloudCredentialConfig>;
+  ociAccountsList: OciAccountSummary[];
+  activeOciAccountId: string | null;
+  setActiveOciAccountId: (id: string | null) => void;
   activeProvider: SupportedCloud;
+  connectedProviders: SupportedCloud[];
+  hasConnectedClouds: boolean;
+  justRegistered: boolean;
+  clearJustRegistered: () => void;
+  isOwnerUser: boolean;
   isAuthenticated: boolean;
   isLoading: boolean;
   session: UserSession | null;
@@ -27,13 +53,15 @@ interface AuthContextData {
     email: string,
     password: string
   ) => Promise<{ success: boolean; error?: string }>;
+  refreshCloudAccounts: () => Promise<void>;
   linkCloudProvider: (
     provider: SupportedCloud,
     credentials: Record<string, string>,
     enableBiometrics: boolean
-  ) => Promise<{ success: boolean; error?: string }>;
+  ) => Promise<{ success: boolean; error?: string; permissionStatus?: string; hint?: string }>;
+  activateOwnerDemoAccount: () => Promise<{ success: boolean; error?: string }>;
   toggleBiometrics: (provider: SupportedCloud, enabled: boolean) => Promise<boolean>;
-  unlinkCloudProvider: (provider: SupportedCloud) => Promise<boolean>;
+  unlinkCloudProvider: (provider: SupportedCloud, accountId?: string) => Promise<boolean>;
   switchActiveProvider: (provider: SupportedCloud) => Promise<boolean>;
   loginMaster: (
     username: string,
@@ -42,13 +70,10 @@ interface AuthContextData {
   loginWithBiometrics: () => Promise<{ success: boolean; error?: string }>;
   logoutMaster: () => Promise<void>;
   logout: () => void;
-  // Compatibilidade com fluxos legados
   hasStoredCredentials: boolean;
-  storedCredentials: any;
+  storedCredentials: null;
   selectedLoginProvider: CloudProvider;
   setSelectedLoginProvider: (p: CloudProvider) => void;
-  loginWithCredentials: (payload: any) => Promise<any>;
-  loginWithQrCodePayload: (raw: string) => any;
   verifyTwoFactorToken: (token: string) => Promise<boolean>;
   clearStoredCredentials: () => Promise<void>;
 }
@@ -56,22 +81,20 @@ interface AuthContextData {
 const AuthContext = createContext<AuthContextData>({} as AuthContextData);
 
 const STORAGE_KEY_MASTER_USER = '@master_user_profile';
-const STORAGE_KEY_MASTER_PASS = '@master_user_secret';
-const STORAGE_KEY_CLOUD_ACCOUNTS = '@cloud_accounts_config';
-const KEYCHAIN_SERVICE = 'cloudwatch_master_auth';
-const KEYCHAIN_USER = 'cloudwatch_master';
+const LEGACY_STORAGE_KEY_MASTER_PASS = '@master_user_secret';
+const BIOMETRIC_GATE_SERVICE = 'cloudwatch_biometric_gate_v2';
+const BIOMETRIC_GATE_USER = 'cloudwatch_bio_marker';
 
-const DEFAULT_ACCOUNTS: Record<SupportedCloud, CloudCredentialConfig> = {
+const getCloudAccountsStorageKey = (userId: string) => `@cloud_accounts_config:${userId}`;
+
+export const createEmptyAccountsState = (): Record<SupportedCloud, CloudCredentialConfig> => ({
   OCI: {
     provider: 'OCI',
-    isConfigured: true,
+    isConfigured: false,
     biometricsEnabled: false,
-    accountIdentifier: 'Tenancy OCI (sa-saopaulo-1)',
+    accountIdentifier: '',
     region: 'sa-saopaulo-1',
-    credentials: {
-      region: 'sa-saopaulo-1',
-    },
-    lastSyncedAt: new Date().toISOString(),
+    credentials: {},
   },
   AWS: {
     provider: 'AWS',
@@ -89,53 +112,229 @@ const DEFAULT_ACCOUNTS: Record<SupportedCloud, CloudCredentialConfig> = {
     region: 'southamerica-east1',
     credentials: {},
   },
-};
+});
 
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [masterUser, setMasterUser] = useState<MasterProfile | null>(null);
-  const [cloudAccounts, setCloudAccounts] = useState<Record<SupportedCloud, CloudCredentialConfig>>(DEFAULT_ACCOUNTS);
+  const [accessTokenState, setAccessTokenState] = useState<string>('');
+  const [cloudAccounts, setCloudAccounts] = useState<Record<SupportedCloud, CloudCredentialConfig>>(
+    createEmptyAccountsState
+  );
+  const [ociAccountsList, setOciAccountsList] = useState<OciAccountSummary[]>([]);
+  const [activeOciAccountId, setActiveOciAccountId] = useState<string | null>(null);
   const [activeProvider, setActiveProvider] = useState<SupportedCloud>('OCI');
   const [unlockedClouds, setUnlockedClouds] = useState<Record<SupportedCloud, number>>({
-    OCI: Date.now(),
+    OCI: 0,
     AWS: 0,
     GCP: 0,
   });
+  const [isOwnerUser, setIsOwnerUser] = useState<boolean>(false);
+  const [justRegistered, setJustRegistered] = useState<boolean>(false);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [biometricAvailableOnDevice, setBiometricAvailableOnDevice] = useState<boolean>(false);
 
-  // Inicializacao da sessao e contas em disco seguro
+  const connectedProviders = (['OCI', 'AWS', 'GCP'] as SupportedCloud[]).filter(
+    (p) => cloudAccounts[p]?.isConfigured
+  );
+  const hasConnectedClouds = connectedProviders.length > 0;
+
+  /**
+   * Purga chaves legadas globais e credenciais locais antigas no dispositivo
+   */
+  const purgeLegacyDeviceSecrets = useCallback(async () => {
+    await EncryptedStorage.removeItem(LEGACY_STORAGE_KEY_MASTER_PASS).catch(() => {});
+    await EncryptedStorage.removeItem('@cloud_creds_OCI').catch(() => {});
+    await EncryptedStorage.removeItem('@cloud_creds_AWS').catch(() => {});
+    await EncryptedStorage.removeItem('@cloud_creds_GCP').catch(() => {});
+    await AsyncStorage.removeItem('@cloud_accounts_config').catch(() => {});
+    await AsyncStorage.removeItem('@cloudwatch_resources').catch(() => {});
+    await AsyncStorage.removeItem('@cloudwatch:pinned_resources').catch(() => {});
+  }, []);
+
+  /**
+   * Limpa o estado em memoria e o cache local pertencente a um usuario
+   */
+  const clearUserScopedLocalData = useCallback(async (userId?: string | null) => {
+    setCloudAccounts(createEmptyAccountsState());
+    setOciAccountsList([]);
+    setActiveOciAccountId(null);
+    setUnlockedClouds({ OCI: 0, AWS: 0, GCP: 0 });
+    setIsOwnerUser(false);
+    setActiveProvider('OCI');
+
+    try {
+      const allKeys = await AsyncStorage.getAllKeys();
+      const keysToRemove = allKeys.filter((k) => {
+        if (
+          k === '@cloud_accounts_config' ||
+          k === '@cloudwatch_resources' ||
+          k === '@cloudwatch:pinned_resources' ||
+          k.startsWith('@cloudwatch_cache_instances') ||
+          k.startsWith('@cloudwatch_cache_metrics') ||
+          k.startsWith('@cloudwatch_cache_logs')
+        ) {
+          return true;
+        }
+        if (userId && k.includes(`:${userId}`)) {
+          return true;
+        }
+        return false;
+      });
+      if (keysToRemove.length > 0) {
+        await AsyncStorage.multiRemove(keysToRemove);
+      }
+    } catch (err) {
+      console.warn('[AuthContext] Aviso ao limpar chaves locais:', err);
+    }
+  }, []);
+
+  /**
+   * Carrega o estado real das contas conectadas do usuario a partir do BFF (GET /api/oci/accounts)
+   * com fallback para snapshot em cache do proprio usuario se offline
+   */
+  const loadAccountsForUser = useCallback(async (userId: string) => {
+    const storageKey = getCloudAccountsStorageKey(userId);
+    let baseAccounts = createEmptyAccountsState();
+
+    // 1. Carrega ultimo estado salvo especificamente para este userId (biometria local + offline cache)
+    try {
+      const cachedRaw = await AsyncStorage.getItem(storageKey);
+      if (cachedRaw) {
+        const parsed = JSON.parse(cachedRaw);
+        if (parsed && typeof parsed === 'object') {
+          baseAccounts = {
+            ...createEmptyAccountsState(),
+            ...parsed,
+            OCI: { ...createEmptyAccountsState().OCI, ...(parsed.OCI || {}), credentials: {} },
+            AWS: { ...createEmptyAccountsState().AWS, ...(parsed.AWS || {}), credentials: {} },
+            GCP: { ...createEmptyAccountsState().GCP, ...(parsed.GCP || {}), credentials: {} },
+          };
+        }
+      }
+    } catch {
+      // ignora erro de parse
+    }
+
+    // 2. Consulta o BFF para obter as contas OCI reais vinculadas a este usuario
+    const [accountsRes, statusRes] = await Promise.all([
+      apiClient.get<{ accounts?: OciAccountSummary[]; isOwner?: boolean }>('/oci/accounts'),
+      apiClient.get<{ isOwner?: boolean }>('/oci/status'),
+    ]);
+
+    if (statusRes.ok && statusRes.data) {
+      setIsOwnerUser(Boolean(statusRes.data.isOwner));
+    } else if (accountsRes.ok && accountsRes.data && typeof accountsRes.data.isOwner === 'boolean') {
+      setIsOwnerUser(accountsRes.data.isOwner);
+    }
+
+    if (accountsRes.ok && accountsRes.data && Array.isArray(accountsRes.data.accounts)) {
+      const serverOciAccounts = accountsRes.data.accounts;
+      setOciAccountsList(serverOciAccounts);
+
+      if (serverOciAccounts.length > 0) {
+        const primary = serverOciAccounts[0];
+        setActiveOciAccountId((prev) =>
+          prev && serverOciAccounts.some((a) => a.id === prev) ? prev : primary.id
+        );
+
+        baseAccounts = {
+          ...baseAccounts,
+          OCI: {
+            id: primary.id,
+            provider: 'OCI',
+            isConfigured: true,
+            biometricsEnabled: Boolean(
+              baseAccounts.OCI.biometricsEnabled || primary.biometricsEnabled
+            ),
+            accountIdentifier:
+              primary.tenancyName || primary.accountIdentifier || 'Tenancy OCI',
+            tenancyName: primary.tenancyName,
+            region: primary.region || 'sa-saopaulo-1',
+            subscribedRegions: primary.subscribedRegions || [],
+            permissionStatus: primary.permissionStatus || 'OK',
+            authMode: primary.authMode || 'USER_API_KEY',
+            credentials: {},
+            lastSyncedAt: new Date().toISOString(),
+          },
+        };
+      } else {
+        setActiveOciAccountId(null);
+        baseAccounts = {
+          ...baseAccounts,
+          OCI: createEmptyAccountsState().OCI,
+        };
+      }
+
+      await AsyncStorage.setItem(storageKey, JSON.stringify(baseAccounts)).catch(() => {});
+    }
+
+    setCloudAccounts(baseAccounts);
+    const firstConnected = (['OCI', 'AWS', 'GCP'] as SupportedCloud[]).find(
+      (c) => baseAccounts[c]?.isConfigured
+    );
+    setActiveProvider(firstConnected || 'OCI');
+  }, []);
+
+  const refreshCloudAccounts = useCallback(async () => {
+    if (masterUser?.id) {
+      await loadAccountsForUser(masterUser.id);
+    }
+  }, [masterUser?.id, loadAccountsForUser]);
+
+  // Handler automatico de 401 nao renovavel no apiClient
+  useEffect(() => {
+    setUnauthorizedHandler(async () => {
+      setAccessTokenState('');
+      setIsAuthenticated(false);
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
+
+  // Bootstrap inicial: purga segredos legados e verifica perfil + disponibilidade de biometria
   useEffect(() => {
     const bootstrap = async () => {
       try {
+        await purgeLegacyDeviceSecrets();
+
+        const supportedBio = await Keychain.getSupportedBiometryType().catch(() => null);
+        setBiometricAvailableOnDevice(Boolean(supportedBio));
+
         const storedUser = await EncryptedStorage.getItem(STORAGE_KEY_MASTER_USER);
         if (storedUser) {
-          const parsed = JSON.parse(storedUser);
-          setMasterUser(parsed);
-        }
-
-        const storedAccounts = await AsyncStorage.getItem(STORAGE_KEY_CLOUD_ACCOUNTS);
-        if (storedAccounts) {
-          const parsedAccounts = JSON.parse(storedAccounts);
-          setCloudAccounts(parsedAccounts);
-          const firstConfigured = (['OCI', 'AWS', 'GCP'] as SupportedCloud[]).find(
-            (c) => parsedAccounts[c]?.isConfigured
-          );
-          if (firstConfigured) {
-            setActiveProvider(firstConfigured);
-          }
+          const parsed: MasterProfile = JSON.parse(storedUser);
+          setMasterUser({
+            ...parsed,
+            role: parsed.role || 'USER',
+          });
         }
       } catch (err) {
-        console.warn('Falha no bootstrap de autenticacao:', err);
+        console.warn('[AuthContext] Falha no bootstrap:', err);
       } finally {
         setIsLoading(false);
       }
     };
 
     bootstrap();
-  }, []);
+  }, [purgeLegacyDeviceSecrets]);
 
   /**
-   * Registro da Conta Mestre (Offline-First + Sync Remoto)
+   * Salva um marcador pequeno (< 64 bytes) protegido por biometria de hardware
+   */
+  const enrollBiometricMarker = async (userId: string) => {
+    try {
+      await Keychain.setGenericPassword(BIOMETRIC_GATE_USER, userId, {
+        service: BIOMETRIC_GATE_SERVICE,
+        accessControl: Keychain.ACCESS_CONTROL.BIOMETRY_ANY,
+        accessible: Keychain.ACCESSIBLE.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+      });
+    } catch {
+      // Dispositivo sem biometria cadastrada — segue normalmente com senha
+    }
+  };
+
+  /**
+   * Cadastro de Conta no App (100% dependente do BFF; nunca cria conta local falsa)
    */
   const registerMasterAccount = async (
     username: string,
@@ -143,155 +342,308 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     password: string
   ): Promise<{ success: boolean; error?: string }> => {
     if (!username.trim() || !email.trim() || !password.trim()) {
-      return { success: false, error: 'Informe usuario, e-mail e senha para prosseguir.' };
+      return { success: false, error: 'Informe nome de usuário, e-mail e senha.' };
     }
 
-    try {
-      const profile: MasterProfile = {
-        id: `usr-${Date.now().toString(36)}`,
-        username: username.trim(),
-        email: email.trim().toLowerCase(),
-        createdAt: new Date().toISOString(),
+    const previousUserId = masterUser?.id;
+    const remoteRes = await apiService.registerMaster(
+      username.trim(),
+      email.trim().toLowerCase(),
+      password
+    );
+
+    if (!remoteRes.success || !remoteRes.data) {
+      return {
+        success: false,
+        error: remoteRes.error || 'Não foi possível concluir o cadastro no servidor.',
       };
+    }
 
-      // 1. Armazenamento local imediato (Offline-First)
-      await EncryptedStorage.setItem(STORAGE_KEY_MASTER_USER, JSON.stringify(profile));
-      await EncryptedStorage.setItem(STORAGE_KEY_MASTER_PASS, password);
+    // Limpa completamente qualquer estado, conta ou cache de usuario anterior no mesmo aparelho
+    await clearUserScopedLocalData(previousUserId);
+    await clearUserScopedLocalData(remoteRes.data.user.id);
 
-      // 2. Registro no PostgreSQL remoto via Micro-BFF (sem bloquear se offline)
-      apiService.registerMaster(profile.username, profile.email, password).catch((err) => {
-        console.log('Sincronizacao remota em segundo plano:', err);
-      });
+    const profile: MasterProfile = {
+      id: remoteRes.data.user.id,
+      username: remoteRes.data.user.username,
+      email: remoteRes.data.user.email,
+      role: remoteRes.data.user.role || 'USER',
+      createdAt: remoteRes.data.user.createdAt || new Date().toISOString(),
+    };
 
-      // 3. Vincula Keychain token leve para autorizacao biometrica (com try/catch blindado)
-      try {
-        await Keychain.setGenericPassword(KEYCHAIN_USER, profile.id, {
-          service: KEYCHAIN_SERVICE,
-          accessControl: Keychain.ACCESS_CONTROL.BIOMETRY_ANY,
-          accessible: Keychain.ACCESSIBLE.WHEN_UNLOCKED,
-        });
-      } catch (kcErr) {
-        console.log('Biometria de hardware nao configurada ou restrita:', kcErr);
+    await saveAuthTokens(remoteRes.data.accessToken, remoteRes.data.refreshToken);
+    setAccessTokenState(remoteRes.data.accessToken);
+    await EncryptedStorage.setItem(STORAGE_KEY_MASTER_USER, JSON.stringify(profile));
+    await enrollBiometricMarker(profile.id);
+
+    setMasterUser(profile);
+    setJustRegistered(true);
+    setIsAuthenticated(true);
+
+    // Verifica se este usuario recem-criado e o OWNER_USERNAME no BFF
+    await loadAccountsForUser(profile.id).catch(() => {});
+
+    return { success: true };
+  };
+
+  /**
+   * Login com Usuario/E-mail e Senha (depende estritamente da validacao do BFF; sem login offline falso)
+   */
+  const loginMaster = async (
+    username: string,
+    password: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    if (!username.trim() || !password) {
+      return { success: false, error: 'Informe seu usuário (ou e-mail) e senha.' };
+    }
+
+    setIsLoading(true);
+    try {
+      const previousUserId = masterUser?.id;
+      const remoteRes = await apiService.loginMaster(username.trim(), password);
+
+      if (!remoteRes.success || !remoteRes.data) {
+        setIsLoading(false);
+        return {
+          success: false,
+          error: remoteRes.error || 'Usuário ou senha inválidos.',
+        };
       }
 
+      const incomingUser = remoteRes.data.user;
+      if (previousUserId && previousUserId !== incomingUser.id) {
+        await clearUserScopedLocalData(previousUserId);
+      } else {
+        setCloudAccounts(createEmptyAccountsState());
+        setOciAccountsList([]);
+        setActiveOciAccountId(null);
+        setUnlockedClouds({ OCI: 0, AWS: 0, GCP: 0 });
+      }
+
+      const profile: MasterProfile = {
+        id: incomingUser.id,
+        username: incomingUser.username,
+        email: incomingUser.email,
+        role: incomingUser.role || 'USER',
+        createdAt: incomingUser.createdAt || new Date().toISOString(),
+      };
+
+      await saveAuthTokens(remoteRes.data.accessToken, remoteRes.data.refreshToken);
+      setAccessTokenState(remoteRes.data.accessToken);
+      await EncryptedStorage.setItem(STORAGE_KEY_MASTER_USER, JSON.stringify(profile));
+      await enrollBiometricMarker(profile.id);
+
       setMasterUser(profile);
+      setJustRegistered(false);
+      await loadAccountsForUser(profile.id);
       setIsAuthenticated(true);
+      setIsLoading(false);
       return { success: true };
     } catch (err: any) {
-      console.warn('Erro ao registrar conta mestre:', err);
-      return { success: false, error: err?.message || 'Falha ao gravar conta mestre.' };
+      setIsLoading(false);
+      return {
+        success: false,
+        error: err?.message || 'Falha ao autenticar com o servidor.',
+      };
     }
   };
 
   /**
-   * Vincula ou Atualiza um Provedor de Nuvem
+   * Desbloqueio por Biometria: exige sensor biometrico + refresh token valido no Keychain
+   */
+  const loginWithBiometrics = async (): Promise<{ success: boolean; error?: string }> => {
+    setIsLoading(true);
+    try {
+      const tokens = await getAuthTokens();
+      const storedUserJson = await EncryptedStorage.getItem(STORAGE_KEY_MASTER_USER);
+
+      if (!tokens?.refreshToken || !storedUserJson) {
+        setIsLoading(false);
+        return {
+          success: false,
+          error: 'Nenhuma sessão ativa encontrada neste dispositivo. Entre com usuário e senha.',
+        };
+      }
+
+      const bioResult = await Keychain.getGenericPassword({
+        service: BIOMETRIC_GATE_SERVICE,
+        authenticationPrompt: {
+          title: 'Autenticação Biométrica',
+          subtitle: 'CloudWatch Dashboard',
+          description: 'Confirme sua identidade para retomar a sessão',
+          cancel: 'Cancelar',
+        },
+      }).catch(() => false as const);
+
+      if (!bioResult || !bioResult.password) {
+        setIsLoading(false);
+        return {
+          success: false,
+          error: 'Biometria cancelada ou indisponível. Utilize sua senha para entrar.',
+        };
+      }
+
+      const cachedProfile: MasterProfile = JSON.parse(storedUserJson);
+      const refreshRes = await apiService.refreshSession(tokens.refreshToken);
+
+      if (refreshRes.success && refreshRes.data) {
+        await saveAuthTokens(refreshRes.data.accessToken, refreshRes.data.refreshToken);
+        setAccessTokenState(refreshRes.data.accessToken);
+
+        const refreshedProfile: MasterProfile = refreshRes.data.user
+          ? {
+              id: refreshRes.data.user.id,
+              username: refreshRes.data.user.username,
+              email: refreshRes.data.user.email,
+              role: refreshRes.data.user.role || 'USER',
+              createdAt: refreshRes.data.user.createdAt || cachedProfile.createdAt,
+            }
+          : cachedProfile;
+
+        await EncryptedStorage.setItem(STORAGE_KEY_MASTER_USER, JSON.stringify(refreshedProfile));
+        setMasterUser(refreshedProfile);
+        setJustRegistered(false);
+        await loadAccountsForUser(refreshedProfile.id);
+        setIsAuthenticated(true);
+        setIsLoading(false);
+        return { success: true };
+      }
+
+      // Se o BFF estava inacessivel (modo offline), permite visualizar o cache local da sessao ja autenticada
+      if (refreshRes.isNetworkError) {
+        setAccessTokenState(tokens.accessToken);
+        setMasterUser({ ...cachedProfile, role: cachedProfile.role || 'USER' });
+        setJustRegistered(false);
+        await loadAccountsForUser(cachedProfile.id);
+        setIsAuthenticated(true);
+        setIsLoading(false);
+        return { success: true };
+      }
+
+      // Se o BFF recusou o refresh token (401/expirado/revogado), limpa os tokens e exige senha
+      await clearAuthTokens();
+      setIsLoading(false);
+      return {
+        success: false,
+        error: refreshRes.error || 'Sua sessão expirou. Entre novamente com usuário e senha.',
+      };
+    } catch {
+      setIsLoading(false);
+      return {
+        success: false,
+        error: 'Não foi possível validar a biometria. Utilize usuário e senha.',
+      };
+    }
+  };
+
+  /**
+   * Conexao manual de conta OCI no BFF (POST /api/oci/accounts) — nunca persiste chave privada no celular
    */
   const linkCloudProvider = async (
     provider: SupportedCloud,
     credentials: Record<string, string>,
     enableBiometrics: boolean
-  ): Promise<{ success: boolean; error?: string }> => {
-    try {
-      // 1. Criptografa chaves isoladas no EncryptedStorage
-      await EncryptedStorage.setItem(`@cloud_creds_${provider}`, JSON.stringify(credentials));
-
-      // 2. Se biometria ativada, dispara prompt nativo de forma nao-bloqueante
-      let bioSuccess = false;
-      if (enableBiometrics) {
-        try {
-          const auth = await Keychain.getGenericPassword({
-            service: KEYCHAIN_SERVICE,
-            authenticationPrompt: {
-              title: `Ativar Biometria (${provider})`,
-              subtitle: 'Autorizacao de credencial em nuvem',
-              description: `Confirme sua digital para autorizar operacoes na conta ${provider}`,
-              cancel: 'Cancelar',
-            },
-          });
-          bioSuccess = !!(auth && auth.username);
-        } catch {
-          bioSuccess = false;
-        }
-      }
-
-      // 3. Atualiza estado da conta
-      let identifier = '';
-      let region = 'sa-saopaulo-1';
-
-      if (provider === 'OCI') {
-        identifier = credentials.tenancyOcid || credentials.tenancyId || 'Tenancy OCI';
-        region = credentials.region || 'sa-saopaulo-1';
-      } else if (provider === 'AWS') {
-        identifier = credentials.accessKeyId || credentials.accountId || 'AWS Account';
-        region = credentials.region || 'us-east-1';
-      } else if (provider === 'GCP') {
-        identifier = credentials.projectId || 'GCP Project';
-        region = credentials.region || 'southamerica-east1';
-      }
-
-      const updatedAccount: CloudCredentialConfig = {
-        provider,
-        isConfigured: true,
-        biometricsEnabled: bioSuccess,
-        accountIdentifier: identifier,
-        region,
-        credentials,
-        lastSyncedAt: new Date().toISOString(),
+  ): Promise<{ success: boolean; error?: string; permissionStatus?: string; hint?: string }> => {
+    if (provider !== 'OCI') {
+      return {
+        success: false,
+        error: `Integração com ${provider} estará disponível em breve (Sprint 3).`,
       };
-
-      const newAccounts = {
-        ...cloudAccounts,
-        [provider]: updatedAccount,
-      };
-
-      setCloudAccounts(newAccounts);
-      await AsyncStorage.setItem(STORAGE_KEY_CLOUD_ACCOUNTS, JSON.stringify(newAccounts));
-
-      // Sincroniza com Micro-BFF remoto se conectado
-      if (masterUser?.id) {
-        apiService
-          .linkCloudProvider(
-            masterUser.id,
-            provider,
-            identifier,
-            region,
-            credentials,
-            bioSuccess
-          )
-          .catch(() => {});
-      }
-
-      if (!cloudAccounts[activeProvider]?.isConfigured) {
-        setActiveProvider(provider);
-      }
-
-      return { success: true };
-    } catch (err: any) {
-      console.warn(`Erro ao vincular ${provider}:`, err);
-      return { success: false, error: err?.message || 'Falha ao vincular provedor.' };
     }
+
+    const res = await apiClient.post<{
+      success: boolean;
+      account?: OciAccountSummary;
+      permissionStatus?: string;
+      hint?: string;
+      error?: string;
+    }>('/oci/accounts', {
+      tenancyOcid: credentials.tenancyOcid || credentials.tenancyId || '',
+      userOcid: credentials.userOcid || credentials.userId || '',
+      fingerprint: credentials.fingerprint || '',
+      region: credentials.region || 'sa-saopaulo-1',
+      privateKeyPem: credentials.privateKeyPem || '',
+      passphrase: credentials.passphrase || undefined,
+    });
+
+    // Zera qualquer referencia a chave privada no objeto recebido
+    if (credentials.privateKeyPem) {
+      credentials.privateKeyPem = '';
+    }
+
+    if (!res.ok || !res.data?.success) {
+      return {
+        success: false,
+        error: res.error || 'Falha ao validar credenciais na Oracle Cloud.',
+      };
+    }
+
+    let bioSuccess = false;
+    if (enableBiometrics) {
+      try {
+        const auth = await Keychain.getGenericPassword({
+          service: BIOMETRIC_GATE_SERVICE,
+          authenticationPrompt: {
+            title: `Ativar Biometria (${provider})`,
+            subtitle: 'Proteção adicional no dispositivo',
+            description: `Confirme sua digital para proteger o acesso à conta ${provider}`,
+            cancel: 'Cancelar',
+          },
+        });
+        bioSuccess = Boolean(auth && auth.username);
+      } catch {
+        bioSuccess = false;
+      }
+    }
+
+    if (masterUser?.id) {
+      await loadAccountsForUser(masterUser.id);
+      if (bioSuccess) {
+        await toggleBiometrics('OCI', true);
+      }
+    }
+
+    return {
+      success: true,
+      permissionStatus: res.data.permissionStatus,
+      hint: res.data.hint,
+    };
   };
 
   /**
-   * Alterna a exigencia de biometria para uma nuvem
+   * Ativa o modo de demonstracao Instance Principal para o OWNER_USERNAME
+   */
+  const activateOwnerDemoAccount = async (): Promise<{ success: boolean; error?: string }> => {
+    const res = await apiClient.post<{ success: boolean; error?: string }>('/oci/accounts/demo', {});
+    if (!res.ok || !res.data?.success) {
+      return {
+        success: false,
+        error: res.error || 'Não foi possível ativar a conta da VM.',
+      };
+    }
+    if (masterUser?.id) {
+      await loadAccountsForUser(masterUser.id);
+    }
+    return { success: true };
+  };
+
+  /**
+   * Alterna biometria local por provedor para o usuario autenticado
    */
   const toggleBiometrics = async (provider: SupportedCloud, enabled: boolean): Promise<boolean> => {
+    if (!masterUser?.id) return false;
     try {
       if (enabled) {
-        try {
-          const auth = await Keychain.getGenericPassword({
-            service: KEYCHAIN_SERVICE,
-            authenticationPrompt: {
-              title: `Ativar Biometria (${provider})`,
-              subtitle: 'Autenticacao segura',
-              description: 'Confirme sua digital para ativar o bloqueio biometrico',
-              cancel: 'Cancelar',
-            },
-          });
-          if (!auth || !auth.username) return false;
-        } catch {
-          return false;
-        }
+        const auth = await Keychain.getGenericPassword({
+          service: BIOMETRIC_GATE_SERVICE,
+          authenticationPrompt: {
+            title: `Ativar Biometria (${provider})`,
+            subtitle: 'Autenticação segura',
+            description: 'Confirme sua digital para ativar o bloqueio biométrico',
+            cancel: 'Cancelar',
+          },
+        }).catch(() => false as const);
+        if (!auth || !auth.username) return false;
       }
 
       const updated = {
@@ -303,37 +655,53 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       };
 
       setCloudAccounts(updated);
-      await AsyncStorage.setItem(STORAGE_KEY_CLOUD_ACCOUNTS, JSON.stringify(updated));
+      await AsyncStorage.setItem(
+        getCloudAccountsStorageKey(masterUser.id),
+        JSON.stringify(updated)
+      );
       return true;
-    } catch (err) {
-      console.warn('Erro ao alternar biometria:', err);
+    } catch {
       return false;
     }
   };
 
   /**
-   * Desconecta e purga credenciais do provedor selecionado
+   * Desconecta conta de nuvem no BFF (DELETE /api/oci/accounts/:id) e limpa estado local
    */
-  const unlinkCloudProvider = async (provider: SupportedCloud): Promise<boolean> => {
+  const unlinkCloudProvider = async (
+    provider: SupportedCloud,
+    accountId?: string
+  ): Promise<boolean> => {
     try {
-      await EncryptedStorage.removeItem(`@cloud_creds_${provider}`);
+      if (provider === 'OCI') {
+        const targetId = accountId || cloudAccounts.OCI.id || activeOciAccountId;
+        if (targetId) {
+          const delRes = await apiClient.delete(`/oci/accounts/${encodeURIComponent(targetId)}`);
+          if (!delRes.ok && !delRes.isNetworkError) {
+            return false;
+          }
+        }
+      }
 
-      const resetAccount: CloudCredentialConfig = {
-        provider,
-        isConfigured: false,
-        biometricsEnabled: false,
-        accountIdentifier: '',
-        region: provider === 'AWS' ? 'us-east-1' : provider === 'GCP' ? 'southamerica-east1' : 'sa-saopaulo-1',
-        credentials: {},
-      };
-
-      const updated = {
+      const updated: Record<SupportedCloud, CloudCredentialConfig> = {
         ...cloudAccounts,
-        [provider]: resetAccount,
+        [provider]: createEmptyAccountsState()[provider],
       };
 
       setCloudAccounts(updated);
-      await AsyncStorage.setItem(STORAGE_KEY_CLOUD_ACCOUNTS, JSON.stringify(updated));
+      if (provider === 'OCI') {
+        setOciAccountsList((prev) =>
+          accountId ? prev.filter((a) => a.id !== accountId) : []
+        );
+        setActiveOciAccountId(null);
+      }
+
+      if (masterUser?.id) {
+        await AsyncStorage.setItem(
+          getCloudAccountsStorageKey(masterUser.id),
+          JSON.stringify(updated)
+        );
+      }
 
       if (activeProvider === provider) {
         const remaining = (['OCI', 'AWS', 'GCP'] as SupportedCloud[]).find(
@@ -346,15 +714,13 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       }
 
       return true;
-    } catch (err) {
-      console.warn('Erro ao desvincular nuvem:', err);
+    } catch {
       return false;
     }
   };
 
   /**
-   * Comuta o provedor ativo com Step-Up Biometric Authentication inteligente
-   * Reducao de Friccao: nao exige biometria a cada troca se desbloqueado nos ultimos 15 minutos
+   * Comuta o provedor ativo entre os provedores realmente conectados pelo usuario
    */
   const switchActiveProvider = async (provider: SupportedCloud): Promise<boolean> => {
     const targetConfig = cloudAccounts[provider];
@@ -371,31 +737,21 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
     if (targetConfig.biometricsEnabled && !isWithinSessionWindow) {
       try {
-        let credentials: any = null;
-        try {
-          credentials = await Keychain.getGenericPassword({
-            service: KEYCHAIN_SERVICE,
-            authenticationPrompt: {
-              title: `Acesso a Nuvem: ${provider}`,
-              subtitle: 'Validacao biometrica de seguranca',
-              description: `Toque no sensor digital para desbloquear o console ${provider}`,
-              cancel: 'Cancelar',
-            },
-          });
-        } catch (kcErr) {
-          console.warn('[Keychain] Sensor biometrico inacessivel ou erro de hardware:', kcErr);
-          // Permite fallback sem travar o aplicativo
-          return false;
-        }
+        const credentials = await Keychain.getGenericPassword({
+          service: BIOMETRIC_GATE_SERVICE,
+          authenticationPrompt: {
+            title: `Acesso à Nuvem: ${provider}`,
+            subtitle: 'Validação biométrica de segurança',
+            description: `Confirme sua digital para acessar os dados de ${provider}`,
+            cancel: 'Cancelar',
+          },
+        });
 
         if (!credentials || !credentials.username) {
           return false;
         }
-
-        // Registra o desbloqueio para a janela de 15 minutos
         setUnlockedClouds((prev) => ({ ...prev, [provider]: Date.now() }));
-      } catch (err) {
-        console.warn('Autenticacao biometrica step-up cancelada ou indisponivel:', err);
+      } catch {
         return false;
       }
     }
@@ -406,139 +762,21 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   /**
-   * Login Mestre com usuario e senha (Offline-First)
-   */
-  const loginMaster = async (
-    username: string,
-    password: string
-  ): Promise<{ success: boolean; error?: string }> => {
-    setIsLoading(true);
-    try {
-      const storedUserJson = await EncryptedStorage.getItem(STORAGE_KEY_MASTER_USER);
-      const storedPass = await EncryptedStorage.getItem(STORAGE_KEY_MASTER_PASS);
-
-      // 1. Validacao local
-      if (storedUserJson && storedPass) {
-        const parsed: MasterProfile = JSON.parse(storedUserJson);
-        const isMatch =
-          (username.trim().toLowerCase() === parsed.username.toLowerCase() ||
-            username.trim().toLowerCase() === parsed.email.toLowerCase()) &&
-          password === storedPass;
-
-        if (isMatch) {
-          setMasterUser(parsed);
-          setIsAuthenticated(true);
-          setIsLoading(false);
-          apiService.loginMaster(username, password).catch(() => {});
-          return { success: true };
-        }
-      }
-
-      // 2. Tenta validacao remota no PostgreSQL via Micro-BFF
-      const remoteRes = await apiService.loginMaster(username, password);
-      if (remoteRes.success && remoteRes.data?.user) {
-        const profile: MasterProfile = {
-          id: remoteRes.data.user.id || `usr-${Date.now().toString(36)}`,
-          username: remoteRes.data.user.username || username,
-          email: remoteRes.data.user.email || `${username}@cloudwatch.corp`,
-          createdAt: remoteRes.data.user.created_at || new Date().toISOString(),
-        };
-        await EncryptedStorage.setItem(STORAGE_KEY_MASTER_USER, JSON.stringify(profile));
-        await EncryptedStorage.setItem(STORAGE_KEY_MASTER_PASS, password);
-        setMasterUser(profile);
-        setIsAuthenticated(true);
-        setIsLoading(false);
-        return { success: true };
-      }
-
-      // 3. Fallback: se nenhum usuario foi cadastrado ainda no app, cria a conta local
-      if (!storedUserJson && !storedPass) {
-        const newProfile: MasterProfile = {
-          id: `usr-${Date.now().toString(36)}`,
-          username: username.trim(),
-          email: username.includes('@') ? username.trim().toLowerCase() : `${username.trim()}@fatec.sp.gov.br`,
-          createdAt: new Date().toISOString(),
-        };
-        await EncryptedStorage.setItem(STORAGE_KEY_MASTER_USER, JSON.stringify(newProfile));
-        await EncryptedStorage.setItem(STORAGE_KEY_MASTER_PASS, password);
-        setMasterUser(newProfile);
-        setIsAuthenticated(true);
-        setIsLoading(false);
-        return { success: true };
-      }
-
-      setIsLoading(false);
-      return { success: false, error: 'Credenciais invalidas. Verifique seu usuario e senha.' };
-    } catch (err: any) {
-      setIsLoading(false);
-      return { success: false, error: err?.message || 'Falha ao autenticar conta mestre.' };
-    }
-  };
-
-  /**
-   * Login Mestre por Biometria com Fallback Nao-Bloqueante
-   */
-  const loginWithBiometrics = async (): Promise<{ success: boolean; error?: string }> => {
-    setIsLoading(true);
-    try {
-      let credentials: any = null;
-      try {
-        credentials = await Keychain.getGenericPassword({
-          service: KEYCHAIN_SERVICE,
-          authenticationPrompt: {
-            title: 'Autenticacao Biometrica',
-            subtitle: 'Console de Operacoes',
-            description: 'Toque no sensor digital para entrar',
-            cancel: 'Cancelar',
-          },
-        });
-      } catch (kcErr) {
-        console.warn('Sensor biometrico indisponivel:', kcErr);
-      }
-
-      if (credentials && credentials.username) {
-        const storedUserJson = await EncryptedStorage.getItem(STORAGE_KEY_MASTER_USER);
-        if (storedUserJson) {
-          setMasterUser(JSON.parse(storedUserJson));
-        } else {
-          const defaultUser: MasterProfile = {
-            id: 'usr-admin',
-            username: 'joao.guimaraes',
-            email: 'joao.guimaraes@fatec.sp.gov.br',
-            createdAt: new Date().toISOString(),
-          };
-          setMasterUser(defaultUser);
-        }
-
-        setIsAuthenticated(true);
-        setIsLoading(false);
-        return { success: true };
-      } else {
-        setIsLoading(false);
-        return {
-          success: false,
-          error: 'Biometria indisponivel ou cancelada. Utilize a senha mestre para acessar.',
-        };
-      }
-    } catch (err: any) {
-      setIsLoading(false);
-      return {
-        success: false,
-        error: 'Sensor biometrico nao reconhecido. Utilize a senha mestre.',
-      };
-    }
-  };
-
-  /**
-   * Logout Mestre: Destroi sessao e zera memoria
+   * Logout: revoga refresh token no BFF, apaga tokens do Keychain e limpa estado e caches do usuario
    */
   const logoutMaster = async (): Promise<void> => {
+    const currentUserId = masterUser?.id;
     try {
-      await AsyncStorage.removeItem('@cloudwatch_resources');
-      await AsyncStorage.removeItem('@cloudwatch:pinned_resources');
+      const tokens = await getAuthTokens();
+      await apiService.logoutSession(tokens?.refreshToken);
+    } catch {
+      // ignora falha de rede ao deslogar
+    } finally {
+      await clearAuthTokens();
+      await clearUserScopedLocalData(currentUserId);
+      setAccessTokenState('');
+      setJustRegistered(false);
       setIsAuthenticated(false);
-    } catch (err) {
-      console.warn('Erro ao efetuar logout mestre:', err);
     }
   };
 
@@ -546,32 +784,44 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     logoutMaster();
   };
 
-  const session: UserSession | null = isAuthenticated
-    ? {
-        userId: masterUser?.id || 'usr-master',
-        email: masterUser?.email || 'admin@cloudwatch.corp',
-        name: masterUser?.username || 'Administrador Master',
-        role: 'ADMIN',
-        token: 'master_token_' + Date.now(),
-        refreshToken: 'refresh_' + Date.now(),
-        twoFactorEnabled: true,
-        twoFactorVerified: true,
-        biometricEnabled: true,
-        expiresAt: new Date(Date.now() + 86400000).toISOString(),
-      }
-    : null;
+  // Sessao sem valores fabricados: role vem do BFF (padrao USER) e 2FA permanece false ate ser implementado
+  const session: UserSession | null =
+    isAuthenticated && masterUser
+      ? {
+          userId: masterUser.id,
+          email: masterUser.email,
+          name: masterUser.username,
+          role: masterUser.role || 'USER',
+          token: accessTokenState,
+          refreshToken: '',
+          twoFactorEnabled: false,
+          twoFactorVerified: false,
+          biometricEnabled: biometricAvailableOnDevice,
+          expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+        }
+      : null;
 
   return (
     <AuthContext.Provider
       value={{
         masterUser,
         cloudAccounts,
+        ociAccountsList,
+        activeOciAccountId,
+        setActiveOciAccountId,
         activeProvider,
+        connectedProviders,
+        hasConnectedClouds,
+        justRegistered,
+        clearJustRegistered: () => setJustRegistered(false),
+        isOwnerUser,
         isAuthenticated,
         isLoading,
         session,
         registerMasterAccount,
+        refreshCloudAccounts,
         linkCloudProvider,
+        activateOwnerDemoAccount,
         toggleBiometrics,
         unlinkCloudProvider,
         switchActiveProvider,
@@ -579,17 +829,22 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         loginWithBiometrics,
         logoutMaster,
         logout,
-        hasStoredCredentials: !!masterUser,
+        hasStoredCredentials: Boolean(masterUser),
         storedCredentials: null,
         selectedLoginProvider: activeProvider,
-        setSelectedLoginProvider: (p: CloudProvider) => switchActiveProvider(p),
-        loginWithCredentials: async () => ({ success: true }),
-        loginWithQrCodePayload: () => ({ success: false, error: 'QR Code descontinuado.' }),
-        verifyTwoFactorToken: async () => true,
+        setSelectedLoginProvider: (p: CloudProvider) => {
+          switchActiveProvider(p);
+        },
+        verifyTwoFactorToken: async () => false,
         clearStoredCredentials: async () => {
-          await EncryptedStorage.clear();
-          await AsyncStorage.clear();
+          const uid = masterUser?.id;
+          await clearAuthTokens();
+          await Keychain.resetGenericPassword({ service: BIOMETRIC_GATE_SERVICE }).catch(() => {});
+          await EncryptedStorage.clear().catch(() => {});
+          await clearUserScopedLocalData(uid);
           setMasterUser(null);
+          setAccessTokenState('');
+          setJustRegistered(false);
           setIsAuthenticated(false);
         },
       }}

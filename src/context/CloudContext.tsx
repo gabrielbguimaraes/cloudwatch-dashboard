@@ -1,36 +1,32 @@
 /**
  * CloudWatch Dashboard - Contexto Global de Nuvem (CloudContext)
- * Gerencia recursos monitorados, governanca (fixar no topo), CRUD corporativo e KPIs.
- * Aluno: Joao Gabriel Barros Guimaraes - FATEC 4DSM
+ * Fase 3:
+ *  - 100% conectado aos dados reais da OCI via TelemetryRepository (LIVE_OCI | CACHE)
+ *  - Modo simulacao permanentemente desligado (isSimulationMode = false, zero chamadas a simulationService)
+ *  - Isolamento estrito por usuario no aparelho (limpa estado/pins ao trocar de usuario ou deslogar)
+ *  - Nuvens independentes: exibe apenas provedores realmente conectados pelo usuario autenticado.
  */
 
-import React, { createContext, useContext, useState, useEffect, useMemo, ReactNode } from 'react';
-import { Vibration } from 'react-native';
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useMemo,
+  useCallback,
+  ReactNode,
+} from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import type {
   CloudResource,
   CloudProvider,
   CloudAccount,
   AlertIncident,
 } from '../types';
-import {
-  generateSimulatedResources,
-  generateSimulatedIncidents,
-  provisionNewInstance,
-} from '../services/simulationService';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from './AuthContext';
-import { telemetryRepository, TelemetrySource, CreateResourceParams } from '../services/telemetryRepository';
+import { telemetryRepository, TelemetrySource } from '../services/telemetryRepository';
 
-const STORAGE_KEY_PINNED = '@cloudwatch:pinned_resources';
-const STORAGE_KEY_RESOURCES = '@cloudwatch_resources';
-
-export interface CustomProvisionOptions {
-  name: string;
-  shape: string;
-  ocpuCount: number;
-  memoryInGBs: number;
-  provider: CloudProvider;
-}
+const getPinnedStorageKey = (userId: string) => `@cloudwatch:pinned_resources:${userId}`;
 
 interface CloudContextData {
   resources: CloudResource[];
@@ -41,8 +37,8 @@ interface CloudContextData {
   activeProvider: CloudProvider;
   connectedProviders: CloudProvider[];
   activeAccount: CloudAccount;
-  isSimulationMode: boolean;
-  timeRange: '1h' | '6h' | '24h' | '7d' | '30d';
+  isSimulationMode: false;
+  timeRange: '1h' | '24h' | '7d';
   selectedResource: CloudResource | null;
   activeIncidents: AlertIncident[];
   kpis: {
@@ -56,178 +52,230 @@ interface CloudContextData {
   lastUpdated: string;
   telemetrySource: TelemetrySource;
   isLiveCloud: boolean;
+  isOfflineCache: boolean;
+  cachedAtHHmm: string | null;
+  syncError: string | null;
+  policyHint: string | null;
   setProviderFilter: (provider: CloudProvider | 'ALL') => void;
   setActiveProvider: (provider: CloudProvider) => void;
-  addConnectedProvider: (provider: CloudProvider) => void;
   isProviderConnected: (provider: CloudProvider) => boolean;
-  setTimeRange: (range: '1h' | '6h' | '24h' | '7d' | '30d') => void;
-  setSimulationMode: (enabled: boolean) => void;
+  setTimeRange: (range: '1h' | '24h' | '7d') => void;
   setSelectedResource: (resource: CloudResource | null) => void;
-  refreshMetrics: () => Promise<void>;
-  provisionInstance: (options?: CustomProvisionOptions | CloudProvider) => CloudResource;
-  addCustomResource: (params: CreateResourceParams) => Promise<CloudResource>;
+  refreshMetrics: (forceRefresh?: boolean) => Promise<void>;
   togglePin: (resourceId: string) => void;
   isResourcePinned: (resourceId: string) => boolean;
-  restartInstance: (id: string) => void;
-  deleteInstance: (id: string) => void;
-  editInstance: (id: string, newName: string, newShape?: string) => void;
-  injectChaosCpuOverload: () => { success: boolean; instanceName?: string };
-  crashPrimaryInstance: () => { success: boolean; instanceName?: string };
-  restoreInfrastructure: () => { success: boolean; restoredCount: number };
-  simulateLoadSpike: () => { success: boolean; instanceName?: string };
-  simulateHostOutage: () => { success: boolean; instanceName?: string };
-  restoreNormalHealth: () => { success: boolean; restoredCount: number };
 }
-
-const defaultAccount: CloudAccount = {
-  id: 'acc-oci-main',
-  name: 'Oracle Cloud Production (Tenancy Principal)',
-  provider: 'OCI',
-  defaultRegion: 'sa-saopaulo-1',
-  isSimulationMode: false,
-  createdAt: new Date().toISOString(),
-  updatedAt: new Date().toISOString(),
-};
 
 const CloudContext = createContext<CloudContextData>({} as CloudContextData);
 
 export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const { activeProvider: authActiveProvider, switchActiveProvider } = useAuth();
+  const {
+    masterUser,
+    isAuthenticated,
+    cloudAccounts,
+    connectedProviders,
+    activeProvider: authActiveProvider,
+    activeOciAccountId,
+    switchActiveProvider,
+  } = useAuth();
+
   const [resources, setResources] = useState<CloudResource[]>([]);
   const [pinnedResourceIds, setPinnedResourceIds] = useState<string[]>([]);
   const [selectedProvider, setSelectedProvider] = useState<CloudProvider | 'ALL'>('OCI');
-  const [connectedProviders, setConnectedProviders] = useState<CloudProvider[]>(['OCI', 'AWS', 'GCP']);
-  const [activeAccount, setActiveAccount] = useState<CloudAccount>(defaultAccount);
-  const [isSimulationMode, setSimulationMode] = useState<boolean>(true);
-  const [timeRange, setTimeRange] = useState<'1h' | '6h' | '24h' | '7d' | '30d'>('24h');
+  const [timeRange, setTimeRange] = useState<'1h' | '24h' | '7d'>('24h');
   const [selectedResource, setSelectedResource] = useState<CloudResource | null>(null);
-  const [activeIncidents, setActiveIncidents] = useState<AlertIncident[]>([]);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [lastUpdated, setLastUpdated] = useState<string>(new Date().toLocaleTimeString());
-  const [telemetrySource, setTelemetrySource] = useState<TelemetrySource>('LIVE_CLOUD');
+  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [lastUpdated, setLastUpdated] = useState<string>('—');
+  const [telemetrySource, setTelemetrySource] = useState<TelemetrySource>('LIVE_OCI');
+  const [isOfflineCache, setIsOfflineCache] = useState<boolean>(false);
+  const [cachedAtHHmm, setCachedAtHHmm] = useState<string | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [policyHint, setPolicyHint] = useState<string | null>(null);
 
-  const activeProvider = authActiveProvider || 'OCI';
+  const activeProvider: CloudProvider =
+    connectedProviders.includes(authActiveProvider)
+      ? authActiveProvider
+      : connectedProviders[0] || 'OCI';
 
-  // Sincroniza recursos via TelemetryRepository (BFF OCI -> Cache Local -> Simulacao)
+  const activeAccount: CloudAccount = useMemo(() => {
+    const cfg = cloudAccounts[activeProvider];
+    return {
+      id: cfg?.id || `acc-${activeProvider.toLowerCase()}`,
+      name: cfg?.tenancyName || cfg?.accountIdentifier || `Conta ${activeProvider}`,
+      provider: activeProvider,
+      defaultRegion: cfg?.region || 'sa-saopaulo-1',
+      isSimulationMode: false,
+      createdAt: cfg?.lastSyncedAt || new Date().toISOString(),
+      updatedAt: cfg?.lastSyncedAt || new Date().toISOString(),
+    };
+  }, [cloudAccounts, activeProvider]);
+
+  // Limpa completamente o estado em memoria ao deslogar ou trocar de usuario no aparelho
   useEffect(() => {
-    const initializeData = async () => {
+    if (!isAuthenticated || !masterUser?.id) {
+      setResources([]);
+      setSelectedResource(null);
+      setPinnedResourceIds([]);
+      setCachedAtHHmm(null);
+      setIsOfflineCache(false);
+      setSyncError(null);
+      setPolicyHint(null);
+      setTelemetrySource('LIVE_OCI');
+      setLastUpdated('—');
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
       try {
-        setIsLoading(true);
-        const repoRes = await telemetryRepository.getInstances(activeProvider);
+        const storedPinned = await AsyncStorage.getItem(getPinnedStorageKey(masterUser.id));
+        if (!cancelled) {
+          setPinnedResourceIds(storedPinned ? JSON.parse(storedPinned) : []);
+        }
+      } catch {
+        if (!cancelled) setPinnedResourceIds([]);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, masterUser?.id]);
+
+  const fetchRealResources = useCallback(
+    async (forceRefresh = false) => {
+      if (!isAuthenticated || !masterUser?.id) {
+        setResources([]);
+        setSelectedResource(null);
+        return;
+      }
+
+      if (connectedProviders.length === 0 || !connectedProviders.includes(activeProvider)) {
+        setResources([]);
+        setSelectedResource(null);
+        setSyncError(null);
+        setPolicyHint(null);
+        setIsOfflineCache(false);
+        setCachedAtHHmm(null);
+        setTelemetrySource('LIVE_OCI');
+        setIsLoading(false);
+        return;
+      }
+
+      setIsLoading(true);
+      setSyncError(null);
+
+      try {
+        const repoRes = await telemetryRepository.getInstances(
+          masterUser.id,
+          activeProvider,
+          activeOciAccountId,
+          forceRefresh
+        );
+
         setTelemetrySource(repoRes.source);
+        setIsOfflineCache(repoRes.source === 'CACHE');
+        setCachedAtHHmm(repoRes.cachedAtHHmm || null);
+        setPolicyHint(repoRes.hint || null);
+        setSyncError(repoRes.error || null);
 
-        if (repoRes.data && repoRes.data.length > 0) {
-          setResources(repoRes.data);
-          setSelectedResource(repoRes.data[0]);
-          saveResourcesToDisk(repoRes.data);
-        } else {
-          const stored = await AsyncStorage.getItem(STORAGE_KEY_RESOURCES);
-          if (stored) {
-            const parsed = JSON.parse(stored);
-            if (Array.isArray(parsed) && parsed.length > 0) {
-              setResources(parsed);
-              setSelectedResource(parsed[0]);
-            } else {
-              const initial = generateSimulatedResources();
-              setResources(initial);
-              setSelectedResource(initial[0]);
-              saveResourcesToDisk(initial);
-            }
-          } else {
-            const initial = generateSimulatedResources();
-            setResources(initial);
-            setSelectedResource(initial[0]);
-            saveResourcesToDisk(initial);
+        setResources(repoRes.data);
+        setSelectedResource((prev) => {
+          if (repoRes.data.length === 0) return null;
+          if (prev) {
+            const match = repoRes.data.find((r) => r.id === prev.id);
+            if (match) return match;
           }
-        }
+          return repoRes.data[0];
+        });
 
-        const storedPinned = await AsyncStorage.getItem(STORAGE_KEY_PINNED);
-        if (storedPinned) {
-          setPinnedResourceIds(JSON.parse(storedPinned));
-        }
-
-        setActiveIncidents(generateSimulatedIncidents());
-      } catch (err) {
-        console.warn('Erro ao inicializar recursos no CloudContext:', err);
-        const fallback = generateSimulatedResources();
-        setResources(fallback);
-        setSelectedResource(fallback[0]);
+        const hhmm =
+          repoRes.cachedAtHHmm ||
+          new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        setLastUpdated(hhmm);
+      } catch (err: any) {
+        setSyncError(err?.message || 'Não foi possível sincronizar instâncias da Oracle Cloud.');
       } finally {
         setIsLoading(false);
       }
-    };
+    },
+    [isAuthenticated, masterUser?.id, connectedProviders, activeProvider, activeOciAccountId]
+  );
 
-    initializeData();
-  }, [activeProvider]);
+  useEffect(() => {
+    fetchRealResources(false);
+  }, [fetchRealResources]);
 
-  // Persiste recursos no AsyncStorage
-  const saveResourcesToDisk = async (newResources: CloudResource[]) => {
-    try {
-      await AsyncStorage.setItem(STORAGE_KEY_RESOURCES, JSON.stringify(newResources));
-    } catch (err) {
-      console.warn('Erro ao salvar recursos no AsyncStorage:', err);
-    }
-  };
+  const isProviderConnected = useCallback(
+    (provider: CloudProvider): boolean => connectedProviders.includes(provider),
+    [connectedProviders]
+  );
 
-  const isProviderConnected = (provider: CloudProvider): boolean => {
-    return connectedProviders.includes(provider);
-  };
-
-  const addConnectedProvider = (provider: CloudProvider) => {
-    if (!connectedProviders.includes(provider)) {
-      setConnectedProviders((prev) => [...prev, provider]);
-    }
-  };
-
-  // Filtra recursos pertencentes a nuvem ativa
   const filteredResources = useMemo(() => {
+    if (!connectedProviders.includes(activeProvider)) return [];
     return resources.filter((r) => r.provider === activeProvider);
-  }, [resources, activeProvider]);
+  }, [resources, activeProvider, connectedProviders]);
 
-  // Recursos Fixados no Topo da Nuvem Ativa
   const pinnedResources = useMemo(() => {
     return filteredResources.filter((r) => pinnedResourceIds.includes(r.id));
   }, [filteredResources, pinnedResourceIds]);
 
-  // Calculo dinamico dos KPIs para a nuvem ativa
+  // Incidentes derivados EXCLUSIVAMENTE do estado real das VMs da conta conectada
+  const activeIncidents: AlertIncident[] = useMemo(() => {
+    return filteredResources
+      .filter((r) => r.status === 'CRITICAL' || r.status === 'WARNING')
+      .map((r) => {
+        const cpu = r.metricsSummary.cpuPercent;
+        const mem = r.metricsSummary.memoryPercent;
+        const isCpuHigh = typeof cpu === 'number' && cpu > 70;
+        const val = isCpuHigh ? cpu! : typeof mem === 'number' ? mem : 0;
+        return {
+          id: `real-inc-${r.id}`,
+          ruleId: 'oci-monitoring-threshold',
+          resourceId: r.id,
+          resourceName: r.name,
+          provider: r.provider,
+          severity: r.status === 'CRITICAL' ? 'CRITICAL' : 'WARN',
+          triggeredAt: lastUpdated,
+          valueRecorded: val,
+          threshold: r.status === 'CRITICAL' ? 85 : 70,
+          status: 'ACTIVE',
+          message:
+            r.status === 'CRITICAL'
+              ? `Utilização elevada detectada em ${r.name} (${val.toFixed(1)}%).`
+              : `Atenção operacional em ${r.name} (${val.toFixed(1)}%).`,
+        };
+      });
+  }, [filteredResources, lastUpdated]);
+
   const kpis = useMemo(() => {
     const list = filteredResources;
     const total = list.length;
     const healthy = list.filter((r) => r.status === 'HEALTHY').length;
     const warning = list.filter((r) => r.status === 'WARNING').length;
     const critical = list.filter((r) => r.status === 'CRITICAL' || r.status === 'OFFLINE').length;
-
-    let uptimeSla = 99.98;
-    if (total > 0) {
-      const healthyRatio = healthy / total;
-      uptimeSla = Number((98.5 + healthyRatio * 1.49).toFixed(2));
-      if (critical > 0) {
-        uptimeSla = Number((uptimeSla - critical * 0.45).toFixed(2));
-      }
-    }
+    const runningCount = list.filter((r) => r.lifecycleState === 'RUNNING').length;
+    const uptimeSla = total > 0 ? Number(((runningCount / total) * 100).toFixed(1)) : 0;
 
     return {
       total,
       healthy,
       warning,
       critical,
-      uptimeSla: Math.max(90, Math.min(100, uptimeSla)),
+      uptimeSla,
     };
   }, [filteredResources]);
 
-  // Alternancia do status de fixacao
   const togglePin = async (resourceId: string) => {
+    if (!masterUser?.id) return;
     try {
-      let updated: string[];
-      if (pinnedResourceIds.includes(resourceId)) {
-        updated = pinnedResourceIds.filter((id) => id !== resourceId);
-      } else {
-        updated = [resourceId, ...pinnedResourceIds];
-      }
+      const updated = pinnedResourceIds.includes(resourceId)
+        ? pinnedResourceIds.filter((id) => id !== resourceId)
+        : [resourceId, ...pinnedResourceIds];
       setPinnedResourceIds(updated);
-      await AsyncStorage.setItem(STORAGE_KEY_PINNED, JSON.stringify(updated));
+      await AsyncStorage.setItem(getPinnedStorageKey(masterUser.id), JSON.stringify(updated));
     } catch (err) {
-      console.warn('Erro ao salvar pin:', err);
+      console.warn('[CloudContext] Erro ao salvar pin:', err);
     }
   };
 
@@ -235,372 +283,8 @@ export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ chil
     return pinnedResourceIds.includes(resourceId);
   };
 
-  /**
-   * Recalcula telemetria (Tenta buscar dados reais do TelemetryRepository e faz fallback suave)
-   */
-  const refreshMetrics = async (): Promise<void> => {
-    try {
-      const repoRes = await telemetryRepository.getInstances(activeProvider);
-      setTelemetrySource(repoRes.source);
-
-      if (repoRes.data && repoRes.data.length > 0) {
-        setResources(repoRes.data);
-        saveResourcesToDisk(repoRes.data);
-        setLastUpdated(new Date().toLocaleTimeString());
-        return;
-      }
-    } catch (err) {
-      console.log('[CloudContext] Erro ao sincronizar do repositório remoto:', err);
-    }
-
-    // Fallback de oscilacao local
-    setResources((prev) => {
-      const updated = prev.map((item) => {
-        if (item.status === 'REBOOTING' || item.lifecycleState === 'STOPPED') {
-          return item;
-        }
-
-        const deltaCpu = (Math.random() * 8 - 4);
-        const currentCpu = item.metricsSummary.cpuPercent || 40;
-        const newCpu = Math.min(98, Math.max(8, Math.round((currentCpu + deltaCpu) * 10) / 10));
-
-        let status = item.status;
-        if (newCpu > 88) status = 'CRITICAL';
-        else if (newCpu > 70) status = 'WARNING';
-        else status = 'HEALTHY';
-
-        return {
-          ...item,
-          status,
-          metricsSummary: {
-            ...item.metricsSummary,
-            cpuPercent: newCpu,
-            memoryPercent: Math.min(95, Math.max(20, Math.round((item.metricsSummary.memoryPercent || 45) + (Math.random() * 4 - 2)))),
-            latencyMs: Math.round((item.metricsSummary.latencyMs || 5) * 10) / 10,
-          },
-        };
-      });
-
-      saveResourcesToDisk(updated);
-      return updated;
-    });
-
-    setLastUpdated(new Date().toLocaleTimeString());
-  };
-
-  /**
-   * Provisionamento de Nova Maquina
-   */
-  const provisionInstance = (options?: CustomProvisionOptions | CloudProvider): CloudResource => {
-    let targetProvider: CloudProvider = activeProvider;
-    let customOpts: Partial<CustomProvisionOptions> | undefined;
-
-    if (typeof options === 'string') {
-      targetProvider = options;
-    } else if (options && typeof options === 'object') {
-      targetProvider = options.provider || activeProvider;
-      customOpts = options;
-    }
-
-    const newInst = provisionNewInstance(targetProvider);
-    if (customOpts?.name) newInst.name = customOpts.name;
-    if (customOpts?.shape && newInst.metadata) {
-      (newInst.metadata as any).shape = customOpts.shape;
-    }
-
-    setResources((prev) => {
-      const updated = [newInst, ...prev];
-      saveResourcesToDisk(updated);
-      return updated;
-    });
-
-    setLastUpdated(new Date().toLocaleTimeString());
-    return newInst;
-  };
-
-  /**
-   * Cadastro Dinamico de Recurso OCI Real
-   */
-  const addCustomResource = async (params: CreateResourceParams): Promise<CloudResource> => {
-    const res = await telemetryRepository.createInstance({
-      ...params,
-      provider: params.provider || activeProvider,
-    });
-
-    const fallbackSvc: CloudResource['service'] = params.resourceType?.includes('Database')
-      ? 'OCI_DATABASE'
-      : (params.provider === 'AWS' ? 'EC2' : params.provider === 'GCP' ? 'GCP_RUN' : 'OCI_COMPUTE');
-
-    const newInst: CloudResource = res.instance || {
-      id: `res-oci-loc-${Date.now().toString(36)}`,
-      name: params.name,
-      service: fallbackSvc,
-      provider: params.provider || activeProvider,
-      region: params.region || 'sa-saopaulo-1',
-      status: 'HEALTHY',
-      lifecycleState: 'RUNNING',
-      availabilitySla: 99.98,
-      tags: { Environment: 'Production', Workload: 'Sprint-2' },
-      metricsSummary: {
-        cpuPercent: 12.0,
-        memoryPercent: 28.0,
-        latencyMs: 3.2,
-        diskPercent: 20,
-        networkThroughputMbps: 180,
-      },
-      monthlyCostEstimate: 0.0,
-      lastHealthCheck: new Date().toISOString(),
-      metadata: {
-        shape: params.shape || 'VM.Standard.A1.Flex',
-        ocpuCount: params.ocpus || 2,
-        memoryInGBs: params.memoryGb || 16,
-        privateIp: params.privateIp || '10.0.0.10',
-        publicIp: params.publicIp || '167.234.241.171',
-      },
-    };
-
-    setResources((prev) => {
-      const updated = [newInst, ...prev.filter((r) => r.id !== newInst.id)];
-      saveResourcesToDisk(updated);
-      return updated;
-    });
-
-    setLastUpdated(new Date().toLocaleTimeString());
-    return newInst;
-  };
-
-  /**
-   * Reiniciar Instancia
-   */
-  const restartInstance = (id: string) => {
-    setResources((prev) => {
-      const updated = prev.map((item) => {
-        if (item.id === id) {
-          return {
-            ...item,
-            status: 'REBOOTING' as const,
-            metricsSummary: {
-              ...item.metricsSummary,
-              cpuPercent: 5.0,
-            },
-          };
-        }
-        return item;
-      });
-      saveResourcesToDisk(updated);
-      return updated;
-    });
-
-    setTimeout(() => {
-      setResources((prev) => {
-        const updated = prev.map((item) => {
-          if (item.id === id) {
-            return {
-              ...item,
-              status: 'HEALTHY' as const,
-              metricsSummary: {
-                ...item.metricsSummary,
-                cpuPercent: 12.0,
-                memoryPercent: 32.0,
-                latencyMs: 3.8,
-              },
-            };
-          }
-          return item;
-        });
-        saveResourcesToDisk(updated);
-        return updated;
-      });
-    }, 2000);
-  };
-
-  /**
-   * Terminar / Excluir Instancia
-   */
-  const deleteInstance = (id: string) => {
-    telemetryRepository.deleteInstance(id).catch(() => {});
-    setResources((prev) => {
-      const updated = prev.filter((item) => item.id !== id);
-      saveResourcesToDisk(updated);
-      return updated;
-    });
-
-    if (pinnedResourceIds.includes(id)) {
-      setPinnedResourceIds((prev) => {
-        const updated = prev.filter((pId) => pId !== id);
-        AsyncStorage.setItem(STORAGE_KEY_PINNED, JSON.stringify(updated)).catch(() => {});
-        return updated;
-      });
-    }
-
-    if (selectedResource?.id === id) {
-      const remaining = resources.filter((r) => r.id !== id);
-      setSelectedResource(remaining.length > 0 ? remaining[0] : null);
-    }
-  };
-
-  /**
-   * Editar Especificacoes da Instancia
-   */
-  const editInstance = (id: string, newName: string, newShape?: string) => {
-    setResources((prev) => {
-      const updated = prev.map((item) => {
-        if (item.id === id) {
-          return {
-            ...item,
-            name: newName,
-            metadata: {
-              ...(item.metadata || {}),
-              shape: newShape || (item.metadata as any)?.shape || 'VM.Standard.A1.Flex',
-            },
-            tags: {
-              ...(item.tags || {}),
-              Shape: newShape || item.tags?.Shape || 'VM.Standard.A1.Flex',
-            },
-          };
-        }
-        return item;
-      });
-      saveResourcesToDisk(updated);
-      return updated;
-    });
-
-    if (selectedResource?.id === id) {
-      setSelectedResource((prev) =>
-        prev
-          ? {
-              ...prev,
-              name: newName,
-              metadata: {
-                ...(prev.metadata || {}),
-                shape: newShape || (prev.metadata as any)?.shape || 'VM.Standard.A1.Flex',
-              },
-            }
-          : null
-      );
-    }
-  };
-
-  /**
-   * Chaos Monkey: Injetar Sobrecarga de CPU (98%)
-   */
-  const injectChaosCpuOverload = (): { success: boolean; instanceName?: string } => {
-    let affectedName = '';
-    setResources((prev) => {
-      let injected = false;
-      const updated = prev.map((item) => {
-        if (!injected && (item.status === 'HEALTHY' || item.status === 'WARNING')) {
-          injected = true;
-          affectedName = item.name;
-          return {
-            ...item,
-            status: 'CRITICAL' as const,
-            metricsSummary: {
-              ...item.metricsSummary,
-              cpuPercent: 98.4,
-              memoryPercent: 91.2,
-              latencyMs: 145.8,
-            },
-            availabilitySla: 94.2,
-          };
-        }
-        return item;
-      });
-      saveResourcesToDisk(updated);
-      return updated;
-    });
-
-    Vibration.vibrate([0, 50, 100, 50]);
-
-    const newIncident: AlertIncident = {
-      id: `inc-${Date.now()}`,
-      ruleId: 'rule-cpu-critical',
-      resourceId: resources[0]?.id || 'res-01',
-      resourceName: affectedName || resources[0]?.name || 'Nó Computacional',
-      provider: activeProvider,
-      severity: 'CRITICAL',
-      triggeredAt: new Date().toLocaleTimeString(),
-      valueRecorded: 98.4,
-      threshold: 85.0,
-      status: 'ACTIVE',
-      message: 'Sobrecarga de CPU detectada (98.4%). Limiar de seguranca violado.',
-    };
-
-    setActiveIncidents((prev) => [newIncident, ...prev]);
-    setLastUpdated(new Date().toLocaleTimeString());
-    return { success: true, instanceName: affectedName };
-  };
-
-  /**
-   * Chaos Monkey: Derrubar Instancia Principal (0% CPU / STOPPED)
-   */
-  const crashPrimaryInstance = (): { success: boolean; instanceName?: string } => {
-    let affectedName = '';
-    setResources((prev) => {
-      if (prev.length === 0) return prev;
-      affectedName = prev[0].name;
-      const updated = prev.map((item, idx) => {
-        if (idx === 0) {
-          return {
-            ...item,
-            status: 'CRITICAL' as const,
-            metricsSummary: {
-              ...item.metricsSummary,
-              cpuPercent: 0.0,
-              latencyMs: 0.0,
-            },
-            availabilitySla: 88.0,
-          };
-        }
-        return item;
-      });
-      saveResourcesToDisk(updated);
-      return updated;
-    });
-
-    const newIncident: AlertIncident = {
-      id: `inc-crash-${Date.now()}`,
-      ruleId: 'rule-host-crash',
-      resourceId: resources[0]?.id || 'res-primary',
-      resourceName: resources[0]?.name || 'Instancia Primaria',
-      provider: resources[0]?.provider || activeProvider,
-      severity: 'CRITICAL',
-      triggeredAt: new Date().toLocaleTimeString(),
-      valueRecorded: 0,
-      threshold: 0,
-      status: 'ACTIVE',
-      message: 'Host Offline (STOPPED). CPU 0%. Failover ativo.',
-    };
-    setActiveIncidents((prev) => [newIncident, ...prev]);
-    setLastUpdated(new Date().toLocaleTimeString());
-    return { success: true, instanceName: affectedName };
-  };
-
-  /**
-   * Chaos Monkey: Restaurar Infraestrutura (Normaliza para HEALTHY)
-   */
-  const restoreInfrastructure = () => {
-    let count = 0;
-    setResources((prev) => {
-      count = prev.length;
-      const updated = prev.map((item) => ({
-        ...item,
-        status: 'HEALTHY' as const,
-        metricsSummary: {
-          ...item.metricsSummary,
-          cpuPercent: Math.round((Math.random() * 25 + 15) * 10) / 10,
-          memoryPercent: Math.round((Math.random() * 20 + 35) * 10) / 10,
-          latencyMs: 4.2,
-        },
-        availabilitySla: 99.98,
-      }));
-      saveResourcesToDisk(updated);
-      return updated;
-    });
-
-    setActiveIncidents([]);
-    setLastUpdated(new Date().toLocaleTimeString());
-    return { success: true, restoredCount: count };
+  const refreshMetrics = async (forceRefresh = true): Promise<void> => {
+    await fetchRealResources(forceRefresh);
   };
 
   return (
@@ -614,7 +298,7 @@ export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ chil
         activeProvider,
         connectedProviders,
         activeAccount,
-        isSimulationMode,
+        isSimulationMode: false,
         timeRange,
         selectedResource,
         activeIncidents,
@@ -622,31 +306,24 @@ export const CloudProviderComponent: React.FC<{ children: ReactNode }> = ({ chil
         isLoading,
         lastUpdated,
         telemetrySource,
-        isLiveCloud: telemetrySource === 'LIVE_CLOUD',
+        isLiveCloud: telemetrySource === 'LIVE_OCI',
+        isOfflineCache,
+        cachedAtHHmm,
+        syncError,
+        policyHint,
         setProviderFilter: (p) => {
           setSelectedProvider(p);
           if (p !== 'ALL') switchActiveProvider(p);
         },
-        setActiveProvider: (p) => switchActiveProvider(p),
-        addConnectedProvider,
+        setActiveProvider: (p) => {
+          switchActiveProvider(p);
+        },
         isProviderConnected,
         setTimeRange,
-        setSimulationMode,
         setSelectedResource,
         refreshMetrics,
-        provisionInstance,
-        addCustomResource,
         togglePin,
         isResourcePinned,
-        restartInstance,
-        deleteInstance,
-        editInstance,
-        injectChaosCpuOverload,
-        crashPrimaryInstance,
-        restoreInfrastructure,
-        simulateLoadSpike: injectChaosCpuOverload,
-        simulateHostOutage: crashPrimaryInstance,
-        restoreNormalHealth: restoreInfrastructure,
       }}
     >
       {children}

@@ -1,173 +1,125 @@
 /**
- * CloudWatch Mobile - Servico de Integracao com Micro-BFF OCI
- * Suporta arquitetura Offline-First: se o servidor estiver inacessivel,
- * a aplicacao recorre ao armazenamento local seguro (EncryptedStorage/AsyncStorage)
+ * CloudWatch Mobile - Servico de Autenticacao e Conta com o BFF
+ * Fase 1: Usa apiClient com JWT Bearer, sem passar userId em query/body.
  */
 
-import { API_BASE_URL, REQUEST_TIMEOUT_MS } from '../config/env';
+import { API_BASE_URL } from '../config/env';
+import apiClient from './apiClient';
+import type { MasterProfile } from '../types/auth';
 
 export const API_URL = API_BASE_URL;
 
-interface ApiResponse<T = any> {
-  success: boolean;
-  data?: T;
-  error?: string;
-  isOfflineFallback?: boolean;
+export interface AuthSuccessPayload {
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
+  user: MasterProfile;
 }
 
-const fetchWithTimeout = async (url: string, options: RequestInit = {}): Promise<Response> => {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-  try {
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        ...(options.headers || {}),
-      },
-    });
-    clearTimeout(timeoutId);
-    return response;
-  } catch (err) {
-    clearTimeout(timeoutId);
-    throw err;
-  }
-};
+export interface ApiResponse<T = any> {
+  success: boolean;
+  status?: number;
+  code?: string;
+  data?: T;
+  error?: string;
+  isNetworkError?: boolean;
+}
 
 export const apiService = {
   /**
-   * Registro de Conta Mestre no PostgreSQL remoto via Micro-BFF
+   * Cadastro de usuario no PostgreSQL via BFF (retorna 409 se ja existir)
    */
   async registerMaster(
     username: string,
     email: string,
     password: string
-  ): Promise<ApiResponse<{ token: string; user: any }>> {
-    try {
-      const response = await fetchWithTimeout(`${API_URL}/auth/register`, {
-        method: 'POST',
-        body: JSON.stringify({ username, email, password }),
-      });
+  ): Promise<ApiResponse<AuthSuccessPayload>> {
+    const res = await apiClient.post<AuthSuccessPayload>(
+      '/auth/register',
+      { username, email, password },
+      { skipAuth: true }
+    );
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        return {
-          success: false,
-          error: errorData.message || errorData.error || `Erro HTTP ${response.status}`,
-        };
-      }
-
-      const data = await response.json();
-      return { success: true, data };
-    } catch (err: any) {
-      // Fallback offline-first
+    if (!res.ok || !res.data?.accessToken || !res.data?.refreshToken || !res.data?.user) {
       return {
         success: false,
-        isOfflineFallback: true,
-        error: err?.message || 'Servidor remoto inacessivel. Operando em modo offline seguro.',
+        status: res.status,
+        code: res.code,
+        isNetworkError: res.isNetworkError,
+        error: res.error || 'Não foi possível criar a conta no servidor.',
       };
     }
+
+    return {
+      success: true,
+      status: res.status,
+      data: res.data,
+    };
   },
 
   /**
-   * Autenticacao de Conta Mestre no PostgreSQL remoto
+   * Login com usuario/e-mail e senha junto ao BFF (emite access 15m + refresh 7d)
    */
   async loginMaster(
     username: string,
     password: string
-  ): Promise<ApiResponse<{ token: string; user: any }>> {
-    try {
-      const response = await fetchWithTimeout(`${API_URL}/auth/login`, {
-        method: 'POST',
-        body: JSON.stringify({ username, password }),
-      });
+  ): Promise<ApiResponse<AuthSuccessPayload>> {
+    const res = await apiClient.post<AuthSuccessPayload>(
+      '/auth/login',
+      { username, password },
+      { skipAuth: true }
+    );
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        return {
-          success: false,
-          error: errorData.message || errorData.error || 'Credenciais invalidas.',
-        };
-      }
-
-      const data = await response.json();
-      return { success: true, data };
-    } catch (err: any) {
+    if (!res.ok || !res.data?.accessToken || !res.data?.refreshToken || !res.data?.user) {
       return {
         success: false,
-        isOfflineFallback: true,
-        error: err?.message || 'Servidor remoto inacessivel. Validando localmente.',
+        status: res.status,
+        code: res.code,
+        isNetworkError: res.isNetworkError,
+        error: res.error || 'Credenciais inválidas ou servidor indisponível.',
       };
     }
+
+    return {
+      success: true,
+      status: res.status,
+      data: res.data,
+    };
   },
 
   /**
-   * Vinculacao de Provedor de Nuvem na base relacional
+   * Renova explicitamente a sessao com o refresh token atual (ex: desbloqueio por biometria)
    */
-  async linkCloudProvider(
-    masterUserId: string,
-    provider: 'OCI' | 'AWS' | 'GCP',
-    accountIdentifier: string,
-    region: string,
-    credentials: Record<string, string>,
-    biometricsEnabled: boolean
-  ): Promise<ApiResponse> {
-    try {
-      const response = await fetchWithTimeout(`${API_URL}/cloud/link`, {
-        method: 'POST',
-        body: JSON.stringify({
-          masterUserId,
-          provider,
-          accountIdentifier,
-          region,
-          credentialsEncrypted: JSON.stringify(credentials),
-          biometricsEnabled,
-        }),
-      });
+  async refreshSession(refreshToken: string): Promise<ApiResponse<AuthSuccessPayload>> {
+    const res = await apiClient.post<AuthSuccessPayload>(
+      '/auth/refresh',
+      { refreshToken },
+      { skipAuth: true }
+    );
 
-      if (!response.ok) {
-        return { success: false, error: `Falha HTTP ${response.status}` };
-      }
-
-      const data = await response.json();
-      return { success: true, data };
-    } catch (err: any) {
+    if (!res.ok || !res.data?.accessToken || !res.data?.refreshToken) {
       return {
         success: false,
-        isOfflineFallback: true,
-        error: 'Persistencia remota offline. Salvo no cofre local.',
+        status: res.status,
+        code: res.code,
+        isNetworkError: res.isNetworkError,
+        error: res.error || 'Sessão expirada. Faça login com sua senha.',
       };
     }
+
+    return {
+      success: true,
+      status: res.status,
+      data: res.data,
+    };
   },
 
   /**
-   * Obtem instancias persistidas na base remota
+   * Revoga o refresh token no servidor durante o logout
    */
-  async getInstances(masterUserId?: string): Promise<ApiResponse<any[]>> {
-    try {
-      const url = masterUserId
-        ? `${API_URL}/instances?masterUserId=${encodeURIComponent(masterUserId)}`
-        : `${API_URL}/instances`;
-
-      const response = await fetchWithTimeout(url, {
-        method: 'GET',
-      });
-
-      if (!response.ok) {
-        return { success: false, error: `Falha HTTP ${response.status}` };
-      }
-
-      const data = await response.json();
-      return { success: true, data: data.instances || data };
-    } catch (err: any) {
-      return {
-        success: false,
-        isOfflineFallback: true,
-        error: 'Falha de conexao com API remota. Carregando dados locais.',
-      };
-    }
+  async logoutSession(refreshToken?: string): Promise<void> {
+    await apiClient.post('/auth/logout', refreshToken ? { refreshToken } : {}).catch(() => {});
   },
 };
+
+export default apiService;

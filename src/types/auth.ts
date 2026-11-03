@@ -2,20 +2,28 @@
 
 export type SupportedCloud = 'OCI' | 'AWS' | 'GCP';
 
+export type UserRole = 'USER' | 'ADMIN' | 'OPERATOR' | 'VIEWER';
+
 export interface MasterProfile {
   id: string;
   username: string;
   email: string;
+  role: UserRole;
   createdAt: string;
 }
 
 export interface CloudCredentialConfig {
+  id?: string;
   provider: SupportedCloud;
   isConfigured: boolean;
-  biometricsEnabled: boolean; // Flag individual de biometria para este provedor
-  accountIdentifier: string; // Tenancy OCID (OCI), Account ID (AWS), Project ID (GCP)
-  region: string; // sa-saopaulo-1, us-east-1, southamerica-east1
-  credentials: Record<string, string>; // Chaves seguras armazenadas no EncryptedStorage
+  biometricsEnabled: boolean;
+  accountIdentifier: string;
+  tenancyName?: string;
+  region: string;
+  subscribedRegions?: string[];
+  permissionStatus?: 'OK' | 'NO_PERMISSION' | 'UNKNOWN';
+  authMode?: 'USER_API_KEY' | 'INSTANCE_PRINCIPAL';
+  credentials: Record<string, string>;
   lastSyncedAt?: string;
 }
 
