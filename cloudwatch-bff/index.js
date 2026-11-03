@@ -31,6 +31,7 @@ const {
   encryptCredentials,
   isOwnerUsername,
   validateOciCredentials,
+  parsePrivateKeyAndComputeFingerprint,
   getOciProvider,
   mapOciSdkError,
   countVisibleInstances,
@@ -315,6 +316,11 @@ const ociCredentialsPayloadSchema = z.object({
     .min(64, 'Chave privada PEM incompleta.')
     .max(32768, 'Chave privada PEM excede o limite permitido.'),
   passphrase: z.string().max(256).optional(),
+});
+
+// Pareamento via Cloud Shell: fingerprint opcional (o BFF calcula a partir da chave privada)
+const ociPairingPayloadSchema = ociCredentialsPayloadSchema.extend({
+  fingerprint: z.string().trim().max(128).optional(),
 });
 
 const metricsQuerySchema = z.object({
@@ -966,16 +972,9 @@ echo "1/3 Gerando par de chaves RSA 2048 exclusivo para o CloudWatch..."
 openssl genrsa -out "$PRIV_KEY" 2048 >/dev/null 2>&1
 openssl rsa -pubout -in "$PRIV_KEY" -out "$PUB_KEY" >/dev/null 2>&1
 
-FINGERPRINT="$(openssl rsa -pubin -in "$PUB_KEY" -outform DER 2>/dev/null | openssl md5 | awk '{print $NF}' | sed 's/../&:/g; s/:$//' | tr '[:upper:]' '[:lower:]')"
-
-if [ -z "$FINGERPRINT" ]; then
-  echo "❌ Erro ao calcular o fingerprint MD5 DER da chave pública."
-  exit 1
-fi
-
-echo "2/3 Registrando chave pública no seu usuário OCI ($FINGERPRINT)..."
+echo "2/3 Registrando chave pública no seu usuário OCI..."
 if ! UPLOAD_OUT="$(oci iam user api-key upload --user-id "$USER_OCID" --key-file "$PUB_KEY" 2>&1)"; then
-  if echo "$UPLOAD_OUT" | grep -qiE "LimitExceeded|QuotaExceeded|maximum|3"; then
+  if echo "$UPLOAD_OUT" | grep -qiE "LimitExceeded|QuotaExceeded|ApiKeyLimit|maximum number"; then
     echo "❌ Limite máximo de chaves de API atingido no seu usuário OCI (máximo de 3 chaves)."
     echo "👉 No Console da Oracle Cloud, abra: Perfil (canto superior direito) > Configurações do usuário > Chaves de API,"
     echo "   exclua uma chave antiga que não utiliza mais e gere um novo comando no aplicativo."
@@ -986,6 +985,13 @@ if ! UPLOAD_OUT="$(oci iam user api-key upload --user-id "$USER_OCID" --key-file
   exit 1
 fi
 
+# Fingerprint oficial devolvido pela própria OCI (evita 'openssl md5', bloqueado em modo FIPS no Cloud Shell).
+# Se não vier, o BFF calcula a partir da chave privada.
+FINGERPRINT="$(printf '%s' "$UPLOAD_OUT" | jq -r '.data.fingerprint // empty' 2>/dev/null || true)"
+if [ -n "$FINGERPRINT" ]; then
+  echo "   Chave registrada (fingerprint: $FINGERPRINT)"
+fi
+
 echo "3/3 Validando credenciais e concluindo vínculo seguro com o CloudWatch..."
 HTTP_CODE="$(jq -n \\
   --arg tenancyOcid "$TENANCY_OCID" \\
@@ -993,7 +999,7 @@ HTTP_CODE="$(jq -n \\
   --arg region "$REGION_ID" \\
   --arg fingerprint "$FINGERPRINT" \\
   --rawfile privateKeyPem "$PRIV_KEY" \\
-  '{tenancyOcid: $tenancyOcid, userOcid: $userOcid, region: $region, fingerprint: $fingerprint, privateKeyPem: $privateKeyPem}' | \\
+  '{tenancyOcid: $tenancyOcid, userOcid: $userOcid, region: $region, privateKeyPem: $privateKeyPem} + (if $fingerprint != "" then {fingerprint: $fingerprint} else {} end)' | \\
   curl -sS -o "$RESP_FILE" -w "%{http_code}" \\
     -X POST "${postEndpoint}" \\
     -H "Content-Type: application/json" \\
@@ -1155,7 +1161,7 @@ app.post('/api/oci/pair/:codigo', pairingRateLimiter, async (req, res) => {
     });
   }
 
-  const parsedBody = ociCredentialsPayloadSchema.safeParse(req.body);
+  const parsedBody = ociPairingPayloadSchema.safeParse(req.body);
   // Zera qualquer referencia a chave privada no req.body imediatamente apos o parse
   if (req.body && typeof req.body === 'object' && req.body.privateKeyPem) {
     req.body.privateKeyPem = '';
@@ -1242,6 +1248,19 @@ app.post('/api/oci/pair/:codigo', pairingRateLimiter, async (req, res) => {
   }
 
   try {
+    // O Cloud Shell roda OpenSSL em modo FIPS (MD5 bloqueado), entao o script nao calcula o
+    // fingerprint localmente: o BFF o deriva da propria chave privada recebida (MD5 DER SPKI).
+    if (!parsedBody.data.fingerprint) {
+      try {
+        parsedBody.data.fingerprint = parsePrivateKeyAndComputeFingerprint(
+          parsedBody.data.privateKeyPem,
+          parsedBody.data.passphrase
+        ).calculatedFingerprint;
+      } catch (_fpErr) {
+        parsedBody.data.fingerprint = '00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00';
+      }
+    }
+
     let validation = await validateOciCredentials(parsedBody.data);
 
     // No Cloud Shell, o upload recem-feito da API key pode levar ~1.5s para propagar no IAM regional
