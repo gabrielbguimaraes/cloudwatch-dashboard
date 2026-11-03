@@ -919,7 +919,20 @@ set -euo pipefail
 umask 077
 
 TMP_DIR="$(mktemp -d)"
+UPLOADED_FP=""
+PAIR_OK=0
 cleanup() {
+  # Se a chave já foi registrada no IAM mas o pareamento falhou, remove-a para não consumir a cota de 3 chaves.
+  if [ "$PAIR_OK" != "1" ] && [ -n "$UPLOADED_FP" ]; then
+    echo ""
+    echo "🧹 Pareamento não concluído: removendo a chave de API temporária ($UPLOADED_FP) do seu usuário OCI..."
+    if oci iam user api-key delete --user-id "$USER_OCID" --fingerprint "$UPLOADED_FP" --force >/dev/null 2>&1; then
+      echo "   Chave temporária removida."
+    else
+      echo "⚠️  Não foi possível remover automaticamente. Exclua a chave $UPLOADED_FP em Perfil > Configurações do usuário > Chaves de API."
+    fi
+    UPLOADED_FP=""
+  fi
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT INT TERM
@@ -968,13 +981,22 @@ PRIV_KEY="$TMP_DIR/cloudwatch_app_key.pem"
 PUB_KEY="$TMP_DIR/cloudwatch_app_key_public.pem"
 RESP_FILE="$TMP_DIR/pair_response.json"
 
+KEY_COUNT="$(oci iam user api-key list --user-id "$USER_OCID" 2>/dev/null | jq -r '.data | length' 2>/dev/null || true)"
+if [[ "$KEY_COUNT" =~ ^[0-9]+$ ]] && [ "$KEY_COUNT" -ge 3 ]; then
+  echo "❌ Seu usuário OCI já tem $KEY_COUNT chaves de API (limite máximo: 3). Nada foi enviado."
+  echo "👉 Exclua chaves antigas que não usa mais (Perfil > Configurações do usuário > Chaves de API) ou liste com:"
+  echo "   oci iam user api-key list --user-id \"$USER_OCID\" --query 'data[].fingerprint'"
+  echo "   oci iam user api-key delete --user-id \"$USER_OCID\" --fingerprint <fingerprint> --force"
+  exit 1
+fi
+
 echo "1/3 Gerando par de chaves RSA 2048 exclusivo para o CloudWatch..."
 openssl genrsa -out "$PRIV_KEY" 2048 >/dev/null 2>&1
 openssl rsa -pubout -in "$PRIV_KEY" -out "$PUB_KEY" >/dev/null 2>&1
 
 echo "2/3 Registrando chave pública no seu usuário OCI..."
 if ! UPLOAD_OUT="$(oci iam user api-key upload --user-id "$USER_OCID" --key-file "$PUB_KEY" 2>&1)"; then
-  if echo "$UPLOAD_OUT" | grep -qiE "LimitExceeded|QuotaExceeded|ApiKeyLimit|maximum number"; then
+  if echo "$UPLOAD_OUT" | grep -qiE "LimitExceeded|QuotaExceeded|quota|ApiKeyLimit|maximum number|limite m"; then
     echo "❌ Limite máximo de chaves de API atingido no seu usuário OCI (máximo de 3 chaves)."
     echo "👉 No Console da Oracle Cloud, abra: Perfil (canto superior direito) > Configurações do usuário > Chaves de API,"
     echo "   exclua uma chave antiga que não utiliza mais e gere um novo comando no aplicativo."
@@ -989,6 +1011,7 @@ fi
 # Se não vier, o BFF calcula a partir da chave privada.
 FINGERPRINT="$(printf '%s' "$UPLOAD_OUT" | jq -r '.data.fingerprint // empty' 2>/dev/null || true)"
 if [ -n "$FINGERPRINT" ]; then
+  UPLOADED_FP="$FINGERPRINT"
   echo "   Chave registrada (fingerprint: $FINGERPRINT)"
 fi
 
@@ -1015,6 +1038,7 @@ echo "$SERVER_MSG"
 if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
   echo ""
   echo "✅ Conectado! Pode voltar ao app."
+  PAIR_OK=1
   exit 0
 else
   echo ""
