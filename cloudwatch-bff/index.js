@@ -992,7 +992,7 @@ if [ -n "$FINGERPRINT" ]; then
   echo "   Chave registrada (fingerprint: $FINGERPRINT)"
 fi
 
-echo "3/3 Validando credenciais e concluindo vínculo seguro com o CloudWatch..."
+echo "3/3 Validando credenciais e concluindo vínculo seguro com o CloudWatch (a OCI pode levar até ~40s para reconhecer a nova chave)..."
 HTTP_CODE="$(jq -n \\
   --arg tenancyOcid "$TENANCY_OCID" \\
   --arg userOcid "$USER_OCID" \\
@@ -1263,9 +1263,16 @@ app.post('/api/oci/pair/:codigo', pairingRateLimiter, async (req, res) => {
 
     let validation = await validateOciCredentials(parsedBody.data);
 
-    // No Cloud Shell, o upload recem-feito da API key pode levar ~1.5s para propagar no IAM regional
-    if (!validation.ok && validation.code === 'OCI_INVALID_CREDENTIALS') {
-      await new Promise((r) => setTimeout(r, 1500));
+    // No Cloud Shell, a API key recem-enviada pode levar de alguns segundos ate ~40s para propagar no IAM.
+    // Reexecuta a validacao (5s entre tentativas) enquanto a OCI responder 401 de autenticacao.
+    const PROPAGATION_RETRIES = Number(process.env.PAIRING_PROPAGATION_RETRIES ?? 8);
+    for (
+      let attempt = 1;
+      attempt <= PROPAGATION_RETRIES && !validation.ok && validation.code === 'OCI_INVALID_CREDENTIALS' && validation.httpStatus === 401;
+      attempt += 1
+    ) {
+      console.warn(`[BFF OCI Pairing] 401 da OCI; aguardando propagacao da API key (tentativa ${attempt}/${PROPAGATION_RETRIES})...`);
+      await new Promise((r) => setTimeout(r, 5000));
       validation = await validateOciCredentials(parsedBody.data);
     }
 

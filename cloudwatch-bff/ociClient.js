@@ -323,6 +323,9 @@ async function validateOciCredentials({
     ociTenancy = tenancyRes.tenancy || null;
   } catch (err) {
     const status = Number(err && err.statusCode ? err.statusCode : 0);
+    console.warn(
+      `[BFF OCI Validate] falha status=${status} serviceCode=${(err && err.serviceCode) || '-'} opcRequestId=${(err && err.opcRequestId) || '-'} msg=${String((err && err.message) || '').slice(0, 200)}`
+    );
 
     if (status === 401) {
       return {
