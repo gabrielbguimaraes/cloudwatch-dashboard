@@ -22,6 +22,7 @@ process.env.JWT_ACCESS_SECRET =
 process.env.CREDENTIALS_ENC_KEY =
   process.env.CREDENTIALS_ENC_KEY || crypto.randomBytes(32).toString('hex');
 process.env.OWNER_USERNAME = process.env.OWNER_USERNAME || 'owner_vm_admin_only';
+process.env.PAIRING_PROPAGATION_RETRIES = '0';
 
 const dbModule = require('./db');
 
@@ -222,6 +223,20 @@ function createInMemoryPgPool() {
       return { rows: [], rowCount: s ? 1 : 0 };
     }
 
+    if (sql.includes("UPDATE oci_pairing_sessions SET status = 'COMPLETED'") || sql.includes("UPDATE oci_pairing_sessions SET status = 'CONNECTED'")) {
+      const id = params[params.length - 1];
+      const s = tables.oci_pairing_sessions.find((x) => x.id === id);
+      if (s) {
+        s.status = sql.includes("'COMPLETED'") ? 'COMPLETED' : 'CONNECTED';
+        s.account_id = params[0];
+        s.tenancy_name = params[1];
+        s.region = params[2];
+        s.instance_count = params[3];
+        s.permission_status = sql.includes("'OK'") ? 'OK' : params[4];
+      }
+      return { rows: [], rowCount: s ? 1 : 0 };
+    }
+
     if (sql.includes("UPDATE oci_pairing_sessions SET status = 'FAILED'")) {
       const [errCode, errMsg, id] = params;
       const s = tables.oci_pairing_sessions.find((x) => x.id === id);
@@ -259,6 +274,7 @@ function createInMemoryPgPool() {
     }
 
     if (sql.startsWith('INSERT INTO cloud_accounts')) {
+      const isIpMode = sql.includes("'INSTANCE_PRINCIPAL'");
       const [
         id,
         master_user_id,
@@ -273,13 +289,13 @@ function createInMemoryPgPool() {
         id,
         master_user_id,
         provider: 'OCI',
-        auth_mode: 'USER_API_KEY',
+        auth_mode: isIpMode ? 'INSTANCE_PRINCIPAL' : 'USER_API_KEY',
         account_identifier,
         tenancy_name,
         region,
         subscribed_regions: JSON.parse(subscribed_regions || '[]'),
-        permission_status,
-        encrypted_credentials,
+        permission_status: isIpMode ? 'OK' : permission_status,
+        encrypted_credentials: isIpMode ? params[6] : encrypted_credentials,
         biometrics_enabled: false,
         created_at: new Date(),
       };
@@ -622,6 +638,78 @@ async function runTests() {
     assert.strictEqual(statusA.connected, false);
     assert.strictEqual(statusA.authMode, 'NONE');
     console.log('  ✓ Confirmado: zero contas salvas e authMode = NONE após credenciais inválidas.');
+
+    // 6. Verificando fallback automático para Instance Principal quando a chave OCI recebe 401 na Tenancy da VM
+    console.log('\n6. Verificando fallback automático para Instance Principal (Tenancy da VM):');
+    const ociModule = require('./ociClient');
+    assert.strictEqual(typeof ociModule.checkInstancePrincipalForTenancy, 'function', 'checkInstancePrincipalForTenancy deve ser exportada');
+    assert.strictEqual(typeof ociModule.enableInstancePrincipalForAccount, 'function', 'enableInstancePrincipalForAccount deve ser exportada');
+
+    // Cria nova sessão de pareamento para User A
+    const pairRes2 = await fetch(`${baseUrl}/api/oci/pairing`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${tokenA}` },
+    });
+    const pairSession2 = await pairRes2.json();
+    assert.strictEqual(pairRes2.status, 201);
+
+    // Simula a correspondência do Instance Principal para a tenancy da VM de teste
+    const vmTenancy = 'ocid1.tenancy.oc1..aaaaaaaavmtenancytest000000000000000000';
+    const originalCheck = ociModule.checkInstancePrincipalForTenancy;
+    ociModule.checkInstancePrincipalForTenancy = async (targetTenancy, region) => {
+      if (targetTenancy === vmTenancy) {
+        return {
+          available: true,
+          matches: true,
+          tenancyOcid: vmTenancy,
+          tenancyName: 'Tenancy Real da VM (Demo & Fallback)',
+          region: region || 'sa-saopaulo-1',
+          provider: {},
+        };
+      }
+      return { available: false, matches: false };
+    };
+
+    try {
+      // Submete credenciais apontando para a Tenancy da VM (rejeitadas pela OCI real com 401, mas aprovadas pelo fallback!)
+      const fallbackPairRes = await fetch(`${baseUrl}/api/oci/pair/${pairSession2.code}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tenancyOcid: vmTenancy,
+          userOcid: 'ocid1.user.oc1..aaaaaaaafakeuser000000000000000000000000000',
+          fingerprint,
+          region: 'sa-saopaulo-1',
+          privateKeyPem,
+        }),
+      });
+
+      assert.strictEqual(fallbackPairRes.status, 200, 'Pareamento deve retornar 200 aprovado via fallback');
+      const fallbackJson = await fallbackPairRes.json();
+      assert.strictEqual(fallbackJson.success, true);
+      assert.strictEqual(fallbackJson.mode, 'instance_principal_fallback');
+      console.log('  ✓ Pareamento aprovado com HTTP 200 { success: true, mode: "instance_principal_fallback" }.');
+
+      // Verifica que a sessão foi marcada como COMPLETED
+      const statusCheckRes = await fetch(`${baseUrl}/api/oci/pairing/${pairSession2.id}/status`, {
+        headers: { Authorization: `Bearer ${tokenA}` },
+      });
+      const statusCheckJson = await statusCheckRes.json();
+      assert.strictEqual(statusCheckJson.status, 'COMPLETED');
+      assert.strictEqual(statusCheckJson.completed, true);
+      console.log('  ✓ Sessão marcada como COMPLETED e status.completed = true.');
+
+      // Verifica que a conta foi salva com authMode INSTANCE_PRINCIPAL
+      const accountsCheckRes = await fetch(`${baseUrl}/api/oci/accounts`, {
+        headers: { Authorization: `Bearer ${tokenA}` },
+      });
+      const accountsCheckJson = await accountsCheckRes.json();
+      assert.strictEqual(accountsCheckJson.accounts.length, 1);
+      assert.strictEqual(accountsCheckJson.accounts[0].authMode, 'INSTANCE_PRINCIPAL');
+      console.log('  ✓ Conta persistida com authMode INSTANCE_PRINCIPAL e useInstancePrincipal.');
+    } finally {
+      ociModule.checkInstancePrincipalForTenancy = originalCheck;
+    }
 
     console.log('\n==============================================================');
     console.log('✅ TODOS OS TESTES DE SEGURANÇA E OCI SDK PASSARAM COM SUCESSO!');

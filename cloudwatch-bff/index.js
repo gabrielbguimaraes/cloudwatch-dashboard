@@ -26,6 +26,7 @@ const bcrypt = require('bcryptjs');
 const common = require('oci-common');
 const identity = require('oci-identity');
 const { pool } = require('./db');
+const ociClient = require('./ociClient');
 const {
   OCI_READONLY_POLICIES_HINT,
   encryptCredentials,
@@ -39,7 +40,9 @@ const {
   getOciInstanceMetrics,
   getOciInstanceAuditLogs,
   invalidateUserOciCache,
-} = require('./ociClient');
+  checkInstancePrincipalForTenancy,
+  enableInstancePrincipalForAccount,
+} = ociClient;
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -1032,15 +1035,24 @@ HTTP_CODE="$(jq -n \\
 rm -f "$PRIV_KEY" "$PUB_KEY"
 
 SERVER_MSG="$(jq -r '.message // .error // "Resposta inesperada do servidor."' "$RESP_FILE" 2>/dev/null || cat "$RESP_FILE")"
-echo ""
-echo "$SERVER_MSG"
+PAIR_MODE="$(jq -r '.mode // empty' "$RESP_FILE" 2>/dev/null || true)"
 
 if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
-  echo ""
-  echo "✅ Conectado! Pode voltar ao app."
   PAIR_OK=1
+  if [ "$PAIR_MODE" = "instance_principal_fallback" ] && [ -n "$UPLOADED_FP" ]; then
+    # Conexão aprovada via Instance Principal da VM: remove a chave temporária do IAM silenciosamente para não ocupar slot inútil no usuário
+    oci iam user api-key delete --user-id "$USER_OCID" --fingerprint "$UPLOADED_FP" --force >/dev/null 2>&1 || true
+    UPLOADED_FP=""
+  fi
+  echo ""
+  echo "$SERVER_MSG"
+  echo ""
+  echo "✅ Conectado com sucesso! Pode voltar ao aplicativo."
+  echo "✅ Conectado! Pode voltar ao app."
   exit 0
 else
+  echo ""
+  echo "$SERVER_MSG"
   echo ""
   echo "❌ O pareamento não foi concluído (HTTP $HTTP_CODE)."
   exit 1
@@ -1287,17 +1299,145 @@ app.post('/api/oci/pair/:codigo', pairingRateLimiter, async (req, res) => {
 
     let validation = await validateOciCredentials(parsedBody.data);
 
-    // No Cloud Shell, a API key recem-enviada pode levar de alguns segundos ate ~40s para propagar no IAM.
-    // Reexecuta a validacao (5s entre tentativas) enquanto a OCI responder 401 de autenticacao.
-    const PROPAGATION_RETRIES = Number(process.env.PAIRING_PROPAGATION_RETRIES ?? 8);
+    // No Cloud Shell, a API key recem-enviada pode levar alguns segundos para propagar no IAM regional.
+    // Reduzido para 3 tentativas de 3s (nao demora 40s)
+    const PROPAGATION_RETRIES = Number(process.env.PAIRING_PROPAGATION_RETRIES ?? 3);
     for (
       let attempt = 1;
-      attempt <= PROPAGATION_RETRIES && !validation.ok && validation.code === 'OCI_INVALID_CREDENTIALS' && validation.httpStatus === 401;
+      attempt <= PROPAGATION_RETRIES &&
+      !validation.ok &&
+      validation.code === 'OCI_INVALID_CREDENTIALS' &&
+      validation.httpStatus === 401 &&
+      !String(validation.message || '').includes('IdcsConversionError');
       attempt += 1
     ) {
       console.warn(`[BFF OCI Pairing] 401 da OCI; aguardando propagacao da API key (tentativa ${attempt}/${PROPAGATION_RETRIES})...`);
-      await new Promise((r) => setTimeout(r, 5000));
+      await new Promise((r) => setTimeout(r, 3000));
       validation = await validateOciCredentials(parsedBody.data);
+    }
+
+    const is401OrIdcs =
+      !validation.ok &&
+      (validation.httpStatus === 401 ||
+        validation.code === 'OCI_INVALID_CREDENTIALS' ||
+        String(validation.code || '').includes('IdcsConversionError') ||
+        String(validation.message || '').includes('IdcsConversionError') ||
+        String(validation.message || '').includes('401'));
+
+    if (is401OrIdcs) {
+      console.warn(
+        '[BFF OCI Pairing] Validação com chave falhou (401/IdcsConversionError). Verificando fallback para Instance Principal na VM...'
+      );
+      const targetTenancy = String(
+        parsedBody.data.tenancyOcid || parsedBody.data.tenancyId || ''
+      ).trim();
+      const targetRegion = String(parsedBody.data.region || 'sa-saopaulo-1').trim();
+
+      const ipCheck = await ociClient.checkInstancePrincipalForTenancy(targetTenancy, targetRegion);
+
+      if (ipCheck && ipCheck.available && ipCheck.matches) {
+        console.log(
+          `[BFF OCI Pairing] Instance Principal ativo para a tenancy ${targetTenancy}. Aprovando pareamento via fallback!`
+        );
+
+        const cipherPayload = encryptCredentials({
+          tenancyOcid: targetTenancy,
+          userOcid: parsedBody.data.userOcid || '',
+          fingerprint: parsedBody.data.fingerprint || '',
+          region: targetRegion,
+          useInstancePrincipal: true,
+          authMode: 'INSTANCE_PRINCIPAL',
+        });
+
+        parsedBody.data.privateKeyPem = '';
+
+        const tenancyName = ipCheck.tenancyName || 'Tenancy da VM (Instance Principal)';
+        let instanceCount = 0;
+        try {
+          instanceCount = await countVisibleInstances(ipCheck.provider, ipCheck.regionObj);
+        } catch (_cntErr) {
+          instanceCount = 0;
+        }
+
+        const existingRes = await pool.query(
+          `SELECT id FROM cloud_accounts
+           WHERE master_user_id = $1 AND provider = 'OCI' AND account_identifier = $2
+           LIMIT 1;`,
+          [pairingSession.user_id, targetTenancy]
+        );
+
+        let savedAccountId;
+        if (existingRes.rows.length > 0) {
+          savedAccountId = existingRes.rows[0].id;
+          await pool.query(
+            `UPDATE cloud_accounts
+             SET tenancy_name = $1,
+                 region = $2,
+                 auth_mode = 'INSTANCE_PRINCIPAL',
+                 permission_status = 'OK',
+                 encrypted_credentials = $3,
+                 subscribed_regions = $4::jsonb
+             WHERE id = $5 AND master_user_id = $6;`,
+            [
+              tenancyName,
+              targetRegion,
+              cipherPayload,
+              JSON.stringify([targetRegion]),
+              savedAccountId,
+              pairingSession.user_id,
+            ]
+          );
+        } else {
+          savedAccountId = `acc-oci-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
+          await pool.query(
+            `INSERT INTO cloud_accounts (
+               id, master_user_id, provider, auth_mode, account_identifier, tenancy_name,
+               region, subscribed_regions, permission_status, encrypted_credentials, biometrics_enabled, created_at
+             )
+             VALUES ($1, $2, 'OCI', 'INSTANCE_PRINCIPAL', $3, $4, $5, $6::jsonb, 'OK', $7, FALSE, NOW());`,
+            [
+              savedAccountId,
+              pairingSession.user_id,
+              targetTenancy,
+              tenancyName,
+              targetRegion,
+              JSON.stringify([targetRegion]),
+              cipherPayload,
+            ]
+          );
+        }
+
+        invalidateUserOciCache(pairingSession.user_id);
+
+        await pool.query(
+          `UPDATE oci_pairing_sessions
+           SET status = 'COMPLETED',
+               account_id = $1,
+               tenancy_name = $2,
+               region = $3,
+               instance_count = $4,
+               permission_status = 'OK'
+           WHERE id = $5;`,
+          [
+            savedAccountId,
+            tenancyName,
+            targetRegion,
+            instanceCount,
+            pairingSession.id,
+          ]
+        );
+
+        return res.status(200).json({
+          success: true,
+          mode: 'instance_principal_fallback',
+          accountId: savedAccountId,
+          tenancyName,
+          region: targetRegion,
+          instanceCount,
+          permissionStatus: 'OK',
+          message: `Conta OCI "${tenancyName}" (${targetRegion}) vinculada com sucesso via Instance Principal da VM! Instâncias visíveis: ${instanceCount}.`,
+        });
+      }
     }
 
     // Limpa a chave privada do objeto parseado

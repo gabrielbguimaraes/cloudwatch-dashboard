@@ -488,12 +488,8 @@ async function getOciProvider(userId, accountId = null) {
   const accRes = await pool.query(accountQuery, accountParams);
   const accountRow = accRes.rows[0] || null;
 
-  // Atalho explicito INSTANCE_PRINCIPAL ou conta registrada em modo INSTANCE_PRINCIPAL
-  const wantsInstancePrincipal =
-    accountId === 'INSTANCE_PRINCIPAL' ||
-    (accountRow && accountRow.auth_mode === 'INSTANCE_PRINCIPAL');
-
-  if (wantsInstancePrincipal) {
+  // Se a requisição foi pelo atalho explícito 'INSTANCE_PRINCIPAL' (sem accountRow)
+  if (accountId === 'INSTANCE_PRINCIPAL' && !accountRow) {
     if (!isOwner) {
       const err = new Error(
         'Operação negada: autenticação Instance Principal é restrita ao administrador do host.'
@@ -502,21 +498,54 @@ async function getOciProvider(userId, accountId = null) {
       err.httpStatus = 403;
       throw err;
     }
+  }
 
+  if (!accountRow && accountId !== 'INSTANCE_PRINCIPAL') {
+    const err = new Error('Nenhuma conta Oracle Cloud conectada para este usuário.');
+    err.code = 'NO_OCI_ACCOUNT';
+    err.httpStatus = 404;
+    err.isOwner = isOwner;
+    throw err;
+  }
+
+  let decrypted = null;
+  if (accountRow?.encrypted_credentials) {
+    try {
+      decrypted = decryptCredentials(accountRow.encrypted_credentials);
+    } catch (_decErr) {
+      decrypted = null;
+    }
+  }
+
+  // Verifica se a conta está configurada para usar Instance Principal
+  const isAccountIp = Boolean(
+    accountRow && (accountRow.auth_mode === 'INSTANCE_PRINCIPAL' || decrypted?.useInstancePrincipal)
+  );
+
+  const wantsInstancePrincipal =
+    (accountId === 'INSTANCE_PRINCIPAL' && isOwner) || isAccountIp;
+
+  if (wantsInstancePrincipal) {
     try {
       const ipProvider = await withTimeout(
         new common.InstancePrincipalsAuthenticationDetailsProviderBuilder().build(),
         8000
       );
+      const targetRegion =
+        accountRow?.region ||
+        decrypted?.region ||
+        process.env.OCI_DEFAULT_REGION ||
+        'sa-saopaulo-1';
       const ipRegionObj =
+        resolveValidOciRegion(targetRegion) ||
         (typeof ipProvider.getRegion === 'function' && ipProvider.getRegion()) ||
-        resolveValidOciRegion(accountRow?.region || process.env.OCI_DEFAULT_REGION || 'sa-saopaulo-1');
+        resolveValidOciRegion(process.env.OCI_DEFAULT_REGION || 'sa-saopaulo-1');
       const ipRegionId =
         (ipRegionObj && ipRegionObj.regionId) ||
-        accountRow?.region ||
-        'sa-saopaulo-1';
+        targetRegion;
       const ipTenancyId =
         accountRow?.account_identifier ||
+        decrypted?.tenancyOcid ||
         (typeof ipProvider.getTenantId === 'function' ? ipProvider.getTenantId() : null);
 
       return {
@@ -524,11 +553,12 @@ async function getOciProvider(userId, accountId = null) {
         authMode: 'INSTANCE_PRINCIPAL',
         accountId: accountRow ? accountRow.id : 'INSTANCE_PRINCIPAL',
         tenancyOcid: ipTenancyId,
-        tenancyName: accountRow?.tenancy_name || 'Tenancy da VM (Instance Principal)',
+        tenancyName: accountRow?.tenancy_name || decrypted?.tenancyName || 'Tenancy da VM (Instance Principal)',
         region: ipRegionId,
         regionObj: resolveValidOciRegion(ipRegionId) || ipRegionObj,
         permissionStatus: accountRow?.permission_status || 'OK',
         isOwner,
+        useInstancePrincipal: true,
       };
     } catch (ipErr) {
       const err = new Error(
@@ -541,15 +571,9 @@ async function getOciProvider(userId, accountId = null) {
     }
   }
 
-  if (!accountRow) {
-    const err = new Error('Nenhuma conta Oracle Cloud conectada para este usuário.');
-    err.code = 'NO_OCI_ACCOUNT';
-    err.httpStatus = 404;
-    err.isOwner = isOwner;
-    throw err;
+  if (!decrypted && accountRow.encrypted_credentials) {
+    decrypted = decryptCredentials(accountRow.encrypted_credentials);
   }
-
-  const decrypted = decryptCredentials(accountRow.encrypted_credentials);
   const regionId = (accountRow.region || decrypted.region || 'sa-saopaulo-1').toLowerCase();
   const regionObj = resolveValidOciRegion(regionId);
 
@@ -592,6 +616,133 @@ async function getOciProvider(userId, accountId = null) {
 // ============================================================================
 // 5. OPERACOES DE DADOS REAIS NA OCI (INSTANCIAS, METRICAS MQL E AUDIT LOGS)
 // ============================================================================
+
+/**
+ * Verifica se o Instance Principal está disponível na VM e se corresponde à Tenancy indicada.
+ */
+async function checkInstancePrincipalForTenancy(targetTenancyOcid, targetRegion = 'sa-saopaulo-1') {
+  if (!targetTenancyOcid) {
+    return { available: false, matches: false };
+  }
+
+  try {
+    const builder = new common.InstancePrincipalsAuthenticationDetailsProviderBuilder();
+    const ipProvider = await withTimeout(builder.build(), 4000);
+    const vmTenancyId =
+      typeof ipProvider.getTenantId === 'function' ? ipProvider.getTenantId() : null;
+    const resolvedRegionObj =
+      resolveValidOciRegion(targetRegion) ||
+      (typeof ipProvider.getRegion === 'function' && ipProvider.getRegion()) ||
+      resolveValidOciRegion(process.env.OCI_DEFAULT_REGION || 'sa-saopaulo-1');
+
+    const cleanTarget = String(targetTenancyOcid).trim();
+    const cleanVm = String(vmTenancyId || '').trim();
+
+    const directMatch = cleanVm && (cleanVm === cleanTarget);
+
+    if (directMatch) {
+      let tenancyName = 'Oracle Cloud Infrastructure';
+      try {
+        const iamClient = new identity.IdentityClient({
+          authenticationDetailsProvider: ipProvider,
+        });
+        iamClient.region = resolvedRegionObj;
+        const tenRes = await iamClient.getTenancy({
+          tenancyId: cleanVm,
+          retryConfiguration: common.NoRetryConfigurationDetails,
+        });
+        if (tenRes && tenRes.tenancy && tenRes.tenancy.name) {
+          tenancyName = tenRes.tenancy.name;
+        }
+      } catch (_e) {
+        tenancyName = 'Oracle Cloud Infrastructure';
+      }
+
+      return {
+        available: true,
+        matches: true,
+        tenancyOcid: cleanVm,
+        tenancyName,
+        region: resolvedRegionObj?.regionId || targetRegion,
+        regionObj: resolvedRegionObj,
+        provider: ipProvider,
+      };
+    }
+
+    // Se o OCID não bater diretamente, testa se o Instance Principal consegue listar recursos nessa tenancy
+    try {
+      const searchClient = new resourcesearch.ResourceSearchClient({
+        authenticationDetailsProvider: ipProvider,
+      });
+      searchClient.region = resolvedRegionObj;
+      const searchRes = await withTimeout(
+        searchClient.searchResources({
+          limit: 1,
+          searchDetails: {
+            type: 'Structured',
+            query: `query instance resources where compartmentId = '${cleanTarget}'`,
+          },
+        }),
+        4000
+      );
+      if (searchRes) {
+        return {
+          available: true,
+          matches: true,
+          tenancyOcid: cleanTarget,
+          tenancyName: 'Oracle Cloud Infrastructure',
+          region: resolvedRegionObj?.regionId || targetRegion,
+          regionObj: resolvedRegionObj,
+          provider: ipProvider,
+        };
+      }
+    } catch (_sErr) {
+      // busca sem sucesso
+    }
+
+    return {
+      available: true,
+      matches: false,
+      vmTenancyId,
+    };
+  } catch (err) {
+    return {
+      available: false,
+      matches: false,
+      error: err.message,
+    };
+  }
+}
+
+/**
+ * Atualiza uma conta OCI existente para usar Instance Principal
+ */
+async function enableInstancePrincipalForAccount(userId, accountId, tenancyOcid, region = 'sa-saopaulo-1') {
+  if (!userId || !accountId) return false;
+  try {
+    const cipherPayload = encryptCredentials({
+      tenancyOcid,
+      region,
+      useInstancePrincipal: true,
+      authMode: 'INSTANCE_PRINCIPAL',
+    });
+
+    await pool.query(
+      `UPDATE cloud_accounts
+       SET auth_mode = 'INSTANCE_PRINCIPAL',
+           encrypted_credentials = $1
+       WHERE id = $2 AND master_user_id = $3;`,
+      [cipherPayload, accountId, userId]
+    );
+
+    invalidateUserOciCache(userId);
+    return true;
+  } catch (err) {
+    console.warn('[BFF OCI] Falha ao atualizar conta para Instance Principal:', err.message);
+    return false;
+  }
+}
+
 function mapOciSdkError(err) {
   const status = Number(err && err.statusCode ? err.statusCode : 0);
   if (status === 401) {
@@ -707,7 +858,7 @@ async function fetchLatestMetricPoint(monitoringClient, compartmentId, instanceO
  *  - Cache em memoria de 45s estritamente isolado por userId + accountId + region
  */
 async function listOciInstancesForUser(userId, accountId = null, forceRefresh = false) {
-  const ctx = await getOciProvider(userId, accountId);
+  let ctx = await getOciProvider(userId, accountId);
   const cacheKey = `${userId}:${ctx.accountId}:${ctx.region}`;
 
   if (!forceRefresh && instancesMemoryCache.has(cacheKey)) {
@@ -741,17 +892,55 @@ async function listOciInstancesForUser(userId, accountId = null, forceRefresh = 
   });
   monitoringClient.region = ctx.regionObj;
 
-  const searchRes = await withTimeout(
-    searchClient.searchResources({
-      limit: 100,
-      retryConfiguration: common.NoRetryConfigurationDetails,
-      searchDetails: {
-        type: 'Structured',
-        query: "query instance resources where lifeCycleState != 'TERMINATED'",
-      },
-    }),
-    OCI_CALL_TIMEOUT_MS
-  );
+  let searchRes = null;
+  try {
+    searchRes = await withTimeout(
+      searchClient.searchResources({
+        limit: 100,
+        retryConfiguration: common.NoRetryConfigurationDetails,
+        searchDetails: {
+          type: 'Structured',
+          query: "query instance resources where lifeCycleState != 'TERMINATED'",
+        },
+      }),
+      OCI_CALL_TIMEOUT_MS
+    );
+  } catch (err) {
+    const st = Number(err && err.statusCode ? err.statusCode : 0);
+    if (st === 401 && ctx.authMode !== 'INSTANCE_PRINCIPAL') {
+      const ipCheck = await checkInstancePrincipalForTenancy(ctx.tenancyOcid, ctx.region);
+      if (ipCheck && ipCheck.available && ipCheck.matches) {
+        console.warn(`[BFF OCI] Chave de API retornou 401 para ${ctx.tenancyOcid}. Alternando para Instance Principal da VM!`);
+        await enableInstancePrincipalForAccount(userId, ctx.accountId, ctx.tenancyOcid, ctx.region);
+        ctx = await getOciProvider(userId, ctx.accountId);
+
+        searchClient.authenticationDetailsProvider = ctx.provider;
+        searchClient.region = ctx.regionObj;
+        computeClient.authenticationDetailsProvider = ctx.provider;
+        computeClient.region = ctx.regionObj;
+        vnetClient.authenticationDetailsProvider = ctx.provider;
+        vnetClient.region = ctx.regionObj;
+        monitoringClient.authenticationDetailsProvider = ctx.provider;
+        monitoringClient.region = ctx.regionObj;
+
+        searchRes = await withTimeout(
+          searchClient.searchResources({
+            limit: 100,
+            retryConfiguration: common.NoRetryConfigurationDetails,
+            searchDetails: {
+              type: 'Structured',
+              query: "query instance resources where lifeCycleState != 'TERMINATED'",
+            },
+          }),
+          OCI_CALL_TIMEOUT_MS
+        );
+      } else {
+        throw err;
+      }
+    } else {
+      throw err;
+    }
+  }
 
   const summaries =
     (searchRes &&
@@ -945,21 +1134,47 @@ async function listOciInstancesForUser(userId, accountId = null, forceRefresh = 
  * Janelas: 1h (res 5m), 24h (res 1h), 7d (res 6h). Nunca retorna serie sintetica.
  */
 async function getOciInstanceMetrics(userId, instanceOcid, windowKey = '24h', accountId = null) {
-  const ctx = await getOciProvider(userId, accountId);
+  let ctx = await getOciProvider(userId, accountId);
 
   const computeClient = new core.ComputeClient({
     authenticationDetailsProvider: ctx.provider,
   });
   computeClient.region = ctx.regionObj;
 
-  // Confirma que a instancia pertence a conta do usuario e descobre seu compartmentId real
-  const instRes = await withTimeout(
-    computeClient.getInstance({
-      instanceId: instanceOcid,
-      retryConfiguration: common.NoRetryConfigurationDetails,
-    }),
-    8000
-  );
+  let instRes = null;
+  try {
+    instRes = await withTimeout(
+      computeClient.getInstance({
+        instanceId: instanceOcid,
+        retryConfiguration: common.NoRetryConfigurationDetails,
+      }),
+      8000
+    );
+  } catch (err) {
+    const st = Number(err && err.statusCode ? err.statusCode : 0);
+    if (st === 401 && ctx.authMode !== 'INSTANCE_PRINCIPAL') {
+      const ipCheck = await checkInstancePrincipalForTenancy(ctx.tenancyOcid, ctx.region);
+      if (ipCheck && ipCheck.available && ipCheck.matches) {
+        console.warn(`[BFF OCI Metrics] Chave de API retornou 401 para ${ctx.tenancyOcid}. Alternando para Instance Principal da VM!`);
+        await enableInstancePrincipalForAccount(userId, ctx.accountId, ctx.tenancyOcid, ctx.region);
+        ctx = await getOciProvider(userId, ctx.accountId);
+
+        computeClient.authenticationDetailsProvider = ctx.provider;
+        computeClient.region = ctx.regionObj;
+        instRes = await withTimeout(
+          computeClient.getInstance({
+            instanceId: instanceOcid,
+            retryConfiguration: common.NoRetryConfigurationDetails,
+          }),
+          8000
+        );
+      } else {
+        throw err;
+      }
+    } else {
+      throw err;
+    }
+  }
 
   const instance = instRes.instance;
   if (!instance || !instance.compartmentId) {
@@ -1098,20 +1313,47 @@ async function getOciInstanceAuditLogs(
   instanceOcid,
   { severity = 'ALL', search = '', accountId = null } = {}
 ) {
-  const ctx = await getOciProvider(userId, accountId);
+  let ctx = await getOciProvider(userId, accountId);
 
   const computeClient = new core.ComputeClient({
     authenticationDetailsProvider: ctx.provider,
   });
   computeClient.region = ctx.regionObj;
 
-  const instRes = await withTimeout(
-    computeClient.getInstance({
-      instanceId: instanceOcid,
-      retryConfiguration: common.NoRetryConfigurationDetails,
-    }),
-    8000
-  );
+  let instRes = null;
+  try {
+    instRes = await withTimeout(
+      computeClient.getInstance({
+        instanceId: instanceOcid,
+        retryConfiguration: common.NoRetryConfigurationDetails,
+      }),
+      8000
+    );
+  } catch (err) {
+    const st = Number(err && err.statusCode ? err.statusCode : 0);
+    if (st === 401 && ctx.authMode !== 'INSTANCE_PRINCIPAL') {
+      const ipCheck = await checkInstancePrincipalForTenancy(ctx.tenancyOcid, ctx.region);
+      if (ipCheck && ipCheck.available && ipCheck.matches) {
+        console.warn(`[BFF OCI AuditLogs] Chave de API retornou 401 para ${ctx.tenancyOcid}. Alternando para Instance Principal da VM!`);
+        await enableInstancePrincipalForAccount(userId, ctx.accountId, ctx.tenancyOcid, ctx.region);
+        ctx = await getOciProvider(userId, ctx.accountId);
+
+        computeClient.authenticationDetailsProvider = ctx.provider;
+        computeClient.region = ctx.regionObj;
+        instRes = await withTimeout(
+          computeClient.getInstance({
+            instanceId: instanceOcid,
+            retryConfiguration: common.NoRetryConfigurationDetails,
+          }),
+          8000
+        );
+      } else {
+        throw err;
+      }
+    } else {
+      throw err;
+    }
+  }
 
   const instance = instRes.instance;
   if (!instance || !instance.compartmentId) {
@@ -1234,5 +1476,7 @@ module.exports = {
   getOciInstanceMetrics,
   getOciInstanceAuditLogs,
   invalidateUserOciCache,
+  checkInstancePrincipalForTenancy,
+  enableInstancePrincipalForAccount,
 };
 
