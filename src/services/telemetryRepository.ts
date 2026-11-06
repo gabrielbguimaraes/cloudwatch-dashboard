@@ -529,6 +529,53 @@ class TelemetryRepository {
   }
 
   /**
+   * Solicita envio do comando de pareamento por e-mail no BFF (POST /api/oci/pairing/:id/email)
+   */
+  async sendPairingCommandEmail(
+    sessionId: string,
+    command: string
+  ): Promise<{
+    ok: boolean;
+    deliveredByServer: boolean;
+    fallbackMailto: boolean;
+    email?: string;
+    message?: string;
+    error?: string;
+  }> {
+    try {
+      const res = await httpClient.post<any>(
+        `/oci/pairing/${encodeURIComponent(sessionId)}/email`,
+        { command },
+        8000
+      );
+
+      if (res.ok && res.data?.success) {
+        return {
+          ok: true,
+          deliveredByServer: Boolean(res.data.deliveredByServer),
+          fallbackMailto: Boolean(res.data.fallbackMailto),
+          email: res.data.email,
+          message: res.data.message,
+        };
+      }
+
+      return {
+        ok: false,
+        deliveredByServer: false,
+        fallbackMailto: true,
+        error: res.data?.error || res.error,
+      };
+    } catch (err: any) {
+      return {
+        ok: false,
+        deliveredByServer: false,
+        fallbackMailto: true,
+        error: err?.message,
+      };
+    }
+  }
+
+  /**
    * Conexao manual de conta OCI validada criptograficamente no BFF (POST /api/oci/accounts)
    */
   async connectManualOciAccount(payload: {
@@ -1245,6 +1292,59 @@ class TelemetryRepository {
       containers: [],
       source: 'LIVE_OCI',
       error: res.data?.error || res.error,
+    };
+  }
+
+  async restartDockerContainer(containerName: string): Promise<{
+    ok: boolean;
+    message: string;
+    containers?: DockerContainerInfo[];
+    error?: string;
+  }> {
+    const cleanName = containerName.trim();
+    if (!/^[a-zA-Z0-9_-]+$/.test(cleanName)) {
+      return {
+        ok: false,
+        message: 'Nome de container inválido.',
+        error: 'Nome de container inválido.',
+      };
+    }
+
+    const res = await httpClient.post<{
+      success: boolean;
+      restarted?: string;
+      containers?: DockerContainerInfo[];
+      message?: string;
+      error?: string;
+    }>(`/telemetry/containers/${encodeURIComponent(cleanName)}/restart`, {}, 15000);
+
+    if (res.ok && res.data?.success) {
+      const normalized = Array.isArray(res.data.containers)
+        ? res.data.containers.map((c: DockerContainerInfo) => {
+            const stLower = (c.status || '').toLowerCase();
+            const isRestarting = stLower.includes('restarting');
+            const isUp = stLower.includes('up') && !isRestarting;
+            return {
+              ...c,
+              state: isRestarting ? 'RESTARTING' : isUp ? 'RUNNING' : 'STOPPED',
+              health: isRestarting ? 'WARNING' : isUp ? 'HEALTHY' : 'CRITICAL',
+            } as DockerContainerInfo;
+          })
+        : undefined;
+
+      return {
+        ok: true,
+        message: res.data.message || `Container "${cleanName}" reiniciado com sucesso.`,
+        containers: normalized,
+      };
+    }
+
+    const errMsg =
+      res.data?.error || res.error || `Falha ao reiniciar o container "${cleanName}".`;
+    return {
+      ok: false,
+      message: errMsg,
+      error: errMsg,
     };
   }
 

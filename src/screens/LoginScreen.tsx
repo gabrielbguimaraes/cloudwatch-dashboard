@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -11,8 +11,10 @@ import {
   Platform,
   ScrollView,
 } from 'react-native';
+import EncryptedStorage from 'react-native-encrypted-storage';
 import { useAuth } from '../context/AuthContext';
 import { AppImage } from '../components/common/AppImage';
+import { FingerprintIcon } from '../components/common/AppIcons';
 
 export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   const { loginMaster, loginWithBiometrics, masterUser } = useAuth();
@@ -22,9 +24,29 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [isBioLoading, setIsBioLoading] = useState(false);
 
+  useEffect(() => {
+    if (masterUser?.username) {
+      setUsername((prev) => prev || masterUser.username);
+      return;
+    }
+    let mounted = true;
+    EncryptedStorage.getItem('@master_user_profile')
+      .then((raw) => {
+        if (!mounted || !raw) return;
+        const parsed = JSON.parse(raw);
+        if (parsed?.username) {
+          setUsername((prev) => prev || parsed.username);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, [masterUser?.username]);
+
   const handlePasswordLogin = async () => {
     if (!username.trim() || !password.trim()) {
-      Alert.alert('Campos Obrigatórios', 'Informe usuário, e-mail e senha para prosseguir.');
+      Alert.alert('Campos Obrigatórios', 'Informe seu usuário (ou e-mail) e senha para entrar.');
       return;
     }
 
@@ -43,7 +65,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
         console.log('Navegacao efetuada por estado condicional:', navErr);
       }
     } else {
-      Alert.alert('Falha na Autenticacao', result.error || 'Credenciais invalidas.');
+      Alert.alert('Falha na Autenticação', result.error || 'Credenciais inválidas.');
     }
   };
 
@@ -64,8 +86,8 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
       }
     } else {
       Alert.alert(
-        'Autenticacao Biometrica',
-        result.error || 'Biometria cancelada ou indisponivel no dispositivo. Utilize a Senha Mestre para acessar.'
+        'Autenticação Biométrica',
+        result.error || 'Biometria cancelada ou indisponível neste dispositivo. Utilize sua senha para entrar.'
       );
     }
   };
@@ -73,7 +95,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-        {/* Cabecalho Corporativo Estilo Google Workspace */}
+        {/* Cabecalho Corporativo */}
         <View style={styles.header}>
           <View style={styles.logoBox}>
             <AppImage
@@ -83,7 +105,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
               isCircular={false}
             />
           </View>
-          <Text style={styles.title}>Console de Operacoes</Text>
+          <Text style={styles.title}>CloudWatch Mobile</Text>
           <Text style={styles.subtitle}>Autentique-se para gerenciar sua infraestrutura</Text>
         </View>
 
@@ -100,9 +122,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
               <ActivityIndicator size="small" color="#FFFFFF" />
             ) : (
               <View style={styles.biometricBtnContent}>
-                <View style={styles.biometricIconBadge}>
-                  <Text style={styles.biometricIconText}>BIO</Text>
-                </View>
+                <FingerprintIcon size={18} color="#FFFFFF" />
                 <Text style={styles.biometricBtnText}>Entrar com Biometria</Text>
               </View>
             )}
@@ -110,7 +130,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
 
           <View style={styles.dividerRow}>
             <View style={styles.dividerLine} />
-            <Text style={styles.dividerText}>OU CONTINGENCIA</Text>
+            <Text style={styles.dividerText}>OU ENTRE COM SENHA</Text>
             <View style={styles.dividerLine} />
           </View>
 
@@ -148,7 +168,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
             {isLoading ? (
               <ActivityIndicator size="small" color="#FFFFFF" />
             ) : (
-              <Text style={styles.loginBtnText}>Acessar Estacao de Comando</Text>
+              <Text style={styles.loginBtnText}>Entrar</Text>
             )}
           </TouchableOpacity>
         </View>
@@ -159,7 +179,7 @@ export const LoginScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
           onPress={() => navigation.navigate('Register')}
           activeOpacity={0.7}
         >
-          <Text style={styles.registerLinkText}>Criar nova conta mestre</Text>
+          <Text style={styles.registerLinkText}>Criar nova conta</Text>
         </TouchableOpacity>
       </ScrollView>
     </SafeAreaView>

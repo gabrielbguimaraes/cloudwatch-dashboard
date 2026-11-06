@@ -34,6 +34,11 @@ import Svg, {
 import { useCloud } from '../context/CloudContext';
 import { useAuth } from '../context/AuthContext';
 import { CloudLogo } from '../components/common/CloudLogo';
+import {
+  FileReportIcon,
+  ChartOverlayIcon,
+  RefreshCwIcon,
+} from '../components/common/AppIcons';
 import { SerialConsoleModal } from '../components/SerialConsoleModal';
 import { Toast } from '../components/common/Toast';
 import { CLOUD_PALETTES } from '../theme/tokens';
@@ -59,7 +64,6 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
     selectedResource,
     setSelectedResource,
     refreshMetrics,
-    simulateLoadSpike,
     mitigateAnomaly,
   } = useCloud();
 
@@ -95,6 +99,7 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
   const [probeError, setProbeError] = useState<string | null>(null);
   const [isProbingNetwork, setIsProbingNetwork] = useState<boolean>(false);
   const [dockerContainers, setDockerContainers] = useState<DockerContainerInfo[]>([]);
+  const [restartingContainerName, setRestartingContainerName] = useState<string | null>(null);
   const [isSshModalOpen, setIsSshModalOpen] = useState<boolean>(false);
   const [isMitigating, setIsMitigating] = useState<boolean>(false);
 
@@ -284,11 +289,25 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
     }
   };
 
-  const handleTriggerStress = async () => {
-    await simulateLoadSpike(instanceOcid);
-    await simulateLoadSpike(activeInstance.id);
-    setReloadTick((n) => n + 1);
-    setToastMessage(`Pico de carga (> 85% SLA) simulado em ${activeInstance.name}!`);
+  const handleRestartDockerContainer = async (containerName: string) => {
+    if (!containerName || restartingContainerName) return;
+    setRestartingContainerName(containerName);
+    try {
+      const res = await telemetryRepository.restartDockerContainer(containerName);
+      if (res.ok) {
+        if (res.containers) {
+          setDockerContainers(res.containers);
+        }
+        setReloadTick((n) => n + 1);
+        setToastMessage(res.message);
+      } else {
+        setToastMessage(res.error || `Falha ao reiniciar container ${containerName}.`);
+      }
+    } catch {
+      setToastMessage(`Erro de rede ao reiniciar container ${containerName}.`);
+    } finally {
+      setRestartingContainerName(null);
+    }
   };
 
   const handleMitigateRootCause = async () => {
@@ -489,8 +508,9 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
               disabled={isExportingPdf}
               activeOpacity={0.7}
             >
+              <FileReportIcon size={14} color="#93C5FD" />
               <Text style={styles.pdfHeaderBtnText}>
-                {isExportingPdf ? 'Gerando...' : 'Exportar PDF'}
+                {isExportingPdf ? 'Gerando...' : 'Relatório'}
               </Text>
             </TouchableOpacity>
           </View>
@@ -618,11 +638,9 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
               onPress={() => setIsCorrelationActive(!isCorrelationActive)}
               activeOpacity={0.8}
             >
-              <View
-                style={[
-                  styles.toggleIndicator,
-                  isCorrelationActive && styles.toggleIndicatorActive,
-                ]}
+              <ChartOverlayIcon
+                size={14}
+                color={isCorrelationActive ? '#F9A8D4' : '#9AA0A6'}
               />
               <Text
                 style={[
@@ -630,7 +648,7 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
                   isCorrelationActive && styles.correlationToggleTextActive,
                 ]}
               >
-                CPU × Memória
+                Sobrepor RAM
               </Text>
             </TouchableOpacity>
           </View>
@@ -845,32 +863,35 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
           </View>
         </View>
 
-        {/* Diagnóstico Automático de Causa Raiz (Root-Cause Analyzer - Etapa 3.2) */}
+        {/* Diagnóstico de Causa Raiz */}
         {(() => {
-          const restartingContainer = dockerContainers.find(
-            (c) =>
-              c.state === 'RESTARTING' ||
-              (c.status || '').toLowerCase().includes('restarting')
-          );
+          const failingContainer = dockerContainers.find((c) => {
+            const st = (c.status || '').toLowerCase();
+            return (
+              c.state !== 'RUNNING' ||
+              st.includes('restarting') ||
+              st.includes('exited') ||
+              st.includes('dead')
+            );
+          });
           const hasErrorLog = logsData.some((l) => l.severity === 'ERROR');
           const isCpuCritical = currentCpu !== null && currentCpu >= SLA_CRITICAL_THRESHOLD;
           const isMemCritical = currentMem !== null && currentMem >= SLA_CRITICAL_THRESHOLD;
           const isAnomalyActive =
-            isCpuCritical || isMemCritical || Boolean(restartingContainer) || hasErrorLog;
+            isCpuCritical || isMemCritical || Boolean(failingContainer) || hasErrorLog;
 
-          const rootCauseText = isCpuCritical
-            ? `Saturação crítica de CPU (${currentCpu?.toFixed(
-                1
-              )}%) correlacionada com fila de conexões em PostgreSQL (:5432)${
-                restartingContainer
-                  ? ` e loop de restart no container ${restartingContainer.name}`
-                  : ''
-              }.`
-            : restartingContainer
-            ? `Anomalia detectada: Container Docker "${restartingContainer.name}" em loop de inicialização (${restartingContainer.status}).`
+          const rootCauseText = failingContainer
+            ? `Container Docker "${failingContainer.name}" apresenta anomalia (${failingContainer.status}).`
+            : isCpuCritical
+            ? `Utilização elevada de CPU (${currentCpu?.toFixed(1)}%), acima do limiar operacional de ${SLA_CRITICAL_THRESHOLD}%.`
+            : isMemCritical
+            ? `Pressão elevada de memória RAM (${currentMem?.toFixed(1)}%), acima do limiar operacional de ${SLA_CRITICAL_THRESHOLD}%.`
             : hasErrorLog
-            ? `Evento de erro crítico registrado nos logs de auditoria da instância.`
-            : 'Todos os subsistemas operando nominalmente abaixo do limiar de alerta SLA (85%).';
+            ? `Evento de erro registrado nos eventos recentes de auditoria da instância.`
+            : 'Todos os subsistemas operando normalmente abaixo do limiar de alerta (85%).';
+
+          const isRestartingFailing =
+            Boolean(failingContainer) && restartingContainerName === failingContainer?.name;
 
           return (
             <View
@@ -887,31 +908,21 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
               ]}
             >
               <View style={styles.proberHeaderRow}>
-                <View style={{ flex: 1, marginRight: 8 }}>
+                <View style={{ flex: 1 }}>
                   <Text
                     style={[
                       styles.proberTitle,
                       { color: isAnomalyActive ? '#FCA5A5' : '#4ADE80' },
                     ]}
                   >
-                    DIAGNÓSTICO DE CAUSA RAIZ (ROOT-CAUSE ANALYZER)
+                    DIAGNÓSTICO DE CAUSA RAIZ
                   </Text>
                   <Text style={styles.proberSubtitle}>
                     {isAnomalyActive
-                      ? 'Impacto no SLA: Risco iminente de violação do limiar de 85%'
-                      : 'Impacto no SLA: Nenhum risco detectado (99.98% SLA)'}
+                      ? 'Impacto no SLA: Atenção requerida nos recursos monitorados'
+                      : 'Impacto no SLA: Nenhum risco detectado'}
                   </Text>
                 </View>
-
-                <TouchableOpacity
-                  style={[
-                    styles.probeNowBtn,
-                    { borderColor: '#38BDF8', backgroundColor: '#0F2942' },
-                  ]}
-                  onPress={() => setIsSshModalOpen(true)}
-                >
-                  <Text style={styles.probeNowBtnText}>Terminal SSH (Bitvise)</Text>
-                </TouchableOpacity>
               </View>
 
               <Text
@@ -919,8 +930,8 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
                   color: '#E6EDF3',
                   fontSize: 12,
                   lineHeight: 18,
-                  marginTop: 8,
-                  marginBottom: 12,
+                  marginTop: 4,
+                  marginBottom: failingContainer || (activeInstance.provider !== 'OCI' && isAnomalyActive) ? 12 : 2,
                 }}
               >
                 <Text style={{ fontWeight: '800', color: '#93C5FD' }}>
@@ -929,44 +940,39 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
                 {rootCauseText}
               </Text>
 
-              <View style={{ flexDirection: 'row', gap: 10, flexWrap: 'wrap' }}>
-                {isAnomalyActive && (
+              {activeInstance.provider === 'OCI' && failingContainer ? (
+                <View style={{ flexDirection: 'row', gap: 10, flexWrap: 'wrap' }}>
                   <TouchableOpacity
-                    style={{
-                      backgroundColor: '#10B981',
-                      paddingHorizontal: 14,
-                      paddingVertical: 9,
-                      borderRadius: 8,
-                    }}
+                    style={styles.dockerRemediatePrimaryBtn}
+                    onPress={() => handleRestartDockerContainer(failingContainer.name)}
+                    disabled={Boolean(restartingContainerName)}
+                    activeOpacity={0.8}
+                  >
+                    {isRestartingFailing ? (
+                      <ActivityIndicator size="small" color="#04130B" />
+                    ) : (
+                      <RefreshCwIcon size={14} color="#04130B" />
+                    )}
+                    <Text style={styles.dockerRemediatePrimaryText}>
+                      {isRestartingFailing
+                        ? `Reiniciando ${failingContainer.name}...`
+                        : 'Reiniciar Container com Falha (Docker Restart)'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              ) : activeInstance.provider !== 'OCI' && isAnomalyActive ? (
+                <View style={{ flexDirection: 'row', gap: 10, flexWrap: 'wrap' }}>
+                  <TouchableOpacity
+                    style={styles.dockerRemediatePrimaryBtn}
                     onPress={handleMitigateRootCause}
                     disabled={isMitigating}
                   >
-                    <Text
-                      style={{ color: '#04130B', fontSize: 12, fontWeight: '800' }}
-                    >
-                      {isMitigating
-                        ? 'Mitigando...'
-                        : 'Executar Mitigação Automática'}
+                    <Text style={styles.dockerRemediatePrimaryText}>
+                      {isMitigating ? 'Normalizando...' : 'Normalizar Instância'}
                     </Text>
                   </TouchableOpacity>
-                )}
-
-                <TouchableOpacity
-                  style={{
-                    backgroundColor: '#2A181D',
-                    borderWidth: 1,
-                    borderColor: '#EF4444',
-                    paddingHorizontal: 12,
-                    paddingVertical: 9,
-                    borderRadius: 8,
-                  }}
-                  onPress={handleTriggerStress}
-                >
-                  <Text style={{ color: '#FCA5A5', fontSize: 12, fontWeight: '700' }}>
-                    Simular Pico de Carga (&gt;85%)
-                  </Text>
-                </TouchableOpacity>
-              </View>
+                </View>
+              ) : null}
             </View>
           );
         })()}
@@ -1055,15 +1061,20 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
             <Text style={styles.proberTitle}>CONTAINERS DOCKER NO HOST (VM OCI)</Text>
             <View style={styles.dockerList}>
               {dockerContainers.map((cnt) => {
-                const isRestarting =
-                  cnt.state === 'RESTARTING' ||
-                  (cnt.status || '').toLowerCase().includes('restarting');
+                const statusLower = (cnt.status || '').toLowerCase();
+                const isUnhealthy =
+                  cnt.state !== 'RUNNING' ||
+                  statusLower.includes('restarting') ||
+                  statusLower.includes('exited') ||
+                  statusLower.includes('dead');
+                const isThisRestarting = restartingContainerName === cnt.name;
+
                 return (
                   <View
                     key={cnt.id || cnt.name}
                     style={[
                       styles.dockerItem,
-                      isRestarting && {
+                      isUnhealthy && {
                         borderColor: '#F59E0B',
                         backgroundColor: 'rgba(245, 158, 11, 0.1)',
                       },
@@ -1073,7 +1084,7 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
                       <Text
                         style={[
                           styles.dockerName,
-                          isRestarting && { color: '#FDE68A' },
+                          isUnhealthy && { color: '#FDE68A' },
                         ]}
                       >
                         {cnt.name}
@@ -1083,23 +1094,60 @@ export const MetricsDetailScreen: React.FC<{ navigation: any; route?: any }> = (
                         Portas: {cnt.ports || 'Interna'}
                       </Text>
                     </View>
-                    <View
-                      style={[
-                        styles.dockerBadge,
-                        isRestarting && {
-                          backgroundColor: '#3A3018',
-                          borderColor: '#F59E0B',
-                        },
-                      ]}
-                    >
-                      <Text
+
+                    <View style={styles.dockerRightActions}>
+                      <View
                         style={[
-                          styles.dockerBadgeText,
-                          isRestarting && { color: '#FDE68A' },
+                          styles.dockerBadge,
+                          isUnhealthy && {
+                            backgroundColor: '#3A3018',
+                            borderColor: '#F59E0B',
+                            borderWidth: 1,
+                          },
                         ]}
                       >
-                        {cnt.status}
-                      </Text>
+                        <Text
+                          style={[
+                            styles.dockerBadgeText,
+                            isUnhealthy && { color: '#FDE68A' },
+                          ]}
+                        >
+                          {cnt.status}
+                        </Text>
+                      </View>
+
+                      <TouchableOpacity
+                        style={[
+                          styles.dockerRestartBtn,
+                          isUnhealthy && styles.dockerRestartBtnAlert,
+                          Boolean(restartingContainerName) && { opacity: 0.6 },
+                        ]}
+                        onPress={() => handleRestartDockerContainer(cnt.name)}
+                        disabled={Boolean(restartingContainerName)}
+                        activeOpacity={0.75}
+                      >
+                        {isThisRestarting ? (
+                          <ActivityIndicator
+                            size="small"
+                            color={isUnhealthy ? '#FDE68A' : '#93C5FD'}
+                          />
+                        ) : (
+                          <>
+                            <RefreshCwIcon
+                              size={12}
+                              color={isUnhealthy ? '#FDE68A' : '#93C5FD'}
+                            />
+                            <Text
+                              style={[
+                                styles.dockerRestartBtnText,
+                                isUnhealthy && { color: '#FDE68A' },
+                              ]}
+                            >
+                              Reiniciar
+                            </Text>
+                          </>
+                        )}
+                      </TouchableOpacity>
                     </View>
                   </View>
                 );
@@ -1303,9 +1351,12 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   pdfHeaderBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
     backgroundColor: '#1E3A5F',
     paddingVertical: 6,
-    paddingHorizontal: 12,
+    paddingHorizontal: 11,
     borderRadius: 8,
     borderWidth: 1,
     borderColor: '#3B82F6',
@@ -1774,6 +1825,44 @@ const styles = StyleSheet.create({
     color: '#4ADE80',
     fontSize: 10,
     fontWeight: '700',
+  },
+  dockerRightActions: {
+    alignItems: 'flex-end',
+    gap: 6,
+  },
+  dockerRestartBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#182232',
+    borderWidth: 1,
+    borderColor: '#2E4361',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  dockerRestartBtnAlert: {
+    backgroundColor: '#3A2812',
+    borderColor: '#F59E0B',
+  },
+  dockerRestartBtnText: {
+    color: '#93C5FD',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  dockerRemediatePrimaryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    backgroundColor: '#10B981',
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 8,
+  },
+  dockerRemediatePrimaryText: {
+    color: '#04130B',
+    fontSize: 12,
+    fontWeight: '800',
   },
   logsSection: {
     backgroundColor: '#161A22',

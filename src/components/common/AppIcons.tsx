@@ -199,3 +199,246 @@ export const PowerIcon: React.FC<IconProps> = ({ size = 18, color = '#8AB4F8' })
     />
   </Svg>
 );
+
+/**
+ * Icone de Impressao Digital (Biometria)
+ */
+export const FingerprintIcon: React.FC<IconProps> = ({ size = 18, color = '#FFFFFF' }) => (
+  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+    <Path
+      d="M12 10C10.9 10 10 10.9 10 12C10 14.8 9.2 17.4 7.8 19.6"
+      stroke={color}
+      strokeWidth="2"
+      strokeLinecap="round"
+    />
+    <Path
+      d="M14 12C14 15.3 13 18.4 11.3 21"
+      stroke={color}
+      strokeWidth="2"
+      strokeLinecap="round"
+    />
+    <Path
+      d="M6.2 15.5C6.7 14.4 7 13.2 7 12C7 9.2 9.2 7 12 7C14.8 7 17 9.2 17 12C17 14.2 16.5 16.3 15.6 18.2"
+      stroke={color}
+      strokeWidth="2"
+      strokeLinecap="round"
+    />
+    <Path
+      d="M4.5 10C5.4 6.5 8.4 4 12 4C15.6 4 18.6 6.5 19.5 10"
+      stroke={color}
+      strokeWidth="2"
+      strokeLinecap="round"
+    />
+  </Svg>
+);
+
+/**
+ * Icone de Relatorio / Exportacao PDF
+ */
+export const FileReportIcon: React.FC<IconProps> = ({ size = 15, color = '#93C5FD' }) => (
+  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+    <Path
+      d="M14 2H6C4.9 2 4 2.9 4 4V20C4 21.1 4.9 22 6 22H18C19.1 22 20 21.1 20 20V8L14 2Z"
+      stroke={color}
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <Path
+      d="M14 2V8H20"
+      stroke={color}
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <Path
+      d="M8 13H16M8 17H13"
+      stroke={color}
+      strokeWidth="2"
+      strokeLinecap="round"
+    />
+  </Svg>
+);
+
+/**
+ * Icone de Sobreposicao de Curvas (CPU + Memoria)
+ */
+export const ChartOverlayIcon: React.FC<IconProps> = ({ size = 14, color = '#9AA0A6' }) => (
+  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+    <Path
+      d="M3 17L9 11L13 15L21 7"
+      stroke={color}
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <Path
+      d="M3 21L9 16L14 19L21 13"
+      stroke={color}
+      strokeWidth="1.8"
+      strokeDasharray="3 3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </Svg>
+);
+
+/**
+ * Icone de Terminal / Console SSH
+ */
+export const TerminalIcon: React.FC<IconProps> = ({ size = 18, color = '#38BDF8' }) => (
+  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+    <Rect
+      x="2.5"
+      y="4"
+      width="19"
+      height="16"
+      rx="3"
+      stroke={color}
+      strokeWidth="2"
+    />
+    <Path
+      d="M7 9L10.5 12L7 15"
+      stroke={color}
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <Path
+      d="M12.5 15H17"
+      stroke={color}
+      strokeWidth="2"
+      strokeLinecap="round"
+    />
+  </Svg>
+);
+
+/**
+ * Icone de Fixar / Destaque no Topo
+ */
+export const PinIcon: React.FC<IconProps> = ({ size = 16, color = '#93C5FD', focused }) => (
+  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+    <Path
+      d="M16 3L21 8L19 10L16.5 9.5L13 13L13.5 17.5L11.5 19.5L8 16L3.5 20.5L3.5 20.5M8 16L4.5 12.5L6.5 10.5L11 11L14.5 7.5L14 5L16 3Z"
+      stroke={color}
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      fill={focused ? color : 'none'}
+      fillOpacity={focused ? 0.3 : 0}
+    />
+  </Svg>
+);
+
+/**
+ * Icone de Reiniciar / Refresh (Docker Restart)
+ */
+export const RefreshCwIcon: React.FC<IconProps> = ({ size = 14, color = '#4ADE80' }) => (
+  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+    <Path
+      d="M21 4V10H15"
+      stroke={color}
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <Path
+      d="M20.49 15A9 9 0 1 1 18.36 5.64L21 10"
+      stroke={color}
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </Svg>
+);
+
+/**
+ * Icone de Copiar para Area de Transferencia
+ */
+export const CopyIcon: React.FC<IconProps> = ({ size = 14, color = '#FFFFFF' }) => (
+  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+    <Rect
+      x="9"
+      y="9"
+      width="13"
+      height="13"
+      rx="2"
+      stroke={color}
+      strokeWidth="2"
+    />
+    <Path
+      d="M5 15H4C2.9 15 2 14.1 2 13V4C2 2.9 2.9 2 4 2H13C14.1 2 15 2.9 15 4V5"
+      stroke={color}
+      strokeWidth="2"
+      strokeLinecap="round"
+    />
+  </Svg>
+);
+
+/**
+ * Icone de Enviar por E-mail
+ */
+export const MailSendIcon: React.FC<IconProps> = ({ size = 14, color = '#E8EAED' }) => (
+  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+    <Rect
+      x="2"
+      y="4"
+      width="20"
+      height="16"
+      rx="2.5"
+      stroke={color}
+      strokeWidth="2"
+    />
+    <Path
+      d="M22 6.5L12 13L2 6.5"
+      stroke={color}
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </Svg>
+);
+
+/**
+ * Icone de Compartilhar Nativo
+ */
+export const ShareIcon: React.FC<IconProps> = ({ size = 14, color = '#E8EAED' }) => (
+  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+    <Circle cx="18" cy="5" r="3" stroke={color} strokeWidth="2" />
+    <Circle cx="6" cy="12" r="3" stroke={color} strokeWidth="2" />
+    <Circle cx="18" cy="19" r="3" stroke={color} strokeWidth="2" />
+    <Path
+      d="M8.6 13.5L15.4 17.5M15.4 6.5L8.6 10.5"
+      stroke={color}
+      strokeWidth="2"
+      strokeLinecap="round"
+    />
+  </Svg>
+);
+
+/**
+ * Icone de Ampliar Imagem (Lupa / Zoom)
+ */
+export const ZoomInIcon: React.FC<IconProps> = ({ size = 13, color = '#93C5FD' }) => (
+  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+    <Circle cx="11" cy="11" r="7" stroke={color} strokeWidth="2" />
+    <Path
+      d="M21 21L16.35 16.35M11 8V14M8 11H14"
+      stroke={color}
+      strokeWidth="2"
+      strokeLinecap="round"
+    />
+  </Svg>
+);
+
+/**
+ * Icone de Menu de Tres Pontos Horizontais
+ */
+export const MoreHorizontalIcon: React.FC<IconProps> = ({ size = 16, color = '#9AA0A6' }) => (
+  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+    <Circle cx="5" cy="12" r="1.8" fill={color} />
+    <Circle cx="12" cy="12" r="1.8" fill={color} />
+    <Circle cx="19" cy="12" r="1.8" fill={color} />
+  </Svg>
+);
+

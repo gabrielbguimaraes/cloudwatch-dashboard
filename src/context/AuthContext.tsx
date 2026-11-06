@@ -16,6 +16,8 @@ import apiClient, {
   saveAuthTokens,
   getAuthTokens,
   clearAuthTokens,
+  clearVolatileAccessToken,
+  purgeKeychainForActiveSessionOnly,
   setUnauthorizedHandler,
 } from '../services/apiClient';
 import { BIOMETRIC_REAUTH_WINDOW_MS } from '../config/env';
@@ -70,6 +72,7 @@ interface AuthContextData {
   loginWithBiometrics: () => Promise<{ success: boolean; error?: string }>;
   logoutMaster: () => Promise<void>;
   logout: () => void;
+  revokeBiometricsOnDevice: () => Promise<boolean>;
   hasStoredCredentials: boolean;
   storedCredentials: null;
   selectedLoginProvider: CloudProvider;
@@ -329,7 +332,15 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         accessible: Keychain.ACCESSIBLE.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
       });
     } catch {
-      // Dispositivo sem biometria cadastrada — segue normalmente com senha
+      try {
+        await Keychain.setGenericPassword(BIOMETRIC_GATE_USER, userId, {
+          service: BIOMETRIC_GATE_SERVICE,
+          accessControl: Keychain.ACCESS_CONTROL.BIOMETRY_ANY_OR_DEVICE_PASSCODE,
+          accessible: Keychain.ACCESSIBLE.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+        });
+      } catch {
+        // Dispositivo sem biometria cadastrada — segue normalmente com senha
+      }
     }
   };
 
@@ -826,26 +837,61 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   /**
-   * Logout: revoga refresh token no BFF, apaga tokens do Keychain e limpa estado e caches do usuario
+   * Logout comum ("Sair da Conta"):
+   * Limpa apenas o estado de sessao ativa em memoria e o accessToken volatil,
+   * preservando o vinculo biometrico e o refreshToken no Keychain local para
+   * permitir reentrada imediata com "Entrar com Biometria" na LoginScreen.
    */
   const logoutMaster = async (): Promise<void> => {
-    const currentUserId = masterUser?.id;
-    try {
-      const tokens = await getAuthTokens();
-      await apiService.logoutSession(tokens?.refreshToken);
-    } catch {
-      // ignora falha de rede ao deslogar
-    } finally {
-      await clearAuthTokens();
-      await clearUserScopedLocalData(currentUserId);
-      setAccessTokenState('');
-      setJustRegistered(false);
-      setIsAuthenticated(false);
-    }
+    await clearVolatileAccessToken();
+    setMasterUser(null);
+    setAccessTokenState('');
+    setCloudAccounts(createEmptyAccountsState());
+    setOciAccountsList([]);
+    setActiveOciAccountId(null);
+    setUnlockedClouds({ OCI: 0, AWS: 0, GCP: 0 });
+    setIsOwnerUser(false);
+    setJustRegistered(false);
+    setIsAuthenticated(false);
   };
 
   const logout = () => {
     logoutMaster();
+  };
+
+  /**
+   * Revoga explicitamente o vinculo biometrico e os tokens persistidos no Keychain deste aparelho.
+   */
+  const revokeBiometricsOnDevice = async (): Promise<boolean> => {
+    try {
+      const tokens = await getAuthTokens();
+      if (tokens?.refreshToken) {
+        await apiService.logoutSession(tokens.refreshToken).catch(() => {});
+      }
+
+      await Keychain.resetGenericPassword({ service: BIOMETRIC_GATE_SERVICE }).catch(() => {});
+      await purgeKeychainForActiveSessionOnly(accessTokenState);
+      await EncryptedStorage.removeItem(STORAGE_KEY_MASTER_USER).catch(() => {});
+
+      const updated: Record<SupportedCloud, CloudCredentialConfig> = {
+        OCI: { ...cloudAccounts.OCI, biometricsEnabled: false },
+        AWS: { ...cloudAccounts.AWS, biometricsEnabled: false },
+        GCP: { ...cloudAccounts.GCP, biometricsEnabled: false },
+      };
+      setCloudAccounts(updated);
+
+      if (masterUser?.id) {
+        await AsyncStorage.setItem(
+          getCloudAccountsStorageKey(masterUser.id),
+          JSON.stringify(updated)
+        ).catch(() => {});
+      }
+
+      return true;
+    } catch (err) {
+      console.warn('[AuthContext] Erro ao revogar biometria no aparelho:', err);
+      return false;
+    }
   };
 
   // Sessao sem valores fabricados: role vem do BFF (padrao USER) e 2FA permanece false ate ser implementado
@@ -893,6 +939,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         loginWithBiometrics,
         logoutMaster,
         logout,
+        revokeBiometricsOnDevice,
         hasStoredCredentials: Boolean(masterUser),
         storedCredentials: null,
         selectedLoginProvider: activeProvider,

@@ -25,6 +25,10 @@ import {
   Platform,
   ToastAndroid,
   Alert,
+  Image,
+  Modal,
+  Linking,
+  ImageSourcePropType,
 } from 'react-native';
 import { useAuth } from '../context/AuthContext';
 import { useCloud } from '../context/CloudContext';
@@ -34,6 +38,23 @@ import {
   OciPairingStatusPayload,
 } from '../services/telemetryRepository';
 import { CloudLogo } from '../components/CloudLogo';
+import {
+  CopyIcon,
+  MailSendIcon,
+  ShareIcon,
+  ZoomInIcon,
+  GovernanceIcon,
+} from '../components/common/AppIcons';
+
+// Mapeamento visual verificado das capturas reais de tela do tutorial OCI Cloud Shell:
+// passo-3.png -> Console Inicial da Oracle Cloud (cloud.oracle.com)
+// passo-2.png -> Menu Developer Tools -> Cloud Shell no canto superior direito
+// passo-1.png -> Terminal do Cloud Shell executando o comando curl | bash
+const ONBOARDING_STEP_IMAGES = {
+  consoleHome: require('../assets/images/passo-3.png'),
+  openCloudShell: require('../assets/images/passo-2.png'),
+  pasteCommand: require('../assets/images/passo-1.png'),
+};
 
 const READONLY_IAM_POLICIES = [
   'Allow group CloudWatchReaders to inspect instances in tenancy',
@@ -256,6 +277,7 @@ export const ConnectCloudsIntroScreen: React.FC<{ navigation: any }> = ({ naviga
 // ============================================================================
 export const OciOnboardingScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   const {
+    masterUser,
     isOwnerUser,
     refreshCloudAccounts,
     linkCloudProvider,
@@ -269,7 +291,12 @@ export const OciOnboardingScreen: React.FC<{ navigation: any }> = ({ navigation 
   const [isGeneratingCommand, setIsGeneratingCommand] = useState(false);
   const [commandError, setCommandError] = useState<string | null>(null);
   const [copiedFeedback, setCopiedFeedback] = useState(false);
+  const [isSendingEmail, setIsSendingEmail] = useState(false);
   const [remainingSeconds, setRemainingSeconds] = useState<number>(0);
+  const [previewStepImage, setPreviewStepImage] = useState<{
+    title: string;
+    source: ImageSourcePropType;
+  } | null>(null);
 
   // Secoes expansiveis
   const [showErrorHelp, setShowErrorHelp] = useState(false);
@@ -403,11 +430,56 @@ export const OciOnboardingScreen: React.FC<{ navigation: any }> = ({ navigation 
     if (!pairingSession?.command) return;
     try {
       await Share.share({
-        title: 'Comando de conexão CloudWatch — Oracle Cloud',
+        title: 'Comando OCI CloudWatch',
         message: pairingSession.command,
       });
     } catch {
       // compartilhamento cancelado pelo usuario
+    }
+  };
+
+  const handleEmailCommand = async () => {
+    if (!pairingSession?.command) return;
+    setIsSendingEmail(true);
+
+    const targetEmail = masterUser?.email || '';
+    const subject = 'Comando de Conexão OCI - CloudWatch';
+    const bodyText = `Abra o OCI Cloud Shell no computador e cole o comando abaixo:\n\n${pairingSession.command}`;
+
+    try {
+      const bffRes = await telemetryRepository.sendPairingCommandEmail(
+        pairingSession.id,
+        pairingSession.command
+      );
+
+      if (bffRes.ok && bffRes.deliveredByServer) {
+        const sentTo = bffRes.email || targetEmail;
+        if (Platform.OS === 'android') {
+          ToastAndroid.show(`Comando enviado para ${sentTo}`, ToastAndroid.SHORT);
+        } else {
+          Alert.alert('E-mail enviado', `Comando enviado para ${sentTo}.`);
+        }
+        return;
+      }
+
+      const recipient = bffRes.email || targetEmail;
+      const mailtoUrl =
+        `mailto:${encodeURIComponent(recipient)}` +
+        `?subject=${encodeURIComponent(subject)}` +
+        `&body=${encodeURIComponent(bodyText)}`;
+
+      await Linking.openURL(mailtoUrl);
+    } catch {
+      try {
+        await Share.share({
+          title: 'Comando OCI CloudWatch',
+          message: pairingSession.command,
+        });
+      } catch {
+        // cancelado pelo usuario
+      }
+    } finally {
+      setIsSendingEmail(false);
     }
   };
 
@@ -619,23 +691,48 @@ export const OciOnboardingScreen: React.FC<{ navigation: any }> = ({ navigation 
                 </Text>
               </View>
 
+              {masterUser?.email ? (
+                <Text style={styles.emailTargetCaption} numberOfLines={1}>
+                  Enviar comando para:{' '}
+                  <Text style={styles.emailTargetStrong}>{masterUser.email}</Text>
+                </Text>
+              ) : null}
+
               <View style={styles.commandActionsRow}>
                 <TouchableOpacity
                   style={styles.copyActionBtn}
                   onPress={handleCopyCommand}
                   activeOpacity={0.8}
                 >
+                  <CopyIcon size={13} color="#FFFFFF" />
                   <Text style={styles.copyActionBtnText}>
-                    {copiedFeedback ? '✓ Copiado!' : 'Copiar'}
+                    {copiedFeedback ? 'Copiado!' : 'Copiar'}
                   </Text>
                 </TouchableOpacity>
 
                 <TouchableOpacity
-                  style={styles.shareActionBtn}
-                  onPress={handleShareCommand}
+                  style={styles.emailActionBtn}
+                  onPress={handleEmailCommand}
+                  disabled={isSendingEmail}
                   activeOpacity={0.8}
                 >
-                  <Text style={styles.shareActionBtnText}>Compartilhar</Text>
+                  {isSendingEmail ? (
+                    <ActivityIndicator size="small" color="#E8EAED" />
+                  ) : (
+                    <>
+                      <MailSendIcon size={14} color="#93C5FD" />
+                      <Text style={styles.emailActionBtnText}>Enviar por E-mail</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.shareIconOnlyBtn}
+                  onPress={handleShareCommand}
+                  activeOpacity={0.8}
+                  accessibilityLabel="Compartilhar comando"
+                >
+                  <ShareIcon size={15} color="#E8EAED" />
                 </TouchableOpacity>
               </View>
             </View>
@@ -660,12 +757,26 @@ export const OciOnboardingScreen: React.FC<{ navigation: any }> = ({ navigation 
             No computador, acesse <Text style={styles.inlineHighlight}>cloud.oracle.com</Text> e faça
             login normalmente na sua conta.
           </Text>
-          <View style={styles.onboardingImageSlot}>
-            <Text style={styles.onboardingImageSlotTitle}>Espaço para imagem do Passo 2</Text>
-            <Text style={styles.onboardingImageSlotPath}>
-              assets/onboarding/step2-console-login.png
-            </Text>
-          </View>
+          <TouchableOpacity
+            style={styles.stepScreenshotCard}
+            activeOpacity={0.85}
+            onPress={() =>
+              setPreviewStepImage({
+                title: 'Passo 2 — Console da Oracle Cloud',
+                source: ONBOARDING_STEP_IMAGES.consoleHome,
+              })
+            }
+          >
+            <Image
+              source={ONBOARDING_STEP_IMAGES.consoleHome}
+              style={styles.stepScreenshotImage}
+              resizeMode="contain"
+            />
+            <View style={styles.zoomOverlayBadge}>
+              <ZoomInIcon size={12} color="#93C5FD" />
+              <Text style={styles.zoomOverlayText}>Ampliar</Text>
+            </View>
+          </TouchableOpacity>
         </View>
 
         {/* PASSO 3: ABRIR O CLOUD SHELL */}
@@ -678,14 +789,29 @@ export const OciOnboardingScreen: React.FC<{ navigation: any }> = ({ navigation 
           </View>
           <Text style={styles.stepBodyText}>
             No canto superior direito do painel da Oracle Cloud, clique no ícone{' '}
-            <Text style={styles.inlineHighlight}>{'>_'}</Text> (Developer Tools → Cloud Shell).
+            <Text style={styles.inlineHighlight}>{'>_'}</Text> e selecione{' '}
+            <Text style={styles.inlineHighlight}>Cloud Shell</Text>.
           </Text>
-          <View style={styles.onboardingImageSlot}>
-            <Text style={styles.onboardingImageSlotTitle}>Espaço para imagem do Passo 3</Text>
-            <Text style={styles.onboardingImageSlotPath}>
-              assets/onboarding/step3-open-cloudshell.png
-            </Text>
-          </View>
+          <TouchableOpacity
+            style={styles.stepScreenshotCard}
+            activeOpacity={0.85}
+            onPress={() =>
+              setPreviewStepImage({
+                title: 'Passo 3 — Abrir o Cloud Shell no topo direito',
+                source: ONBOARDING_STEP_IMAGES.openCloudShell,
+              })
+            }
+          >
+            <Image
+              source={ONBOARDING_STEP_IMAGES.openCloudShell}
+              style={styles.stepScreenshotImage}
+              resizeMode="contain"
+            />
+            <View style={styles.zoomOverlayBadge}>
+              <ZoomInIcon size={12} color="#93C5FD" />
+              <Text style={styles.zoomOverlayText}>Ampliar</Text>
+            </View>
+          </TouchableOpacity>
         </View>
 
         {/* PASSO 4: COLAR O COMANDO E PRESSIONAR ENTER */}
@@ -701,12 +827,26 @@ export const OciOnboardingScreen: React.FC<{ navigation: any }> = ({ navigation 
             <Text style={styles.inlineHighlight}>Enter</Text>. Você também pode rodar sem o{' '}
             <Text style={styles.inlineMono}>| bash</Text> antes, se quiser inspecionar o script.
           </Text>
-          <View style={styles.onboardingImageSlot}>
-            <Text style={styles.onboardingImageSlotTitle}>Espaço para imagem do Passo 4</Text>
-            <Text style={styles.onboardingImageSlotPath}>
-              assets/onboarding/step4-paste-command.png
-            </Text>
-          </View>
+          <TouchableOpacity
+            style={styles.stepScreenshotCard}
+            activeOpacity={0.85}
+            onPress={() =>
+              setPreviewStepImage({
+                title: 'Passo 4 — Executar comando no Cloud Shell',
+                source: ONBOARDING_STEP_IMAGES.pasteCommand,
+              })
+            }
+          >
+            <Image
+              source={ONBOARDING_STEP_IMAGES.pasteCommand}
+              style={styles.stepScreenshotImage}
+              resizeMode="contain"
+            />
+            <View style={styles.zoomOverlayBadge}>
+              <ZoomInIcon size={12} color="#93C5FD" />
+              <Text style={styles.zoomOverlayText}>Ampliar</Text>
+            </View>
+          </TouchableOpacity>
         </View>
 
         {/* PASSO 5: AGUARDANDO CONFIRMACAO EM TEMPO REAL */}
@@ -728,14 +868,17 @@ export const OciOnboardingScreen: React.FC<{ navigation: any }> = ({ navigation 
             <View style={styles.waitingStatusBox}>
               <ActivityIndicator size="small" color="#8AB4F8" />
               <Text style={styles.waitingStatusText}>
-                Aguardando você colar o comando...
+                Aguardando execução do comando no Cloud Shell...
               </Text>
             </View>
           )}
 
-          {currentStatus === 'CONNECTED' && pairingStatus && (
+          {(currentStatus === 'CONNECTED' ||
+            currentStatus === 'COMPLETED' ||
+            pairingStatus?.completed) &&
+            pairingStatus && (
             <View style={styles.connectedResultBox}>
-              <Text style={styles.connectedResultTitle}>✓ Conta Oracle Cloud conectada!</Text>
+              <Text style={styles.connectedResultTitle}>Conta Oracle Cloud conectada</Text>
               <View style={styles.connectedMetaGrid}>
                 <Text style={styles.connectedMetaLine}>
                   Tenancy: <Text style={styles.connectedMetaStrong}>{pairingStatus.tenancyName}</Text>
@@ -754,7 +897,7 @@ export const OciOnboardingScreen: React.FC<{ navigation: any }> = ({ navigation 
               {pairingStatus.permissionStatus === 'NO_PERMISSION' && (
                 <View style={styles.policyWarningBox}>
                   <Text style={styles.policyWarningTitle}>
-                    ⚠️ Falta permissão de leitura (IAM Policy)
+                    Falta permissão de leitura (IAM Policy)
                   </Text>
                   <Text style={styles.policyWarningText}>
                     A autenticação funcionou, mas seu usuário OCI ainda não tem permissão para
@@ -790,8 +933,8 @@ export const OciOnboardingScreen: React.FC<{ navigation: any }> = ({ navigation 
             <View style={styles.failedResultBox}>
               <Text style={styles.failedResultTitle}>
                 {currentStatus === 'EXPIRED'
-                  ? '⏱️ O comando de conexão expirou'
-                  : '❌ Não foi possível conectar a conta OCI'}
+                  ? 'O comando de conexão expirou'
+                  : 'Não foi possível conectar a conta OCI'}
               </Text>
               <Text style={styles.failedResultReason}>
                 {pairingStatus?.errorMessage ||
@@ -810,7 +953,10 @@ export const OciOnboardingScreen: React.FC<{ navigation: any }> = ({ navigation 
 
         {/* CAIXA: POR QUE ISSO E SEGURO? */}
         <View style={styles.securityInfoCard}>
-          <Text style={styles.securityInfoTitle}>🔒 Por que isso é seguro?</Text>
+          <View style={styles.securityInfoHeaderRow}>
+            <GovernanceIcon size={16} color="#8AB4F8" />
+            <Text style={styles.securityInfoTitle}>Por que isso é seguro?</Text>
+          </View>
           <Text style={styles.securityInfoBullet}>
             • O comando cria uma chave de API exclusiva para o aplicativo e apaga a chave local do
             Cloud Shell imediatamente ao terminar.
@@ -969,12 +1115,12 @@ export const OciOnboardingScreen: React.FC<{ navigation: any }> = ({ navigation 
               {manualSuccessInfo && (
                 <View style={styles.connectedResultBox}>
                   <Text style={styles.connectedResultTitle}>
-                    ✓ Credenciais verificadas na OCI e salvas com segurança!
+                    Credenciais verificadas na OCI e salvas com segurança
                   </Text>
                   {manualSuccessInfo.permissionStatus === 'NO_PERMISSION' && (
                     <View style={styles.policyWarningBox}>
                       <Text style={styles.policyWarningTitle}>
-                        ⚠️ Conta autenticada sem policies de leitura
+                        Conta autenticada sem policies de leitura
                       </Text>
                       <Text selectable style={styles.policyCodeBlock}>
                         {manualSuccessInfo.hint || READONLY_IAM_POLICIES}
@@ -1042,6 +1188,43 @@ export const OciOnboardingScreen: React.FC<{ navigation: any }> = ({ navigation 
           )}
         </View>
       </ScrollView>
+
+      {/* MODAL DE AMPLIACAO EM TELA CHEIA DAS CAPTURAS DO PASSO A PASSO */}
+      <Modal
+        visible={Boolean(previewStepImage)}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPreviewStepImage(null)}
+      >
+        <View style={styles.zoomModalBackdrop}>
+          <View style={styles.zoomModalHeader}>
+            <Text style={styles.zoomModalTitle} numberOfLines={2}>
+              {previewStepImage?.title}
+            </Text>
+            <TouchableOpacity
+              style={styles.zoomModalCloseBtn}
+              onPress={() => setPreviewStepImage(null)}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.zoomModalCloseText}>Fechar</Text>
+            </TouchableOpacity>
+          </View>
+
+          <TouchableOpacity
+            style={styles.zoomModalBody}
+            activeOpacity={1}
+            onPress={() => setPreviewStepImage(null)}
+          >
+            {previewStepImage && (
+              <Image
+                source={previewStepImage.source}
+                style={styles.zoomModalImage}
+                resizeMode="contain"
+              />
+            )}
+          </TouchableOpacity>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 };
@@ -1307,28 +1490,41 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     fontSize: 11,
   },
-  onboardingImageSlot: {
-    marginTop: 10,
-    height: 96,
-    borderRadius: 9,
+  stepScreenshotCard: {
+    marginTop: 12,
+    height: 160,
+    width: '100%',
+    borderRadius: 10,
     borderWidth: 1,
-    borderStyle: 'dashed',
-    borderColor: '#363E4C',
-    backgroundColor: '#11151B',
+    borderColor: '#282E38',
+    backgroundColor: '#0B0F17',
+    overflow: 'hidden',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 12,
+    position: 'relative',
   },
-  onboardingImageSlotTitle: {
-    color: '#9AA0A6',
-    fontSize: 11,
-    fontWeight: '700',
+  stepScreenshotImage: {
+    width: '100%',
+    height: '100%',
   },
-  onboardingImageSlotPath: {
-    color: '#5F6368',
+  zoomOverlayBadge: {
+    position: 'absolute',
+    right: 8,
+    bottom: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(11, 15, 23, 0.88)',
+    borderWidth: 1,
+    borderColor: '#2F3A4D',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  zoomOverlayText: {
+    color: '#93C5FD',
     fontSize: 10,
-    marginTop: 4,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontWeight: '700',
   },
   generateBtn: {
     backgroundColor: '#C74634',
@@ -1375,36 +1571,64 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
+  emailTargetCaption: {
+    marginTop: 8,
+    color: '#9AA0A6',
+    fontSize: 11,
+  },
+  emailTargetStrong: {
+    color: '#E8EAED',
+    fontWeight: '600',
+  },
   commandActionsRow: {
     flexDirection: 'row',
-    gap: 10,
+    gap: 8,
     marginTop: 10,
+    alignItems: 'center',
   },
   copyActionBtn: {
     flex: 1,
+    flexDirection: 'row',
+    gap: 6,
     backgroundColor: '#1A73E8',
     paddingVertical: 10,
+    paddingHorizontal: 10,
     borderRadius: 8,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   copyActionBtnText: {
     color: '#FFFFFF',
     fontSize: 12,
     fontWeight: '700',
   },
-  shareActionBtn: {
-    flex: 1,
-    backgroundColor: '#232832',
+  emailActionBtn: {
+    flex: 1.25,
+    flexDirection: 'row',
+    gap: 6,
+    backgroundColor: '#1F2937',
     borderWidth: 1,
-    borderColor: '#3C4043',
+    borderColor: '#334155',
     paddingVertical: 10,
+    paddingHorizontal: 10,
     borderRadius: 8,
     alignItems: 'center',
+    justifyContent: 'center',
   },
-  shareActionBtnText: {
+  emailActionBtnText: {
     color: '#E8EAED',
     fontSize: 12,
     fontWeight: '700',
+  },
+  shareIconOnlyBtn: {
+    width: 40,
+    height: 38,
+    backgroundColor: '#232832',
+    borderWidth: 1,
+    borderColor: '#3C4043',
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   waitingStatusBox: {
     flexDirection: 'row',
@@ -1547,11 +1771,58 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     gap: 6,
   },
+  securityInfoHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 2,
+  },
   securityInfoTitle: {
     color: '#8AB4F8',
     fontSize: 13,
     fontWeight: '700',
-    marginBottom: 2,
+  },
+  zoomModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(6, 9, 14, 0.94)',
+    paddingTop: Platform.OS === 'ios' ? 54 : 24,
+    paddingHorizontal: 14,
+    paddingBottom: 24,
+  },
+  zoomModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    marginBottom: 12,
+  },
+  zoomModalTitle: {
+    flex: 1,
+    color: '#E8EAED',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  zoomModalCloseBtn: {
+    backgroundColor: '#1F2937',
+    borderWidth: 1,
+    borderColor: '#374151',
+    borderRadius: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+  },
+  zoomModalCloseText: {
+    color: '#E8EAED',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  zoomModalBody: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  zoomModalImage: {
+    width: '100%',
+    height: '100%',
   },
   securityInfoBullet: {
     color: '#BDC1C6',

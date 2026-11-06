@@ -21,7 +21,7 @@ const { z } = require('zod');
 const crypto = require('crypto');
 const net = require('net');
 const os = require('os');
-const { exec } = require('child_process');
+const { exec, execFile } = require('child_process');
 const bcrypt = require('bcryptjs');
 const common = require('oci-common');
 const identity = require('oci-identity');
@@ -1048,7 +1048,6 @@ if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
   echo "$SERVER_MSG"
   echo ""
   echo "✅ Conectado com sucesso! Pode voltar ao aplicativo."
-  echo "✅ Conectado! Pode voltar ao app."
   exit 0
 else
   echo ""
@@ -1598,6 +1597,94 @@ app.get('/api/oci/pairing/:id/status', requireAuth, async (req, res) => {
     return res.status(500).json({
       success: false,
       error: 'Falha ao consultar status do pareamento.',
+    });
+  }
+});
+
+/**
+ * POST /api/oci/pairing/:id/email (requireAuth)
+ * Envia o comando temporario de pareamento OCI para o e-mail cadastrado do usuario autenticado,
+ * ou sinaliza fallbackMailto para abertura imediata do cliente de e-mail nativo no dispositivo.
+ */
+app.post('/api/oci/pairing/:id/email', requireAuth, pairingRateLimiter, async (req, res) => {
+  const sessionId = String(req.params.id || '').trim();
+  const commandText = String(req.body?.command || '').trim();
+
+  try {
+    const pairRes = await pool.query(
+      `SELECT id, status, expires_at
+       FROM oci_pairing_sessions
+       WHERE id = $1 AND user_id = $2
+       LIMIT 1;`,
+      [sessionId, req.user.id]
+    );
+
+    if (pairRes.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        code: 'PAIRING_SESSION_NOT_FOUND',
+        error: 'Sessão de pareamento não encontrada.',
+      });
+    }
+
+    const userRes = await pool.query(
+      `SELECT email, username FROM master_users WHERE id = $1 LIMIT 1;`,
+      [req.user.id]
+    );
+    const targetEmail = (userRes.rows[0]?.email || req.user.email || '').trim();
+
+    if (!targetEmail) {
+      return res.status(400).json({
+        success: false,
+        code: 'EMAIL_NOT_CONFIGURED',
+        error: 'Nenhum endereço de e-mail cadastrado para este usuário.',
+      });
+    }
+
+    const resendApiKey = (process.env.RESEND_API_KEY || '').trim();
+    const mailFrom = (process.env.SMTP_FROM_EMAIL || 'CloudWatch <onboarding@resend.dev>').trim();
+
+    if (resendApiKey && commandText) {
+      try {
+        const mailResp = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${resendApiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            from: mailFrom,
+            to: [targetEmail],
+            subject: 'Comando de Conexão OCI - CloudWatch',
+            text: `Abra o OCI Cloud Shell no computador e cole o comando abaixo:\n\n${commandText}\n\nEste comando é de uso único e expira em 10 minutos.`,
+          }),
+        });
+
+        if (mailResp.ok) {
+          return res.json({
+            success: true,
+            deliveredByServer: true,
+            fallbackMailto: false,
+            email: targetEmail,
+            message: `Comando enviado para ${targetEmail}.`,
+          });
+        }
+      } catch (_mailErr) {
+        // Fallback gracioso para mailto no cliente mobile
+      }
+    }
+
+    return res.json({
+      success: true,
+      deliveredByServer: false,
+      fallbackMailto: true,
+      email: targetEmail,
+    });
+  } catch (err) {
+    console.error('[BFF OCI Pairing Email] Erro:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Falha ao preparar envio do comando por e-mail.',
     });
   }
 });
@@ -2329,38 +2416,95 @@ function parseDockerPsOutput(stdout) {
     });
 }
 
-app.get('/api/telemetry/containers', requireAuth, (_req, res) => {
+function listHostDockerContainers() {
   const fmt = '{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}';
-  exec(`docker ps -a --format "${fmt}"`, { timeout: 2500 }, (err, stdout) => {
-    if (!err && stdout && stdout.trim()) {
-      const containers = parseDockerPsOutput(stdout);
-      return res.json({
-        success: true,
-        source: 'LIVE_OCI',
-        count: containers.length,
-        containers,
-      });
-    }
-
-    exec(`sudo -n docker ps -a --format "${fmt}"`, { timeout: 2500 }, (sudoErr, sudoStdout) => {
-      if (!sudoErr && sudoStdout && sudoStdout.trim()) {
-        const containers = parseDockerPsOutput(sudoStdout);
-        return res.json({
-          success: true,
-          source: 'LIVE_OCI',
-          count: containers.length,
-          containers,
-        });
+  return new Promise((resolve) => {
+    exec(`docker ps -a --format "${fmt}"`, { timeout: 3000 }, (err, stdout) => {
+      if (!err && stdout && stdout.trim()) {
+        return resolve(parseDockerPsOutput(stdout));
       }
 
-      return res.json({
-        success: true,
-        source: 'LIVE_OCI',
-        count: 0,
-        containers: [],
+      exec(`sudo -n docker ps -a --format "${fmt}"`, { timeout: 3000 }, (sudoErr, sudoStdout) => {
+        if (!sudoErr && sudoStdout && sudoStdout.trim()) {
+          return resolve(parseDockerPsOutput(sudoStdout));
+        }
+        return resolve([]);
       });
     });
   });
+}
+
+app.get('/api/telemetry/containers', requireAuth, async (_req, res) => {
+  const containers = await listHostDockerContainers();
+  return res.json({
+    success: true,
+    source: 'LIVE_OCI',
+    count: containers.length,
+    containers,
+  });
+});
+
+/**
+ * POST /api/telemetry/containers/:name/restart (requireAuth)
+ * Reinicia um container Docker real na VM OCI validando estritamente o nome contra command injection.
+ */
+const SAFE_CONTAINER_NAME_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
+
+function restartDockerContainerByName(containerName) {
+  return new Promise((resolve, reject) => {
+    execFile('docker', ['restart', containerName], { timeout: 12000 }, (err, stdout) => {
+      if (!err) {
+        return resolve(String(stdout || '').trim());
+      }
+
+      execFile(
+        'sudo',
+        ['-n', 'docker', 'restart', containerName],
+        { timeout: 12000 },
+        (sudoErr, sudoStdout, sudoStderr) => {
+          if (!sudoErr) {
+            return resolve(String(sudoStdout || '').trim());
+          }
+          const reason = String(sudoStderr || sudoErr.message || err.message || 'Falha ao reiniciar container.').trim();
+          return reject(new Error(reason));
+        }
+      );
+    });
+  });
+}
+
+app.post('/api/telemetry/containers/:name/restart', requireAuth, async (req, res) => {
+  const containerName = String(req.params.name || '').trim();
+
+  if (!SAFE_CONTAINER_NAME_REGEX.test(containerName)) {
+    return res.status(400).json({
+      success: false,
+      code: 'INVALID_CONTAINER_NAME',
+      error: 'Nome de container inválido. Permitido apenas caracteres alfanuméricos, hífen e underscore.',
+    });
+  }
+
+  try {
+    await restartDockerContainerByName(containerName);
+    invalidateUserOciCache(req.user.id);
+    const containers = await listHostDockerContainers();
+
+    return res.json({
+      success: true,
+      source: 'LIVE_OCI',
+      restarted: containerName,
+      count: containers.length,
+      containers,
+      message: `Container "${containerName}" reiniciado com sucesso.`,
+    });
+  } catch (err) {
+    console.error(`[BFF Docker Restart] Falha ao reiniciar "${containerName}":`, err.message);
+    return res.status(500).json({
+      success: false,
+      code: 'DOCKER_RESTART_FAILED',
+      error: `Não foi possível reiniciar o container "${containerName}": ${err.message}`,
+    });
+  }
 });
 
 /**

@@ -25,6 +25,7 @@ import { useAuth } from '../context/AuthContext';
 import { useCloud } from '../context/CloudContext';
 import { AppImage } from '../components/common/AppImage';
 import { CloudLogo } from '../components/common/CloudLogo';
+import { FingerprintIcon } from '../components/common/AppIcons';
 import { Toast } from '../components/common/Toast';
 import { CLOUD_PALETTES, NEUTRAL_THEME } from '../theme/tokens';
 import type { SupportedCloud } from '../types/auth';
@@ -40,6 +41,7 @@ export const SettingsScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
     linkCloudProvider,
     unlinkCloudProvider,
     logoutMaster,
+    revokeBiometricsOnDevice,
   } = useAuth();
 
   const { refreshMetrics } = useCloud();
@@ -153,7 +155,7 @@ export const SettingsScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
   const handleLogout = () => {
     Alert.alert(
       'Sair da Conta',
-      'Seu token de acesso e refresh token serão revogados no servidor e removidos do Keychain deste aparelho. Deseja sair?',
+      'Sua sessão ativa será encerrada, mantendo o vínculo biométrico neste aparelho para que você possa entrar novamente com sua digital. Deseja sair?',
       [
         { text: 'Cancelar', style: 'cancel' },
         {
@@ -161,6 +163,28 @@ export const SettingsScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
           style: 'destructive',
           onPress: async () => {
             await logoutMaster();
+          },
+        },
+      ]
+    );
+  };
+
+  const handleRevokeBiometrics = () => {
+    Alert.alert(
+      'Revogar Biometria neste Aparelho',
+      'Isso limpará o vínculo biométrico e o token persistente no Keychain local deste dispositivo. No próximo acesso será necessário digitar usuário e senha.',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Revogar Biometria',
+          style: 'destructive',
+          onPress: async () => {
+            const ok = await revokeBiometricsOnDevice();
+            if (ok) {
+              setToastMessage('Biometria revogada neste aparelho');
+            } else {
+              setToastMessage('Não foi possível limpar a biometria local');
+            }
           },
         },
       ]
@@ -577,6 +601,17 @@ export const SettingsScreen: React.FC<{ navigation: any }> = ({ navigation }) =>
             <Text style={styles.cacheButtonText}>Limpar Cache Local de Telemetria</Text>
           </TouchableOpacity>
 
+          <View style={{ height: 10 }} />
+
+          <TouchableOpacity
+            style={styles.revokeBioDeviceButton}
+            onPress={handleRevokeBiometrics}
+            activeOpacity={0.8}
+          >
+            <FingerprintIcon size={15} color="#FBBF24" />
+            <Text style={styles.revokeBioDeviceButtonText}>Revogar Biometria neste Aparelho</Text>
+          </TouchableOpacity>
+
           <View style={{ height: 12 }} />
 
           <TouchableOpacity
@@ -940,6 +975,22 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
     color: '#E8EAED',
+  },
+  revokeBioDeviceButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(245, 158, 11, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.35)',
+    borderRadius: 8,
+    paddingVertical: 11,
+  },
+  revokeBioDeviceButtonText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#FDE68A',
   },
   dangerButton: {
     backgroundColor: 'rgba(242, 139, 130, 0.1)',

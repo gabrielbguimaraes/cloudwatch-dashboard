@@ -545,8 +545,15 @@ async function runTests() {
     const scriptText = await scriptRead2.text();
     assert.ok(scriptText.includes('trap cleanup EXIT'), 'Script deve ter trap de limpeza das chaves');
     assert.ok(scriptText.includes('OCI_CS_USER_OCID'), 'Script deve checar contas federadas');
-    assert.ok(scriptText.includes('Conectado! Pode voltar ao app.'), 'Script deve imprimir mensagem final');
-    console.log('  ✓ Script bash inspecionável dentro do TTL com trap de limpeza validado.');
+    assert.ok(
+      scriptText.includes('Conectado com sucesso! Pode voltar ao aplicativo.'),
+      'Script deve imprimir mensagem final única'
+    );
+    assert.ok(
+      !scriptText.includes('Conectado! Pode voltar ao app.'),
+      'Script não deve imprimir segunda mensagem duplicada'
+    );
+    console.log('  ✓ Script bash inspecionável dentro do TTL com trap de limpeza e mensagem única validado.');
 
     // 5. Credenciais Invalidas Rejeitadas Sem Salvar Nada + Uso Unico do Codigo
     console.log('\n5. Verificando rejeição de credenciais inválidas (fingerprint errado e user inexistente) sem salvar nada:');
@@ -710,6 +717,24 @@ async function runTests() {
     } finally {
       ociModule.checkInstancePrincipalForTenancy = originalCheck;
     }
+
+    // 7. Segurança de Command Injection em POST /api/telemetry/containers/:name/restart e /api/oci/pairing/:id/email
+    console.log('\n7. Verificando proteção anti-Command Injection em Docker Restart:');
+    const injectionRes = await fetch(
+      `${baseUrl}/api/telemetry/containers/${encodeURIComponent('sidebrain_db;rm -rf /')}/restart`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${tokenA}` },
+      }
+    );
+    assert.strictEqual(
+      injectionRes.status,
+      400,
+      'Nome de container malicioso deve ser bloqueado com HTTP 400'
+    );
+    const injectionJson = await injectionRes.json();
+    assert.strictEqual(injectionJson.code, 'INVALID_CONTAINER_NAME');
+    console.log('  ✓ Bloqueio estrito de caracteres inválidos em /api/telemetry/containers/:name/restart aprovado.');
 
     console.log('\n==============================================================');
     console.log('✅ TODOS OS TESTES DE SEGURANÇA E OCI SDK PASSARAM COM SUCESSO!');

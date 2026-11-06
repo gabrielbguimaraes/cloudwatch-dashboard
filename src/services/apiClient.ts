@@ -65,7 +65,7 @@ export async function saveAuthTokens(accessToken: string, refreshToken: string):
  * Recupera os tokens armazenados no react-native-keychain
  */
 export async function getAuthTokens(): Promise<StoredTokens | null> {
-  if (memoryTokens && memoryTokens.accessToken && memoryTokens.refreshToken) {
+  if (memoryTokens && (memoryTokens.accessToken || memoryTokens.refreshToken)) {
     return memoryTokens;
   }
 
@@ -77,9 +77,13 @@ export async function getAuthTokens(): Promise<StoredTokens | null> {
 
     if (result && result.password) {
       const parsed = JSON.parse(result.password);
-      if (parsed && typeof parsed.accessToken === 'string' && typeof parsed.refreshToken === 'string') {
+      if (
+        parsed &&
+        typeof parsed.refreshToken === 'string' &&
+        (parsed.refreshToken.length > 0 || (typeof parsed.accessToken === 'string' && parsed.accessToken.length > 0))
+      ) {
         memoryTokens = {
-          accessToken: parsed.accessToken,
+          accessToken: typeof parsed.accessToken === 'string' ? parsed.accessToken : '',
           refreshToken: parsed.refreshToken,
         };
         return memoryTokens;
@@ -90,6 +94,49 @@ export async function getAuthTokens(): Promise<StoredTokens | null> {
   }
 
   return null;
+}
+
+/**
+ * Limpa apenas o accessToken volatil da sessao ativa, preservando o refreshToken
+ * no Keychain para permitir reautenticacao imediata via Biometria na tela de Login.
+ */
+export async function clearVolatileAccessToken(): Promise<void> {
+  const existing = await getAuthTokens();
+  const persistedRefresh = existing?.refreshToken || '';
+  memoryTokens = persistedRefresh ? { accessToken: '', refreshToken: persistedRefresh } : null;
+
+  if (persistedRefresh) {
+    try {
+      await Keychain.setGenericPassword(
+        JWT_KEYCHAIN_USERNAME,
+        JSON.stringify({ accessToken: '', refreshToken: persistedRefresh }),
+        {
+          service: JWT_KEYCHAIN_SERVICE,
+          storage: Keychain.STORAGE_TYPE.AES,
+          accessible: Keychain.ACCESSIBLE.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+        }
+      );
+    } catch (err) {
+      console.warn('[apiClient] Falha ao limpar accessToken volatil no Keychain:', err);
+    }
+  }
+}
+
+/**
+ * Remove os tokens persistidos no Keychain em disco mantendo apenas o accessToken
+ * volatil em RAM caso o usuario revogue a biometria enquanto ainda esta logado.
+ */
+export async function purgeKeychainForActiveSessionOnly(currentAccessToken: string): Promise<void> {
+  try {
+    await Keychain.resetGenericPassword({
+      service: JWT_KEYCHAIN_SERVICE,
+    });
+  } catch (err) {
+    console.warn('[apiClient] Falha ao remover tokens persistidos do Keychain:', err);
+  }
+  memoryTokens = currentAccessToken
+    ? { accessToken: currentAccessToken, refreshToken: '' }
+    : null;
 }
 
 /**

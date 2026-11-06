@@ -27,6 +27,11 @@ import {
 import { useCloud } from '../context/CloudContext';
 import { useAuth } from '../context/AuthContext';
 import { CloudLogo } from '../components/common/CloudLogo';
+import {
+  FileReportIcon,
+  MoreHorizontalIcon,
+  PinIcon,
+} from '../components/common/AppIcons';
 import { InstanceActionSheet } from '../components/InstanceActionSheet';
 import { SerialConsoleModal } from '../components/SerialConsoleModal';
 import { Toast } from '../components/common/Toast';
@@ -51,7 +56,6 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
     setSelectedResource,
     togglePin,
     isResourcePinned,
-    simulateLoadSpike,
     mitigateAnomaly,
     provisionInstance,
     deleteInstance,
@@ -436,8 +440,9 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
                   onPress={handleExportPdf}
                   activeOpacity={0.7}
                 >
+                  <FileReportIcon size={13} color="#93C5FD" />
                   <Text style={styles.pdfBtnText} numberOfLines={1}>
-                    PDF
+                    Relatório
                   </Text>
                 </TouchableOpacity>
               )}
@@ -538,7 +543,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
           </View>
         </View>
 
-        {/* Banner Compacto do Root-Cause Analyzer quando há anomalia crítica ativa */}
+        {/* Banner Compacto de Alerta Crítico */}
         {kpis.critical > 0 && orderedResources[0] && (
           <View
             style={[
@@ -550,28 +555,30 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
             ]}
           >
             <Text style={[styles.policyWarningTitle, { color: '#FCA5A5' }]}>
-              Diagnóstico de Causa Raiz (Risco de SLA &gt; 85%)
+              Alerta Operacional Crítico
             </Text>
             <Text style={styles.policyWarningBody}>
-              Sobrecarga crítica detectada em{' '}
+              Anomalia detectada em{' '}
               {orderedResources.find((r) => r.status === 'CRITICAL')?.name ||
                 orderedResources[0].name}
-              . Toque abaixo para drenar conexões órfãs e rebalancear workers automaticamente.
+              . Abra o diagnóstico para inspecionar containers, portas TCP e métricas.
             </Text>
             <View style={{ flexDirection: 'row', gap: 10 }}>
-              <TouchableOpacity
-                style={[styles.copyPolicyBtn, { backgroundColor: '#EF4444' }]}
-                onPress={() =>
-                  handleQuickMitigate(
-                    orderedResources.find((r) => r.status === 'CRITICAL')?.id ||
-                      orderedResources[0].id
-                  )
-                }
-              >
-                <Text style={[styles.copyPolicyBtnText, { color: '#FFF' }]}>
-                  Executar Mitigação Automática
-                </Text>
-              </TouchableOpacity>
+              {activeProvider !== 'OCI' && (
+                <TouchableOpacity
+                  style={[styles.copyPolicyBtn, { backgroundColor: '#EF4444' }]}
+                  onPress={() =>
+                    handleQuickMitigate(
+                      orderedResources.find((r) => r.status === 'CRITICAL')?.id ||
+                        orderedResources[0].id
+                    )
+                  }
+                >
+                  <Text style={[styles.copyPolicyBtnText, { color: '#FFF' }]}>
+                    Normalizar Instância
+                  </Text>
+                </TouchableOpacity>
+              )}
               <TouchableOpacity
                 style={styles.copyPolicyBtn}
                 onPress={() =>
@@ -613,7 +620,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
           <View style={styles.sectionHeaderRow}>
             <Text style={styles.sectionTitle}>
               {activeProvider === 'OCI'
-                ? `INSTÂNCIAS COMPUTE REAIS (${orderedResources.length})`
+                ? `INSTÂNCIAS COMPUTE (${orderedResources.length})`
                 : `INSTÂNCIAS ${activeProvider} (${orderedResources.length})`}
             </Text>
             {activeProvider !== 'OCI' ? (
@@ -691,8 +698,8 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
                     <View style={styles.cardHeaderLeft}>
                       <View style={[styles.statusDot, { backgroundColor: dotColor }]} />
                       <CloudLogo provider={resource.provider} size={16} />
+                      {pinned && <PinIcon size={13} color="#93C5FD" focused />}
                       <Text style={styles.cardTitle} numberOfLines={1}>
-                        {pinned ? '★ ' : ''}
                         {resource.name}
                       </Text>
                     </View>
@@ -714,7 +721,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
                         onPress={() => handleOpenActionSheet(resource)}
                         hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
                       >
-                        <Text style={styles.moreActionText}>•••</Text>
+                        <MoreHorizontalIcon size={16} color="#9AA0A6" />
                       </TouchableOpacity>
                     </View>
                   </View>
@@ -775,7 +782,7 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
         </View>
       </ScrollView>
 
-      {/* Bottom Sheet de Especificações Reais, Sondagem Zabbix e Ações Operacionais */}
+      {/* Menu Rápido de Ações da Instância */}
       <InstanceActionSheet
         visible={isActionSheetVisible}
         instance={selectedInstanceForAction}
@@ -783,7 +790,6 @@ export const DashboardScreen: React.FC<{ navigation: any }> = ({ navigation }) =
         onShowToast={(msg) => setToastMessage(msg)}
         onViewMetrics={(inst) => handleNavigateToMetrics(inst)}
         onOpenTerminal={(inst) => setTerminalInstance(inst)}
-        onStressTest={(id) => simulateLoadSpike(id)}
         onDelete={(id) => deleteInstance(id)}
         isPinned={
           selectedInstanceForAction
@@ -1111,6 +1117,9 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   pdfBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
     backgroundColor: '#1E3A5F',
     paddingHorizontal: 10,
     paddingVertical: 6,
